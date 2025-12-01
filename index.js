@@ -1,7 +1,11 @@
 const express = require("express");
-const app = express();
+const cors = require("cors");
 
+const app = express();
 const PORT = process.env.PORT || 3001;
+
+// Allow all origins for now (ok for prototype)
+app.use(cors());
 
 // Temporary in-memory services list (later this will come from a database)
 const services = [
