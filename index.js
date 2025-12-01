@@ -46,7 +46,7 @@ app.get("/api/services", async (req, res) => {
  * {
  *   "serviceId": 1,
  *   "startTime": "2025-12-05T18:00:00Z",
- *   "durationMinutes": 60,   // optional, will default to service duration
+ *   "durationMinutes": 60,   // optional, defaults to service duration
  *   "customerName": "Akef",
  *   "customerPhone": "+962...",
  *   "customerEmail": "you@example.com"
@@ -111,6 +111,64 @@ app.post("/api/bookings", async (req, res) => {
   } catch (err) {
     console.error("Error creating booking:", err);
     res.status(500).json({ error: "Failed to create booking" });
+  }
+});
+
+/**
+ * Update booking status
+ * POST /api/bookings/:id/status
+ * Body JSON: { "status": "confirmed" | "cancelled" | "pending" }
+ */
+app.post("/api/bookings/:id/status", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { status } = req.body;
+
+    const allowed = ["pending", "confirmed", "cancelled"];
+    if (!allowed.includes(status)) {
+      return res.status(400).json({ error: "Invalid status value" });
+    }
+
+    // Update the booking status
+    const updated = await db.query(
+      `
+      UPDATE bookings
+      SET status = $1
+      WHERE id = $2
+      RETURNING id;
+      `,
+      [status, id]
+    );
+
+    if (updated.rows.length === 0) {
+      return res.status(404).json({ error: "Booking not found" });
+    }
+
+    // Return the joined row so the frontend can update its table
+    const joined = await db.query(
+      `
+      SELECT
+        b.id,
+        b.start_time,
+        b.duration_minutes,
+        b.customer_name,
+        b.customer_phone,
+        b.customer_email,
+        b.status,
+        t.name  AS tenant,
+        s.name  AS service_name
+      FROM bookings b
+      JOIN tenants t ON b.tenant_id = t.id
+      JOIN services s ON b.service_id = s.id
+      WHERE b.id = $1;
+      `,
+      [id]
+    );
+
+    res.json({ booking: joined.rows[0] });
+  } catch (err) {
+    console.error("Error updating booking status:", err);
+    res.status(500).json({ error: "Failed to update status" });
   }
 });
 
