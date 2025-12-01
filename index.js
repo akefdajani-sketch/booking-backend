@@ -1,45 +1,40 @@
 const express = require("express");
 const cors = require("cors");
+const db = require("./db");
 
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-// Allow all origins for now (ok for prototype)
 app.use(cors());
 
-// Temporary in-memory services list (later this will come from a database)
-const services = [
-  {
-    id: 1,
-    tenant: "Salon Bella",
-    name: "Women's Haircut & Blow-dry",
-    durationMinutes: 60,
-    price: 35,
-  },
-  {
-    id: 2,
-    tenant: "Yoga Studio Flow",
-    name: "Evening Vinyasa Class",
-    durationMinutes: 75,
-    price: 12,
-  },
-  {
-    id: 3,
-    tenant: "Birdie Golf",
-    name: "60-min Simulator Session",
-    durationMinutes: 60,
-    price: 25,
-  },
-];
-
-// Health check (root)
+// Health check
 app.get("/", (req, res) => {
   res.json({ status: "ok", message: "Booking backend API is running" });
 });
 
-// New endpoint: list services
-app.get("/api/services", (req, res) => {
-  res.json({ services });
+// Services from Postgres
+app.get("/api/services", async (req, res) => {
+  try {
+    const result = await db.query(
+      `
+      SELECT
+        s.id,
+        t.name  AS tenant,
+        s.name  AS name,
+        s.duration_minutes,
+        s.price_jd
+      FROM services s
+      JOIN tenants t ON s.tenant_id = t.id
+      WHERE s.is_active = TRUE
+      ORDER BY t.name, s.name;
+      `
+    );
+
+    res.json({ services: result.rows });
+  } catch (err) {
+    console.error("Error querying services:", err);
+    res.status(500).json({ error: "Failed to load services" });
+  }
 });
 
 app.listen(PORT, () => {
