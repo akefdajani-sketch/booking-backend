@@ -122,6 +122,7 @@ app.post("/api/bookings", async (req, res) => {
       customerEmail,
     } = req.body;
 
+    // Basic validation
     if (!customerName || !startTime) {
       return res
         .status(400)
@@ -190,9 +191,39 @@ app.post("/api/bookings", async (req, res) => {
       });
     }
 
-    if (!duration) {
-      // Very last fallback – 60 minutes default
+    // Final safety for duration
+    if (!duration || duration <= 0) {
+      // very last fallback – 60 minutes default if something is off
       duration = 60;
+    }
+
+    // ---- NEW: conflict / double-booking check -----------------------------
+    //
+    // Only check when we have a specific service (sim/chair/class).
+    // Conflict rule: another non-cancelled booking for same tenant+service
+    // where time ranges overlap:
+    //   existing.start < newEnd AND existingEnd > newStart
+    //
+    if (tenantId && resolvedServiceId) {
+      const conflictResult = await db.query(
+        `
+        SELECT id, start_time, duration_minutes
+        FROM bookings
+        WHERE tenant_id = $1
+          AND service_id = $2
+          AND status <> 'cancelled'
+          AND start_time < ($3::timestamptz + make_interval(mins => $4::int))
+          AND (start_time + make_interval(mins => duration_minutes)) > $3::timestamptz
+        LIMIT 1;
+        `,
+        [tenantId, resolvedServiceId, startTime, duration]
+      );
+
+      if (conflictResult.rows.length > 0) {
+        return res.status(409).json({
+          error: "Time slot already booked for this service.",
+        });
+      }
     }
 
     // Insert booking with default status 'pending'
