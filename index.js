@@ -13,6 +13,29 @@ app.get("/", (req, res) => {
   res.json({ status: "ok", message: "Booking backend API is running" });
 });
 
+// List tenants (for owner UI / routing)
+app.get("/api/tenants", async (req, res) => {
+  try {
+    const result = await db.query(
+      `
+      SELECT
+        id,
+        slug,
+        name,
+        kind,
+        timezone,
+        created_at
+      FROM tenants
+      ORDER BY name;
+      `
+    );
+    res.json({ tenants: result.rows });
+  } catch (err) {
+    console.error("Error loading tenants:", err);
+    res.status(500).json({ error: "Failed to load tenants" });
+  }
+});
+
 // Services from Postgres
 app.get("/api/services", async (req, res) => {
   try {
@@ -156,6 +179,7 @@ app.post("/api/bookings/:id/status", async (req, res) => {
         b.customer_email,
         b.status,
         t.name  AS tenant,
+        t.slug  AS tenant_slug,
         s.name  AS service_name
       FROM bookings b
       JOIN tenants t ON b.tenant_id = t.id
@@ -175,10 +199,11 @@ app.post("/api/bookings/:id/status", async (req, res) => {
 /**
  * List bookings
  * GET /api/bookings?tenantId=1
+ * GET /api/bookings?tenantSlug=salon-bella
  */
 app.get("/api/bookings", async (req, res) => {
   try {
-    const { tenantId } = req.query;
+    const { tenantId, tenantSlug } = req.query;
 
     const params = [];
     let where = "";
@@ -186,6 +211,9 @@ app.get("/api/bookings", async (req, res) => {
     if (tenantId) {
       params.push(tenantId);
       where = "WHERE b.tenant_id = $1";
+    } else if (tenantSlug) {
+      params.push(tenantSlug);
+      where = "WHERE t.slug = $1";
     }
 
     const result = await db.query(
@@ -199,6 +227,7 @@ app.get("/api/bookings", async (req, res) => {
         b.customer_email,
         b.status,
         t.name  AS tenant,
+        t.slug  AS tenant_slug,
         s.name  AS service_name
       FROM bookings b
       JOIN tenants t ON b.tenant_id = t.id
