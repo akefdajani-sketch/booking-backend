@@ -6,7 +6,7 @@ const app = express();
 const PORT = process.env.PORT || 3001;
 
 app.use(cors());
-app.use(express.json()); // <-- allow JSON bodies
+app.use(express.json()); // allow JSON bodies
 
 // Health check
 app.get("/", (req, res) => {
@@ -20,6 +20,7 @@ app.get("/api/services", async (req, res) => {
       `
       SELECT
         s.id,
+        t.id    AS tenant_id,
         t.name  AS tenant,
         s.name  AS name,
         s.duration_minutes,
@@ -43,10 +44,9 @@ app.get("/api/services", async (req, res) => {
  * POST /api/bookings
  * Body JSON:
  * {
- *   "tenantId": 1,
  *   "serviceId": 1,
  *   "startTime": "2025-12-05T18:00:00Z",
- *   "durationMinutes": 60,
+ *   "durationMinutes": 60,   // optional, will default to service duration
  *   "customerName": "Akef",
  *   "customerPhone": "+962...",
  *   "customerEmail": "you@example.com"
@@ -55,7 +55,6 @@ app.get("/api/services", async (req, res) => {
 app.post("/api/bookings", async (req, res) => {
   try {
     const {
-      tenantId,
       serviceId,
       startTime,
       durationMinutes,
@@ -64,15 +63,25 @@ app.post("/api/bookings", async (req, res) => {
       customerEmail,
     } = req.body;
 
-    if (
-      !tenantId ||
-      !serviceId ||
-      !startTime ||
-      !durationMinutes ||
-      !customerName
-    ) {
+    if (!serviceId || !startTime || !customerName) {
       return res.status(400).json({ error: "Missing required fields" });
     }
+
+    // Look up the service to get tenant_id and default duration
+    const serviceResult = await db.query(
+      "SELECT tenant_id, duration_minutes FROM services WHERE id = $1",
+      [serviceId]
+    );
+
+    if (serviceResult.rows.length === 0) {
+      return res.status(400).json({ error: "Service not found" });
+    }
+
+    const serviceRow = serviceResult.rows[0];
+    const duration =
+      durationMinutes && Number(durationMinutes) > 0
+        ? durationMinutes
+        : serviceRow.duration_minutes;
 
     const insertResult = await db.query(
       `
@@ -88,10 +97,10 @@ app.post("/api/bookings", async (req, res) => {
       RETURNING *;
       `,
       [
-        tenantId,
+        serviceRow.tenant_id,
         serviceId,
         startTime,
-        durationMinutes,
+        duration,
         customerName,
         customerPhone || null,
         customerEmail || null,
@@ -106,7 +115,7 @@ app.post("/api/bookings", async (req, res) => {
 });
 
 /**
- * List bookings (basic, for now)
+ * List bookings
  * GET /api/bookings?tenantId=1
  */
 app.get("/api/bookings", async (req, res) => {
