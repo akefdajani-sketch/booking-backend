@@ -228,6 +228,7 @@ app.post("/api/bookings", async (req, res) => {
       `
       SELECT
         b.id,
+        b.service_id,
         b.start_time,
         b.duration_minutes,
         b.customer_name,
@@ -287,6 +288,7 @@ app.post("/api/bookings/:id/status", async (req, res) => {
       `
       SELECT
         b.id,
+        b.service_id,
         b.start_time,
         b.duration_minutes,
         b.customer_name,
@@ -335,6 +337,7 @@ app.get("/api/bookings", async (req, res) => {
       `
       SELECT
         b.id,
+        b.service_id,
         b.start_time,
         b.duration_minutes,
         b.customer_name,
