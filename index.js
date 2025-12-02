@@ -23,10 +23,9 @@ app.get("/", (req, res) => {
 
 async function getTenantIdFromSlug(tenantSlug) {
   if (!tenantSlug) return null;
-  const tRes = await db.query(
-    "SELECT id FROM tenants WHERE slug = $1",
-    [tenantSlug]
-  );
+  const tRes = await db.query("SELECT id FROM tenants WHERE slug = $1", [
+    tenantSlug,
+  ]);
   if (tRes.rows.length === 0) return null;
   return tRes.rows[0].id;
 }
@@ -76,8 +75,9 @@ async function checkConflicts({
   const dur = durationMinutes || 60;
 
   // For overlap: existing.start < newEnd AND (existing.start + existing.dur) > newStart
-  const endExpr = `b.start_time + (COALESCE(b.duration_minutes, 60) || ' minutes')::interval`;
-  const newEndExpr = `($2::timestamptz + ($3 || ' minutes')::interval)`;
+  const endExpr =
+    "b.start_time + (COALESCE(b.duration_minutes, 60) || ' minutes')::interval";
+  const newEndExpr = "($2::timestamptz + ($3 || ' minutes')::interval)";
 
   if (staffId) {
     const qs = `
@@ -157,13 +157,23 @@ app.get("/api/services", async (req, res) => {
     const { tenantSlug, tenantId } = req.query;
     let where = "";
     const params = [];
+    let idx = 1;
 
     if (tenantId) {
       params.push(Number(tenantId));
-      where = "WHERE s.tenant_id = $1";
+      where = `WHERE s.tenant_id = $${idx}`;
+      idx++;
     } else if (tenantSlug) {
       params.push(tenantSlug);
-      where = "WHERE t.slug = $1";
+      where = `WHERE t.slug = $${idx}`;
+      idx++;
+    }
+
+    // only active services
+    if (where) {
+      where += " AND s.is_active = TRUE";
+    } else {
+      where = "WHERE s.is_active = TRUE";
     }
 
     const q = `
@@ -279,6 +289,37 @@ app.post("/api/services", async (req, res) => {
   }
 });
 
+// DELETE /api/services/:id  (soft delete)
+app.delete("/api/services/:id", async (req, res) => {
+  const id = Number(req.params.id);
+  if (!id) {
+    return res.status(400).json({ error: "Invalid service id." });
+  }
+
+  try {
+    const result = await db.query(
+      `
+      UPDATE services
+      SET is_active = FALSE
+      WHERE id = $1
+      RETURNING id;
+      `,
+      [id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: "Service not found." });
+    }
+
+    return res.json({ success: true });
+  } catch (err) {
+    console.error("Error deleting service:", err);
+    return res
+      .status(500)
+      .json({ error: err.message || "Failed to delete service" });
+  }
+});
+
 // ---------------------------------------------------------------------------
 // Staff
 // ---------------------------------------------------------------------------
@@ -289,13 +330,23 @@ app.get("/api/staff", async (req, res) => {
     const { tenantSlug, tenantId } = req.query;
     let where = "";
     const params = [];
+    let idx = 1;
 
     if (tenantId) {
       params.push(Number(tenantId));
-      where = "WHERE s.tenant_id = $1";
+      where = `WHERE s.tenant_id = $${idx}`;
+      idx++;
     } else if (tenantSlug) {
       params.push(tenantSlug);
-      where = "WHERE t.slug = $1";
+      where = `WHERE t.slug = $${idx}`;
+      idx++;
+    }
+
+    // only active staff
+    if (where) {
+      where += " AND s.is_active = TRUE";
+    } else {
+      where = "WHERE s.is_active = TRUE";
     }
 
     const q = `
@@ -382,6 +433,37 @@ app.post("/api/staff", async (req, res) => {
   }
 });
 
+// DELETE /api/staff/:id  (soft delete)
+app.delete("/api/staff/:id", async (req, res) => {
+  const id = Number(req.params.id);
+  if (!id) {
+    return res.status(400).json({ error: "Invalid staff id." });
+  }
+
+  try {
+    const result = await db.query(
+      `
+      UPDATE staff
+      SET is_active = FALSE
+      WHERE id = $1
+      RETURNING id;
+      `,
+      [id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: "Staff not found." });
+    }
+
+    return res.json({ success: true });
+  } catch (err) {
+    console.error("Error deleting staff:", err);
+    return res
+      .status(500)
+      .json({ error: err.message || "Failed to delete staff" });
+  }
+});
+
 // ---------------------------------------------------------------------------
 // Resources
 // ---------------------------------------------------------------------------
@@ -392,13 +474,23 @@ app.get("/api/resources", async (req, res) => {
     const { tenantSlug, tenantId } = req.query;
     let where = "";
     const params = [];
+    let idx = 1;
 
     if (tenantId) {
       params.push(Number(tenantId));
-      where = "WHERE r.tenant_id = $1";
+      where = `WHERE r.tenant_id = $${idx}`;
+      idx++;
     } else if (tenantSlug) {
       params.push(tenantSlug);
-      where = "WHERE t.slug = $1";
+      where = `WHERE t.slug = $${idx}`;
+      idx++;
+    }
+
+    // only active resources
+    if (where) {
+      where += " AND r.is_active = TRUE";
+    } else {
+      where = "WHERE r.is_active = TRUE";
     }
 
     const q = `
@@ -482,6 +574,37 @@ app.post("/api/resources", async (req, res) => {
   } catch (err) {
     console.error("Error creating resource:", err);
     res.status(500).json({ error: "Failed to create resource" });
+  }
+});
+
+// DELETE /api/resources/:id  (soft delete)
+app.delete("/api/resources/:id", async (req, res) => {
+  const id = Number(req.params.id);
+  if (!id) {
+    return res.status(400).json({ error: "Invalid resource id." });
+  }
+
+  try {
+    const result = await db.query(
+      `
+      UPDATE resources
+      SET is_active = FALSE
+      WHERE id = $1
+      RETURNING id;
+      `,
+      [id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: "Resource not found." });
+    }
+
+    return res.json({ success: true });
+  } catch (err) {
+    console.error("Error deleting resource:", err);
+    return res
+      .status(500)
+      .json({ error: err.message || "Failed to delete resource" });
   }
 });
 
@@ -617,9 +740,9 @@ app.post("/api/bookings", async (req, res) => {
     }
 
     if (!resolvedTenantId) {
-      return res
-        .status(400)
-        .json({ error: "You must provide tenantSlug or tenantId or serviceId." });
+      return res.status(400).json({
+        error: "You must provide tenantSlug or tenantId or serviceId.",
+      });
     }
 
     const start = new Date(startTime);
