@@ -639,12 +639,10 @@ app.get("/api/customers", async (req, res) => {
         name,
         phone,
         email,
-        notes,
-        created_at,
-        updated_at
+        notes
       FROM customers
       WHERE tenant_id = $1
-      ORDER BY created_at DESC
+      ORDER BY id DESC
       `,
       [resolvedTenantId]
     );
@@ -713,8 +711,7 @@ app.post("/api/customers", async (req, res) => {
           UPDATE customers
           SET
             name = $1,
-            notes = $2,
-            updated_at = NOW()
+            notes = $2
           WHERE id = $3
           RETURNING *
           `,
@@ -994,11 +991,11 @@ app.post("/api/bookings", async (req, res) => {
             ]
           );
         } else {
-          // Optional: keep name fresh
+          // Optional: keep name fresh (no updated_at column in your table)
           await db.query(
             `
             UPDATE customers
-            SET name = $1, updated_at = NOW()
+            SET name = $1
             WHERE id = $2
             `,
             [customerName.trim(), existingRes.rows[0].id]
