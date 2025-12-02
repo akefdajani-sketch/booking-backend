@@ -37,7 +37,7 @@ async function loadJoinedBookingById(id) {
       b.id,
       b.tenant_id,
       t.slug          AS tenant_slug,
-      t.name          AS tenant,
+      t.name          AS tenant_name,
       b.service_id,
       s.name          AS service_name,
       b.staff_id,
@@ -51,17 +51,17 @@ async function loadJoinedBookingById(id) {
       b.customer_email,
       b.status
     FROM bookings b
-    JOIN tenants t ON b.tenant_id = t.id
+    JOIN tenants t   ON b.tenant_id   = t.id
     LEFT JOIN services  s  ON b.service_id  = s.id
     LEFT JOIN staff     st ON b.staff_id    = st.id
     LEFT JOIN resources r  ON b.resource_id = r.id
     WHERE b.id = $1
   `;
-  const result = await db.query(q, [id]);
-  return result.rows[0] || null;
+  const res = await db.query(q, [id]);
+  return res.rows[0] || null;
 }
 
-// conflict check: overlapping time for same staff or same resource
+// Check for conflicts by staff / resource
 async function checkConflicts({
   tenantId,
   staffId,
@@ -77,7 +77,7 @@ async function checkConflicts({
   // For overlap: existing.start < newEnd AND (existing.start + existing.dur) > newStart
   const endExpr =
     "b.start_time + (COALESCE(b.duration_minutes, 60) || ' minutes')::interval";
-  const newEndExpr = "($2::timestamptz + ($3 || ' minutes')::interval)";
+  const newEndExpr = `$2::timestamptz + ($3 || ' minutes')::interval`;
 
   if (staffId) {
     const qs = `
@@ -105,7 +105,7 @@ async function checkConflicts({
       WHERE
         b.tenant_id = $1
         AND b.resource_id = $4
-        AND b.status <> 'cancelled'
+        AND b.status NOT IN ('cancelled','deleted')
         AND b.start_time < ${newEndExpr}
         AND ${endExpr} > $2::timestamptz
       ORDER BY b.start_time ASC
@@ -129,13 +129,7 @@ app.get("/api/tenants", async (req, res) => {
   try {
     const result = await db.query(
       `
-      SELECT
-        id,
-        slug,
-        name,
-        kind,
-        timezone,
-        created_at
+      SELECT id, slug, name, type
       FROM tenants
       ORDER BY name ASC
       `
@@ -155,46 +149,25 @@ app.get("/api/tenants", async (req, res) => {
 app.get("/api/services", async (req, res) => {
   try {
     const { tenantSlug, tenantId } = req.query;
-    let where = "";
-    const params = [];
-    let idx = 1;
 
-    if (tenantId) {
-      params.push(Number(tenantId));
-      where = `WHERE s.tenant_id = $${idx}`;
-      idx++;
-    } else if (tenantSlug) {
-      params.push(tenantSlug);
-      where = `WHERE t.slug = $${idx}`;
-      idx++;
+    let resolvedTenantId = tenantId ? Number(tenantId) : null;
+    if (!resolvedTenantId && tenantSlug) {
+      resolvedTenantId = await getTenantIdFromSlug(tenantSlug);
+    }
+    if (!resolvedTenantId) {
+      return res.status(400).json({ error: "Missing tenantSlug or tenantId" });
     }
 
-    // only active services
-    if (where) {
-      where += " AND s.is_active = TRUE";
-    } else {
-      where = "WHERE s.is_active = TRUE";
-    }
-
-    const q = `
-      SELECT
-        s.id,
-        s.tenant_id,
-        t.slug   AS tenant_slug,
-        t.name   AS tenant,
-        s.name,
-        s.duration_minutes,
-        s.price_jd,
-        s.requires_staff,
-        s.requires_resource,
-        s.is_active
-      FROM services s
-      JOIN tenants t ON s.tenant_id = t.id
-      ${where}
-      ORDER BY t.name ASC, s.name ASC
-    `;
-
-    const result = await db.query(q, params);
+    const result = await db.query(
+      `
+      SELECT id, tenant_id, name, duration_minutes, price_jd,
+             needs_staff, needs_resource
+      FROM services
+      WHERE tenant_id = $1 AND deleted_at IS NULL
+      ORDER BY id ASC
+      `,
+      [resolvedTenantId]
+    );
     res.json({ services: result.rows });
   } catch (err) {
     console.error("Error loading services:", err);
@@ -203,7 +176,6 @@ app.get("/api/services", async (req, res) => {
 });
 
 // POST /api/services
-// Body: { tenantSlug?, tenantId?, name, durationMinutes?, priceJd?, requiresStaff?, requiresResource? }
 app.post("/api/services", async (req, res) => {
   try {
     const {
@@ -212,77 +184,41 @@ app.post("/api/services", async (req, res) => {
       name,
       durationMinutes,
       priceJd,
-      requiresStaff,
-      requiresResource,
+      needsStaff,
+      needsResource,
     } = req.body;
 
-    if (!name || !name.trim()) {
-      return res.status(400).json({ error: "Service name is required." });
-    }
-
-    let resolvedTenantId = tenantId || null;
-
+    let resolvedTenantId = tenantId ? Number(tenantId) : null;
     if (!resolvedTenantId && tenantSlug) {
       resolvedTenantId = await getTenantIdFromSlug(tenantSlug);
-      if (!resolvedTenantId) {
-        return res.status(400).json({ error: "Unknown tenantSlug." });
-      }
     }
-
     if (!resolvedTenantId) {
-      return res
-        .status(400)
-        .json({ error: "You must provide tenantSlug or tenantId." });
+      return res.status(400).json({ error: "Missing tenantSlug or tenantId" });
     }
 
-    const dur =
-      durationMinutes && Number(durationMinutes) > 0
-        ? Number(durationMinutes)
-        : null;
-    const price =
-      typeof priceJd === "number"
-        ? priceJd
-        : priceJd && Number(priceJd) >= 0
-        ? Number(priceJd)
-        : null;
+    if (!name || !durationMinutes) {
+      return res.status(400).json({ error: "Missing name or duration." });
+    }
 
-    const reqStaff = !!requiresStaff;
-    const reqResource = !!requiresResource;
-
-    const insert = await db.query(
+    const result = await db.query(
       `
       INSERT INTO services
-        (tenant_id, name, duration_minutes, price_jd, is_active, requires_staff, requires_resource)
+        (tenant_id, name, duration_minutes, price_jd, needs_staff, needs_resource)
       VALUES
-        ($1, $2, $3, $4, TRUE, $5, $6)
-      RETURNING id, tenant_id, name, duration_minutes, price_jd, requires_staff, requires_resource;
+        ($1, $2, $3, $4, $5, $6)
+      RETURNING id, tenant_id, name, duration_minutes, price_jd, needs_staff, needs_resource
       `,
-      [resolvedTenantId, name.trim(), dur, price, reqStaff, reqResource]
+      [
+        resolvedTenantId,
+        name,
+        durationMinutes,
+        priceJd || 0,
+        !!needsStaff,
+        !!needsResource,
+      ]
     );
 
-    const row = insert.rows[0];
-
-    const joined = await db.query(
-      `
-      SELECT
-        s.id,
-        s.tenant_id,
-        t.slug   AS tenant_slug,
-        t.name   AS tenant,
-        s.name,
-        s.duration_minutes,
-        s.price_jd,
-        s.requires_staff,
-        s.requires_resource,
-        s.is_active
-      FROM services s
-      JOIN tenants t ON s.tenant_id = t.id
-      WHERE s.id = $1;
-      `,
-      [row.id]
-    );
-
-    res.status(201).json({ service: joined.rows[0] });
+    res.status(201).json({ service: result.rows[0] });
   } catch (err) {
     console.error("Error creating service:", err);
     res.status(500).json({ error: "Failed to create service" });
@@ -297,26 +233,18 @@ app.delete("/api/services/:id", async (req, res) => {
   }
 
   try {
-    const result = await db.query(
+    await db.query(
       `
       UPDATE services
-      SET is_active = FALSE
+      SET deleted_at = NOW()
       WHERE id = $1
-      RETURNING id;
       `,
       [id]
     );
-
-    if (result.rows.length === 0) {
-      return res.status(404).json({ error: "Service not found." });
-    }
-
-    return res.json({ success: true });
+    res.json({ success: true });
   } catch (err) {
     console.error("Error deleting service:", err);
-    return res
-      .status(500)
-      .json({ error: err.message || "Failed to delete service" });
+    res.status(500).json({ error: "Failed to delete service" });
   }
 });
 
@@ -328,43 +256,24 @@ app.delete("/api/services/:id", async (req, res) => {
 app.get("/api/staff", async (req, res) => {
   try {
     const { tenantSlug, tenantId } = req.query;
-    let where = "";
-    const params = [];
-    let idx = 1;
 
-    if (tenantId) {
-      params.push(Number(tenantId));
-      where = `WHERE s.tenant_id = $${idx}`;
-      idx++;
-    } else if (tenantSlug) {
-      params.push(tenantSlug);
-      where = `WHERE t.slug = $${idx}`;
-      idx++;
+    let resolvedTenantId = tenantId ? Number(tenantId) : null;
+    if (!resolvedTenantId && tenantSlug) {
+      resolvedTenantId = await getTenantIdFromSlug(tenantSlug);
+    }
+    if (!resolvedTenantId) {
+      return res.status(400).json({ error: "Missing tenantSlug or tenantId" });
     }
 
-    // only active staff
-    if (where) {
-      where += " AND s.is_active = TRUE";
-    } else {
-      where = "WHERE s.is_active = TRUE";
-    }
-
-    const q = `
-      SELECT
-        s.id,
-        s.tenant_id,
-        t.slug AS tenant_slug,
-        t.name AS tenant,
-        s.name,
-        s.role,
-        s.is_active,
-        s.created_at
-      FROM staff s
-      JOIN tenants t ON s.tenant_id = t.id
-      ${where}
-      ORDER BY t.name ASC, s.name ASC
-    `;
-    const result = await db.query(q, params);
+    const result = await db.query(
+      `
+      SELECT id, tenant_id, name, role
+      FROM staff
+      WHERE tenant_id = $1 AND deleted_at IS NULL
+      ORDER BY id ASC
+      `,
+      [resolvedTenantId]
+    );
     res.json({ staff: result.rows });
   } catch (err) {
     console.error("Error loading staff:", err);
@@ -373,60 +282,32 @@ app.get("/api/staff", async (req, res) => {
 });
 
 // POST /api/staff
-// Body: { tenantSlug?, tenantId?, name, role? }
 app.post("/api/staff", async (req, res) => {
   try {
     const { tenantSlug, tenantId, name, role } = req.body;
 
-    if (!name || !name.trim()) {
-      return res.status(400).json({ error: "Staff name is required." });
-    }
-
-    let resolvedTenantId = tenantId || null;
-
+    let resolvedTenantId = tenantId ? Number(tenantId) : null;
     if (!resolvedTenantId && tenantSlug) {
       resolvedTenantId = await getTenantIdFromSlug(tenantSlug);
-      if (!resolvedTenantId) {
-        return res.status(400).json({ error: "Unknown tenantSlug." });
-      }
     }
-
     if (!resolvedTenantId) {
-      return res
-        .status(400)
-        .json({ error: "You must provide tenantSlug or tenantId." });
+      return res.status(400).json({ error: "Missing tenantSlug or tenantId" });
     }
 
-    const insert = await db.query(
+    if (!name) {
+      return res.status(400).json({ error: "Missing staff name." });
+    }
+
+    const result = await db.query(
       `
-      INSERT INTO staff (tenant_id, name, role, is_active)
-      VALUES ($1, $2, $3, TRUE)
-      RETURNING id, tenant_id, name, role, is_active, created_at;
+      INSERT INTO staff (tenant_id, name, role)
+      VALUES ($1, $2, $3)
+      RETURNING id, tenant_id, name, role
       `,
-      [resolvedTenantId, name.trim(), role ? String(role).trim() : null]
+      [resolvedTenantId, name, role || null]
     );
 
-    const row = insert.rows[0];
-
-    const joined = await db.query(
-      `
-      SELECT
-        s.id,
-        s.tenant_id,
-        t.slug AS tenant_slug,
-        t.name AS tenant,
-        s.name,
-        s.role,
-        s.is_active,
-        s.created_at
-      FROM staff s
-      JOIN tenants t ON s.tenant_id = t.id
-      WHERE s.id = $1;
-      `,
-      [row.id]
-    );
-
-    res.status(201).json({ staff: joined.rows[0] });
+    res.status(201).json({ staff: result.rows[0] });
   } catch (err) {
     console.error("Error creating staff:", err);
     res.status(500).json({ error: "Failed to create staff" });
@@ -441,26 +322,18 @@ app.delete("/api/staff/:id", async (req, res) => {
   }
 
   try {
-    const result = await db.query(
+    await db.query(
       `
       UPDATE staff
-      SET is_active = FALSE
+      SET deleted_at = NOW()
       WHERE id = $1
-      RETURNING id;
       `,
       [id]
     );
-
-    if (result.rows.length === 0) {
-      return res.status(404).json({ error: "Staff not found." });
-    }
-
-    return res.json({ success: true });
+    res.json({ success: true });
   } catch (err) {
     console.error("Error deleting staff:", err);
-    return res
-      .status(500)
-      .json({ error: err.message || "Failed to delete staff" });
+    res.status(500).json({ error: "Failed to delete staff" });
   }
 });
 
@@ -472,43 +345,24 @@ app.delete("/api/staff/:id", async (req, res) => {
 app.get("/api/resources", async (req, res) => {
   try {
     const { tenantSlug, tenantId } = req.query;
-    let where = "";
-    const params = [];
-    let idx = 1;
 
-    if (tenantId) {
-      params.push(Number(tenantId));
-      where = `WHERE r.tenant_id = $${idx}`;
-      idx++;
-    } else if (tenantSlug) {
-      params.push(tenantSlug);
-      where = `WHERE t.slug = $${idx}`;
-      idx++;
+    let resolvedTenantId = tenantId ? Number(tenantId) : null;
+    if (!resolvedTenantId && tenantSlug) {
+      resolvedTenantId = await getTenantIdFromSlug(tenantSlug);
+    }
+    if (!resolvedTenantId) {
+      return res.status(400).json({ error: "Missing tenantSlug or tenantId" });
     }
 
-    // only active resources
-    if (where) {
-      where += " AND r.is_active = TRUE";
-    } else {
-      where = "WHERE r.is_active = TRUE";
-    }
-
-    const q = `
-      SELECT
-        r.id,
-        r.tenant_id,
-        t.slug AS tenant_slug,
-        t.name AS tenant,
-        r.name,
-        r.type,
-        r.is_active,
-        r.created_at
-      FROM resources r
-      JOIN tenants t ON r.tenant_id = t.id
-      ${where}
-      ORDER BY t.name ASC, r.name ASC
-    `;
-    const result = await db.query(q, params);
+    const result = await db.query(
+      `
+      SELECT id, tenant_id, name, type
+      FROM resources
+      WHERE tenant_id = $1 AND deleted_at IS NULL
+      ORDER BY id ASC
+      `,
+      [resolvedTenantId]
+    );
     res.json({ resources: result.rows });
   } catch (err) {
     console.error("Error loading resources:", err);
@@ -517,60 +371,32 @@ app.get("/api/resources", async (req, res) => {
 });
 
 // POST /api/resources
-// Body: { tenantSlug?, tenantId?, name, type? }
 app.post("/api/resources", async (req, res) => {
   try {
     const { tenantSlug, tenantId, name, type } = req.body;
 
-    if (!name || !name.trim()) {
-      return res.status(400).json({ error: "Resource name is required." });
-    }
-
-    let resolvedTenantId = tenantId || null;
-
+    let resolvedTenantId = tenantId ? Number(tenantId) : null;
     if (!resolvedTenantId && tenantSlug) {
       resolvedTenantId = await getTenantIdFromSlug(tenantSlug);
-      if (!resolvedTenantId) {
-        return res.status(400).json({ error: "Unknown tenantSlug." });
-      }
     }
-
     if (!resolvedTenantId) {
-      return res
-        .status(400)
-        .json({ error: "You must provide tenantSlug or tenantId." });
+      return res.status(400).json({ error: "Missing tenantSlug or tenantId" });
     }
 
-    const insert = await db.query(
+    if (!name) {
+      return res.status(400).json({ error: "Missing resource name." });
+    }
+
+    const result = await db.query(
       `
-      INSERT INTO resources (tenant_id, name, type, is_active)
-      VALUES ($1, $2, $3, TRUE)
-      RETURNING id, tenant_id, name, type, is_active, created_at;
+      INSERT INTO resources (tenant_id, name, type)
+      VALUES ($1, $2, $3)
+      RETURNING id, tenant_id, name, type
       `,
-      [resolvedTenantId, name.trim(), type ? String(type).trim() : null]
+      [resolvedTenantId, name, type || null]
     );
 
-    const row = insert.rows[0];
-
-    const joined = await db.query(
-      `
-      SELECT
-        r.id,
-        r.tenant_id,
-        t.slug AS tenant_slug,
-        t.name AS tenant,
-        r.name,
-        r.type,
-        r.is_active,
-        r.created_at
-      FROM resources r
-      JOIN tenants t ON r.tenant_id = t.id
-      WHERE r.id = $1;
-      `,
-      [row.id]
-    );
-
-    res.status(201).json({ resource: joined.rows[0] });
+    res.status(201).json({ resource: result.rows[0] });
   } catch (err) {
     console.error("Error creating resource:", err);
     res.status(500).json({ error: "Failed to create resource" });
@@ -585,26 +411,18 @@ app.delete("/api/resources/:id", async (req, res) => {
   }
 
   try {
-    const result = await db.query(
+    await db.query(
       `
       UPDATE resources
-      SET is_active = FALSE
+      SET deleted_at = NOW()
       WHERE id = $1
-      RETURNING id;
       `,
       [id]
     );
-
-    if (result.rows.length === 0) {
-      return res.status(404).json({ error: "Resource not found." });
-    }
-
-    return res.json({ success: true });
+    res.json({ success: true });
   } catch (err) {
     console.error("Error deleting resource:", err);
-    return res
-      .status(500)
-      .json({ error: err.message || "Failed to delete resource" });
+    res.status(500).json({ error: "Failed to delete resource" });
   }
 });
 
@@ -626,12 +444,10 @@ app.get("/api/customers", async (req, res) => {
     }
 
     if (!resolvedTenantId) {
-      return res
-        .status(400)
-        .json({ error: "You must provide tenantSlug or tenantId." });
+      return res.status(400).json({ error: "Missing tenantSlug or tenantId." });
     }
 
-    const customersRes = await db.query(
+    const result = await db.query(
       `
       SELECT
         id,
@@ -649,15 +465,14 @@ app.get("/api/customers", async (req, res) => {
       [resolvedTenantId]
     );
 
-    res.json({ customers: customersRes.rows });
+    res.json({ customers: result.rows });
   } catch (err) {
     console.error("Error loading customers:", err);
-    res.status(500).json({ error: "Failed to load customers." });
+    res.status(500).json({ error: "Failed to load customers" });
   }
 });
 
 // POST /api/customers
-// Body: { tenantSlug?, tenantId?, name, phone?, email?, notes? }
 app.post("/api/customers", async (req, res) => {
   try {
     const { tenantSlug, tenantId, name, phone, email, notes } = req.body || {};
@@ -673,25 +488,20 @@ app.post("/api/customers", async (req, res) => {
         return res.status(400).json({ error: "Unknown tenantSlug." });
       }
     }
-
     if (!resolvedTenantId) {
-      return res
-        .status(400)
-        .json({ error: "You must provide tenantSlug or tenantId." });
+      return res.status(400).json({ error: "Missing tenantSlug or tenantId." });
     }
 
-    // Try to find an existing customer by phone/email
     let existing = null;
+
     if (phone || email) {
       const existingRes = await db.query(
         `
         SELECT *
         FROM customers
         WHERE tenant_id = $1
-          AND (
-            ($2 IS NOT NULL AND phone = $2) OR
-            ($3 IS NOT NULL AND email = $3)
-          )
+          AND (phone = $2 OR email = $3)
+        ORDER BY created_at DESC
         LIMIT 1
         `,
         [resolvedTenantId, phone || null, email || null]
@@ -741,31 +551,43 @@ app.post("/api/customers", async (req, res) => {
     console.error("Error creating customer:", err);
     res.status(500).json({ error: "Failed to create customer." });
   }
+}
+
+// DELETE /api/customers/:id
+app.delete("/api/customers/:id", async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!id) {
+      return res.status(400).json({ error: "Invalid customer id." });
+    }
+
+    await db.query("DELETE FROM customers WHERE id = $1", [id]);
+    res.json({ success: true });
+  } catch (err) {
+    console.error("Error deleting customer:", err);
+    res.status(500).json({ error: "Failed to delete customer" });
+  }
 });
 
 // ---------------------------------------------------------------------------
 // Bookings
 // ---------------------------------------------------------------------------
 
-// GET /api/bookings?tenantId=&tenantSlug=
+// GET /api/bookings?tenantSlug=&tenantId=
 app.get("/api/bookings", async (req, res) => {
   try {
-    const { tenantId, tenantSlug } = req.query;
-    let resolvedTenantId = tenantId ? Number(tenantId) : null;
+    const { tenantSlug, tenantId } = req.query;
 
+    let resolvedTenantId = tenantId ? Number(tenantId) : null;
     if (!resolvedTenantId && tenantSlug) {
       resolvedTenantId = await getTenantIdFromSlug(tenantSlug);
-      if (!resolvedTenantId) {
-        return res.status(400).json({ error: "Unknown tenant." });
-      }
+    }
+    if (!resolvedTenantId) {
+      return res.status(400).json({ error: "Missing tenantSlug or tenantId" });
     }
 
-    const params = [];
-    let where = "";
-    if (resolvedTenantId) {
-      params.push(resolvedTenantId);
-      where = "WHERE b.tenant_id = $1";
-    }
+    const params = [resolvedTenantId];
+    const where = "WHERE b.tenant_id = $1";
 
     const q = `
       SELECT
@@ -803,7 +625,6 @@ app.get("/api/bookings", async (req, res) => {
 });
 
 // POST /api/bookings
-// Flexible endpoint used by both owner + public pages
 app.post("/api/bookings", async (req, res) => {
   try {
     const {
@@ -819,73 +640,38 @@ app.post("/api/bookings", async (req, res) => {
       resourceId,
     } = req.body;
 
-    if (!customerName || !customerName.trim() || !startTime) {
+    if (!customerName || !startTime) {
       return res.status(400).json({
         error: "Missing required fields (customerName, startTime).",
       });
     }
 
-    let resolvedTenantId = tenantId || null;
-    let resolvedServiceId = serviceId || null;
-    let duration =
-      durationMinutes && Number(durationMinutes) > 0
-        ? Number(durationMinutes)
-        : null;
-
-    // Resolve tenant from slug if needed
+    let resolvedTenantId = tenantId ? Number(tenantId) : null;
     if (!resolvedTenantId && tenantSlug) {
-      const tid = await getTenantIdFromSlug(tenantSlug);
-      if (!tid) {
-        return res.status(400).json({ error: "Unknown tenant." });
-      }
-      resolvedTenantId = tid;
+      resolvedTenantId = await getTenantIdFromSlug(tenantSlug);
+    }
+    if (!resolvedTenantId) {
+      return res.status(400).json({ error: "Missing tenantSlug or tenantId." });
     }
 
-    // If serviceId is provided, verify it and infer tenant if still missing
-    if (resolvedServiceId) {
+    let resolvedServiceId = serviceId ? Number(serviceId) : null;
+
+    let duration = 60;
+    if (durationMinutes && Number(durationMinutes) > 0) {
+      duration = Number(durationMinutes);
+    } else if (resolvedServiceId) {
       const sRes = await db.query(
-        `
-        SELECT id, tenant_id, duration_minutes, requires_staff, requires_resource
-        FROM services
-        WHERE id = $1
-        `,
+        "SELECT duration_minutes FROM services WHERE id = $1",
         [resolvedServiceId]
       );
-
-      if (sRes.rows.length === 0) {
-        return res.status(400).json({ error: "Unknown service." });
+      if (sRes.rows.length > 0 && sRes.rows[0].duration_minutes) {
+        duration = sRes.rows[0].duration_minutes;
       }
-
-      const s = sRes.rows[0];
-
-      if (resolvedTenantId && s.tenant_id !== resolvedTenantId) {
-        return res
-          .status(400)
-          .json({ error: "Service does not belong to this tenant." });
-      }
-
-      if (!resolvedTenantId) {
-        resolvedTenantId = s.tenant_id;
-      }
-
-      // if duration not provided, default to service duration
-      if (!duration) {
-        duration = s.duration_minutes || 60;
-      }
-    }
-
-    if (!resolvedTenantId) {
-      return res.status(400).json({
-        error: "You must provide tenantSlug or tenantId or serviceId.",
-      });
     }
 
     const start = new Date(startTime);
     if (Number.isNaN(start.getTime())) {
-      return res.status(400).json({ error: "Invalid startTime." });
-    }
-    if (!duration) {
-      duration = 60; // fallback if nothing else
+      return res.status(400).json({ error: "Invalid startTime" });
     }
 
     const staff_id = staffId ? Number(staffId) : null;
@@ -933,51 +719,29 @@ app.post("/api/bookings", async (req, res) => {
 
     const bookingId = insert.rows[0].id;
 
-    // Auto-create / upsert customer (non-blocking for booking success)
-    if (resolvedTenantId && (customerPhone || customerEmail)) {
-      try {
-        const existingRes = await db.query(
+    // Upsert customer record for CRM
+    try {
+      if (customerName && (customerPhone || customerEmail)) {
+        await db.query(
           `
-          SELECT id
-          FROM customers
-          WHERE tenant_id = $1
-            AND (
-              ($2 IS NOT NULL AND phone = $2) OR
-              ($3 IS NOT NULL AND email = $3)
-            )
-          LIMIT 1
+          INSERT INTO customers (tenant_id, name, phone, email, notes)
+          VALUES ($1, $2, $3, $4, $5)
+          ON CONFLICT (tenant_id, phone, email)
+          DO UPDATE SET
+            name = EXCLUDED.name,
+            updated_at = NOW()
           `,
-          [resolvedTenantId, customerPhone || null, customerEmail || null]
+          [
+            resolvedTenantId,
+            customerName.trim(),
+            customerPhone || null,
+            customerEmail || null,
+            null,
+          ]
         );
-
-        if (existingRes.rows.length === 0) {
-          await db.query(
-            `
-            INSERT INTO customers (tenant_id, name, phone, email)
-            VALUES ($1, $2, $3, $4)
-            `,
-            [
-              resolvedTenantId,
-              customerName.trim(),
-              customerPhone || null,
-              customerEmail || null,
-            ]
-          );
-        } else {
-          // Optional: keep name fresh
-          await db.query(
-            `
-            UPDATE customers
-            SET name = $1, updated_at = NOW()
-            WHERE id = $2
-            `,
-            [customerName.trim(), existingRes.rows[0].id]
-          );
-        }
-      } catch (custErr) {
-        console.error("Error upserting customer from booking:", custErr);
-        // Don't fail the booking if customer insert fails
       }
+    } catch (err) {
+      console.error("Failed to upsert customer from booking:", err);
     }
 
     const joined = await loadJoinedBookingById(bookingId);
@@ -1017,6 +781,23 @@ app.post("/api/bookings/:id/status", async (req, res) => {
   } catch (err) {
     console.error("Error updating booking status:", err);
     res.status(500).json({ error: "Failed to update booking status" });
+  }
+});
+
+// DELETE /api/bookings/:id
+app.delete("/api/bookings/:id", async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!id) {
+      return res.status(400).json({ error: "Invalid booking id." });
+    }
+
+    // Hard delete (removes the row entirely)
+    await db.query("DELETE FROM bookings WHERE id = $1", [id]);
+    res.json({ success: true });
+  } catch (err) {
+    console.error("Error deleting booking:", err);
+    res.status(500).json({ error: "Failed to delete booking" });
   }
 });
 
