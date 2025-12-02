@@ -1,3 +1,5 @@
+// index.js — BookFlow backend (multi-tenant booking API)
+
 const express = require("express");
 const cors = require("cors");
 const db = require("./db");
@@ -6,7 +8,7 @@ const app = express();
 const PORT = process.env.PORT || 3001;
 
 app.use(cors());
-app.use(express.json()); // allow JSON bodies
+app.use(express.json());
 
 // ---------------------------------------------------------------------------
 // Health check
@@ -16,10 +18,113 @@ app.get("/", (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+async function getTenantIdFromSlug(tenantSlug) {
+  if (!tenantSlug) return null;
+  const tRes = await db.query(
+    "SELECT id FROM tenants WHERE slug = $1",
+    [tenantSlug]
+  );
+  if (tRes.rows.length === 0) return null;
+  return tRes.rows[0].id;
+}
+
+// join a booking row with tenant / service / staff / resource names
+async function loadJoinedBookingById(id) {
+  const q = `
+    SELECT
+      b.id,
+      b.tenant_id,
+      t.slug          AS tenant_slug,
+      t.name          AS tenant,
+      b.service_id,
+      s.name          AS service_name,
+      b.staff_id,
+      st.name         AS staff_name,
+      b.resource_id,
+      r.name          AS resource_name,
+      b.start_time,
+      b.duration_minutes,
+      b.customer_name,
+      b.customer_phone,
+      b.customer_email,
+      b.status
+    FROM bookings b
+    JOIN tenants t ON b.tenant_id = t.id
+    LEFT JOIN services  s  ON b.service_id  = s.id
+    LEFT JOIN staff     st ON b.staff_id    = st.id
+    LEFT JOIN resources r  ON b.resource_id = r.id
+    WHERE b.id = $1
+  `;
+  const result = await db.query(q, [id]);
+  return result.rows[0] || null;
+}
+
+// conflict check: overlapping time for same staff or same resource
+async function checkConflicts({
+  tenantId,
+  staffId,
+  resourceId,
+  startTime,
+  durationMinutes,
+}) {
+  const conflicts = { staffConflict: null, resourceConflict: null };
+
+  const start = startTime;
+  const dur = durationMinutes || 60;
+
+  // For overlap: existing.start < newEnd AND (existing.start + existing.dur) > newStart
+  const endExpr = `b.start_time + (COALESCE(b.duration_minutes, 60) || ' minutes')::interval`;
+  const newEndExpr = `($2::timestamptz + ($3 || ' minutes')::interval)`;
+
+  if (staffId) {
+    const qs = `
+      SELECT b.id, b.start_time, b.duration_minutes
+      FROM bookings b
+      WHERE
+        b.tenant_id = $1
+        AND b.staff_id = $4
+        AND b.status <> 'cancelled'
+        AND b.start_time < ${newEndExpr}
+        AND ${endExpr} > $2::timestamptz
+      ORDER BY b.start_time ASC
+      LIMIT 1
+    `;
+    const rs = await db.query(qs, [tenantId, start, dur, staffId]);
+    if (rs.rows.length > 0) {
+      conflicts.staffConflict = rs.rows[0];
+    }
+  }
+
+  if (resourceId) {
+    const qr = `
+      SELECT b.id, b.start_time, b.duration_minutes
+      FROM bookings b
+      WHERE
+        b.tenant_id = $1
+        AND b.resource_id = $4
+        AND b.status <> 'cancelled'
+        AND b.start_time < ${newEndExpr}
+        AND ${endExpr} > $2::timestamptz
+      ORDER BY b.start_time ASC
+      LIMIT 1
+    `;
+    const rr = await db.query(qr, [tenantId, start, dur, resourceId]);
+    if (rr.rows.length > 0) {
+      conflicts.resourceConflict = rr.rows[0];
+    }
+  }
+
+  return conflicts;
+}
+
+// ---------------------------------------------------------------------------
 // Tenants
 // ---------------------------------------------------------------------------
 
-// List tenants (for owner UI / routing)
+// GET /api/tenants
 app.get("/api/tenants", async (req, res) => {
   try {
     const result = await db.query(
@@ -32,7 +137,7 @@ app.get("/api/tenants", async (req, res) => {
         timezone,
         created_at
       FROM tenants
-      ORDER BY name;
+      ORDER BY name ASC
       `
     );
     res.json({ tenants: result.rows });
@@ -46,43 +151,131 @@ app.get("/api/tenants", async (req, res) => {
 // Services
 // ---------------------------------------------------------------------------
 
-// Services from Postgres (optionally filtered by tenantSlug)
+// GET /api/services?tenantSlug=&tenantId=
 app.get("/api/services", async (req, res) => {
   try {
-    const { tenantSlug } = req.query;
-
+    const { tenantSlug, tenantId } = req.query;
+    let where = "";
     const params = [];
-    let where = "WHERE s.is_active = TRUE";
 
-    if (tenantSlug) {
+    if (tenantId) {
+      params.push(Number(tenantId));
+      where = "WHERE s.tenant_id = $1";
+    } else if (tenantSlug) {
       params.push(tenantSlug);
-      where += ` AND t.slug = $${params.length}`;
+      where = "WHERE t.slug = $1";
     }
 
-    const result = await db.query(
-      `
+    const q = `
       SELECT
         s.id,
-        t.id    AS tenant_id,
-        t.slug  AS tenant_slug,
-        t.name  AS tenant,
-        s.name  AS name,
+        s.tenant_id,
+        t.slug   AS tenant_slug,
+        t.name   AS tenant,
+        s.name,
         s.duration_minutes,
         s.price_jd,
         s.requires_staff,
-        s.requires_resource
+        s.requires_resource,
+        s.is_active
       FROM services s
       JOIN tenants t ON s.tenant_id = t.id
       ${where}
-      ORDER BY t.name, s.name;
-      `,
-      params
-    );
+      ORDER BY t.name ASC, s.name ASC
+    `;
 
+    const result = await db.query(q, params);
     res.json({ services: result.rows });
   } catch (err) {
-    console.error("Error querying services:", err);
+    console.error("Error loading services:", err);
     res.status(500).json({ error: "Failed to load services" });
+  }
+});
+
+// POST /api/services
+// Body: { tenantSlug?, tenantId?, name, durationMinutes?, priceJd?, requiresStaff?, requiresResource? }
+app.post("/api/services", async (req, res) => {
+  try {
+    const {
+      tenantSlug,
+      tenantId,
+      name,
+      durationMinutes,
+      priceJd,
+      requiresStaff,
+      requiresResource,
+    } = req.body;
+
+    if (!name || !name.trim()) {
+      return res.status(400).json({ error: "Service name is required." });
+    }
+
+    let resolvedTenantId = tenantId || null;
+
+    if (!resolvedTenantId && tenantSlug) {
+      resolvedTenantId = await getTenantIdFromSlug(tenantSlug);
+      if (!resolvedTenantId) {
+        return res.status(400).json({ error: "Unknown tenantSlug." });
+      }
+    }
+
+    if (!resolvedTenantId) {
+      return res
+        .status(400)
+        .json({ error: "You must provide tenantSlug or tenantId." });
+    }
+
+    const dur =
+      durationMinutes && Number(durationMinutes) > 0
+        ? Number(durationMinutes)
+        : null;
+    const price =
+      typeof priceJd === "number"
+        ? priceJd
+        : priceJd && Number(priceJd) >= 0
+        ? Number(priceJd)
+        : null;
+
+    const reqStaff = !!requiresStaff;
+    const reqResource = !!requiresResource;
+
+    const insert = await db.query(
+      `
+      INSERT INTO services
+        (tenant_id, name, duration_minutes, price_jd, is_active, requires_staff, requires_resource)
+      VALUES
+        ($1, $2, $3, $4, TRUE, $5, $6)
+      RETURNING id, tenant_id, name, duration_minutes, price_jd, requires_staff, requires_resource;
+      `,
+      [resolvedTenantId, name.trim(), dur, price, reqStaff, reqResource]
+    );
+
+    const row = insert.rows[0];
+
+    const joined = await db.query(
+      `
+      SELECT
+        s.id,
+        s.tenant_id,
+        t.slug   AS tenant_slug,
+        t.name   AS tenant,
+        s.name,
+        s.duration_minutes,
+        s.price_jd,
+        s.requires_staff,
+        s.requires_resource,
+        s.is_active
+      FROM services s
+      JOIN tenants t ON s.tenant_id = t.id
+      WHERE s.id = $1;
+      `,
+      [row.id]
+    );
+
+    res.status(201).json({ service: joined.rows[0] });
+  } catch (err) {
+    console.error("Error creating service:", err);
+    res.status(500).json({ error: "Failed to create service" });
   }
 });
 
@@ -90,29 +283,27 @@ app.get("/api/services", async (req, res) => {
 // Staff
 // ---------------------------------------------------------------------------
 
-/**
- * GET /api/staff
- * Optional: ?tenantSlug=birdie-golf
- */
+// GET /api/staff?tenantSlug=&tenantId=
 app.get("/api/staff", async (req, res) => {
   try {
-    const { tenantSlug } = req.query;
-
+    const { tenantSlug, tenantId } = req.query;
+    let where = "";
     const params = [];
-    let where = "WHERE s.is_active = TRUE";
 
-    if (tenantSlug) {
+    if (tenantId) {
+      params.push(Number(tenantId));
+      where = "WHERE s.tenant_id = $1";
+    } else if (tenantSlug) {
       params.push(tenantSlug);
-      where += ` AND t.slug = $${params.length}`;
+      where = "WHERE t.slug = $1";
     }
 
-    const result = await db.query(
-      `
+    const q = `
       SELECT
         s.id,
         s.tenant_id,
-        t.slug  AS tenant_slug,
-        t.name  AS tenant,
+        t.slug AS tenant_slug,
+        t.name AS tenant,
         s.name,
         s.role,
         s.is_active,
@@ -120,11 +311,9 @@ app.get("/api/staff", async (req, res) => {
       FROM staff s
       JOIN tenants t ON s.tenant_id = t.id
       ${where}
-      ORDER BY t.name, s.name;
-      `,
-      params
-    );
-
+      ORDER BY t.name ASC, s.name ASC
+    `;
+    const result = await db.query(q, params);
     res.json({ staff: result.rows });
   } catch (err) {
     console.error("Error loading staff:", err);
@@ -132,33 +321,92 @@ app.get("/api/staff", async (req, res) => {
   }
 });
 
+// POST /api/staff
+// Body: { tenantSlug?, tenantId?, name, role? }
+app.post("/api/staff", async (req, res) => {
+  try {
+    const { tenantSlug, tenantId, name, role } = req.body;
+
+    if (!name || !name.trim()) {
+      return res.status(400).json({ error: "Staff name is required." });
+    }
+
+    let resolvedTenantId = tenantId || null;
+
+    if (!resolvedTenantId && tenantSlug) {
+      resolvedTenantId = await getTenantIdFromSlug(tenantSlug);
+      if (!resolvedTenantId) {
+        return res.status(400).json({ error: "Unknown tenantSlug." });
+      }
+    }
+
+    if (!resolvedTenantId) {
+      return res
+        .status(400)
+        .json({ error: "You must provide tenantSlug or tenantId." });
+    }
+
+    const insert = await db.query(
+      `
+      INSERT INTO staff (tenant_id, name, role, is_active)
+      VALUES ($1, $2, $3, TRUE)
+      RETURNING id, tenant_id, name, role, is_active, created_at;
+      `,
+      [resolvedTenantId, name.trim(), role ? String(role).trim() : null]
+    );
+
+    const row = insert.rows[0];
+
+    const joined = await db.query(
+      `
+      SELECT
+        s.id,
+        s.tenant_id,
+        t.slug AS tenant_slug,
+        t.name AS tenant,
+        s.name,
+        s.role,
+        s.is_active,
+        s.created_at
+      FROM staff s
+      JOIN tenants t ON s.tenant_id = t.id
+      WHERE s.id = $1;
+      `,
+      [row.id]
+    );
+
+    res.status(201).json({ staff: joined.rows[0] });
+  } catch (err) {
+    console.error("Error creating staff:", err);
+    res.status(500).json({ error: "Failed to create staff" });
+  }
+});
+
 // ---------------------------------------------------------------------------
 // Resources
 // ---------------------------------------------------------------------------
 
-/**
- * GET /api/resources
- * Optional: ?tenantSlug=birdie-golf
- */
+// GET /api/resources?tenantSlug=&tenantId=
 app.get("/api/resources", async (req, res) => {
   try {
-    const { tenantSlug } = req.query;
-
+    const { tenantSlug, tenantId } = req.query;
+    let where = "";
     const params = [];
-    let where = "WHERE r.is_active = TRUE";
 
-    if (tenantSlug) {
+    if (tenantId) {
+      params.push(Number(tenantId));
+      where = "WHERE r.tenant_id = $1";
+    } else if (tenantSlug) {
       params.push(tenantSlug);
-      where += ` AND t.slug = $${params.length}`;
+      where = "WHERE t.slug = $1";
     }
 
-    const result = await db.query(
-      `
+    const q = `
       SELECT
         r.id,
         r.tenant_id,
-        t.slug  AS tenant_slug,
-        t.name  AS tenant,
+        t.slug AS tenant_slug,
+        t.name AS tenant,
         r.name,
         r.type,
         r.is_active,
@@ -166,11 +414,9 @@ app.get("/api/resources", async (req, res) => {
       FROM resources r
       JOIN tenants t ON r.tenant_id = t.id
       ${where}
-      ORDER BY t.name, r.name;
-      `,
-      params
-    );
-
+      ORDER BY t.name ASC, r.name ASC
+    `;
+    const result = await db.query(q, params);
     res.json({ resources: result.rows });
   } catch (err) {
     console.error("Error loading resources:", err);
@@ -178,425 +424,293 @@ app.get("/api/resources", async (req, res) => {
   }
 });
 
+// POST /api/resources
+// Body: { tenantSlug?, tenantId?, name, type? }
+app.post("/api/resources", async (req, res) => {
+  try {
+    const { tenantSlug, tenantId, name, type } = req.body;
+
+    if (!name || !name.trim()) {
+      return res.status(400).json({ error: "Resource name is required." });
+    }
+
+    let resolvedTenantId = tenantId || null;
+
+    if (!resolvedTenantId && tenantSlug) {
+      resolvedTenantId = await getTenantIdFromSlug(tenantSlug);
+      if (!resolvedTenantId) {
+        return res.status(400).json({ error: "Unknown tenantSlug." });
+      }
+    }
+
+    if (!resolvedTenantId) {
+      return res
+        .status(400)
+        .json({ error: "You must provide tenantSlug or tenantId." });
+    }
+
+    const insert = await db.query(
+      `
+      INSERT INTO resources (tenant_id, name, type, is_active)
+      VALUES ($1, $2, $3, TRUE)
+      RETURNING id, tenant_id, name, type, is_active, created_at;
+      `,
+      [resolvedTenantId, name.trim(), type ? String(type).trim() : null]
+    );
+
+    const row = insert.rows[0];
+
+    const joined = await db.query(
+      `
+      SELECT
+        r.id,
+        r.tenant_id,
+        t.slug AS tenant_slug,
+        t.name AS tenant,
+        r.name,
+        r.type,
+        r.is_active,
+        r.created_at
+      FROM resources r
+      JOIN tenants t ON r.tenant_id = t.id
+      WHERE r.id = $1;
+      `,
+      [row.id]
+    );
+
+    res.status(201).json({ resource: joined.rows[0] });
+  } catch (err) {
+    console.error("Error creating resource:", err);
+    res.status(500).json({ error: "Failed to create resource" });
+  }
+});
+
 // ---------------------------------------------------------------------------
 // Bookings
 // ---------------------------------------------------------------------------
 
-/**
- * Create a booking
- * POST /api/bookings
- *
- * New flexible body:
- *  {
- *    "tenantSlug": "birdie-golf",           // preferred
- *    "serviceId": 1,                        // optional for manual bookings
- *    "staffId": 3,                          // optional; required if service.requires_staff
- *    "resourceId": 5,                       // optional; required if service.requires_resource
- *    "startTime": "2025-12-05T18:00:00Z",
- *    "durationMinutes": 60,                 // optional; falls back to service/default
- *    "customerName": "Akef",
- *    "customerPhone": "+962...",
- *    "customerEmail": "you@example.com"
- *  }
- *
- * Backwards-compatible mode (old style):
- *  {
- *    "serviceId": 1,
- *    "startTime": "...",
- *    "customerName": "..."
- *  }
- */
+// GET /api/bookings?tenantId=&tenantSlug=
+app.get("/api/bookings", async (req, res) => {
+  try {
+    const { tenantId, tenantSlug } = req.query;
+    let resolvedTenantId = tenantId ? Number(tenantId) : null;
+
+    if (!resolvedTenantId && tenantSlug) {
+      resolvedTenantId = await getTenantIdFromSlug(tenantSlug);
+      if (!resolvedTenantId) {
+        return res.status(400).json({ error: "Unknown tenant." });
+      }
+    }
+
+    const params = [];
+    let where = "";
+    if (resolvedTenantId) {
+      params.push(resolvedTenantId);
+      where = "WHERE b.tenant_id = $1";
+    }
+
+    const q = `
+      SELECT
+        b.id,
+        b.tenant_id,
+        t.slug          AS tenant_slug,
+        t.name          AS tenant,
+        b.service_id,
+        s.name          AS service_name,
+        b.staff_id,
+        st.name         AS staff_name,
+        b.resource_id,
+        r.name          AS resource_name,
+        b.start_time,
+        b.duration_minutes,
+        b.customer_name,
+        b.customer_phone,
+        b.customer_email,
+        b.status
+      FROM bookings b
+      JOIN tenants t ON b.tenant_id = t.id
+      LEFT JOIN services  s  ON b.service_id  = s.id
+      LEFT JOIN staff     st ON b.staff_id    = st.id
+      LEFT JOIN resources r  ON b.resource_id = r.id
+      ${where}
+      ORDER BY b.start_time DESC
+    `;
+
+    const result = await db.query(q, params);
+    res.json({ bookings: result.rows });
+  } catch (err) {
+    console.error("Error loading bookings:", err);
+    res.status(500).json({ error: "Failed to load bookings" });
+  }
+});
+
+// POST /api/bookings
+// Flexible endpoint used by both owner + public pages
 app.post("/api/bookings", async (req, res) => {
   try {
     const {
       tenantSlug,
+      tenantId,
       serviceId,
-      staffId,
-      resourceId,
       startTime,
       durationMinutes,
       customerName,
       customerPhone,
       customerEmail,
+      staffId,
+      resourceId,
     } = req.body;
 
-    // Basic validation
-    if (!customerName || !startTime) {
-      return res
-        .status(400)
-        .json({ error: "Missing required fields (customerName, startTime)." });
+    if (!customerName || !customerName.trim() || !startTime) {
+      return res.status(400).json({
+        error: "Missing required fields (customerName, startTime).",
+      });
     }
 
-    let tenantId = null;
+    let resolvedTenantId = tenantId || null;
     let resolvedServiceId = serviceId || null;
     let duration =
       durationMinutes && Number(durationMinutes) > 0
         ? Number(durationMinutes)
         : null;
 
-    let serviceRow = null; // will hold requires_staff / requires_resource
-
-    // Normalise staff/resource IDs
-    const staff_id_to_use = staffId ? Number(staffId) : null;
-    const resource_id_to_use = resourceId ? Number(resourceId) : null;
-
-    // --- Preferred: tenantSlug + optional serviceId ------------------------
-    if (tenantSlug) {
-      const tRes = await db.query(
-        "SELECT id FROM tenants WHERE slug = $1",
-        [tenantSlug]
-      );
-
-      if (tRes.rows.length === 0) {
+    // Resolve tenant from slug if needed
+    if (!resolvedTenantId && tenantSlug) {
+      const tid = await getTenantIdFromSlug(tenantSlug);
+      if (!tid) {
         return res.status(400).json({ error: "Unknown tenant." });
       }
-
-      tenantId = tRes.rows[0].id;
-
-      if (resolvedServiceId) {
-        const sRes = await db.query(
-          `
-          SELECT id, tenant_id, duration_minutes, requires_staff, requires_resource
-          FROM services
-          WHERE id = $1 AND tenant_id = $2 AND is_active = TRUE;
-          `,
-          [resolvedServiceId, tenantId]
-        );
-
-        if (sRes.rows.length === 0) {
-          return res.status(400).json({
-            error: "Unknown service for this tenant.",
-          });
-        }
-
-        serviceRow = sRes.rows[0];
-
-        if (!duration) {
-          duration = serviceRow.duration_minutes;
-        }
-      }
+      resolvedTenantId = tid;
     }
-    // --- Fallback: only serviceId (legacy) ---------------------------------
-    else if (resolvedServiceId) {
+
+    // If serviceId is provided, verify it and infer tenant if still missing
+    if (resolvedServiceId) {
       const sRes = await db.query(
         `
         SELECT id, tenant_id, duration_minutes, requires_staff, requires_resource
         FROM services
-        WHERE id = $1 AND is_active = TRUE;
+        WHERE id = $1
         `,
         [resolvedServiceId]
       );
 
       if (sRes.rows.length === 0) {
-        return res.status(400).json({ error: "Service not found." });
+        return res.status(400).json({ error: "Unknown service." });
       }
 
-      serviceRow = sRes.rows[0];
-      tenantId = serviceRow.tenant_id;
+      const s = sRes.rows[0];
 
+      if (resolvedTenantId && s.tenant_id !== resolvedTenantId) {
+        return res
+          .status(400)
+          .json({ error: "Service does not belong to this tenant." });
+      }
+
+      if (!resolvedTenantId) {
+        resolvedTenantId = s.tenant_id;
+      }
+
+      // if duration not provided, default to service duration
       if (!duration) {
-        duration = serviceRow.duration_minutes;
+        duration = s.duration_minutes || 60;
       }
-    } else {
-      return res.status(400).json({
-        error: "You must provide either tenantSlug or serviceId.",
+    }
+
+    if (!resolvedTenantId) {
+      return res
+        .status(400)
+        .json({ error: "You must provide tenantSlug or tenantId or serviceId." });
+    }
+
+    const start = new Date(startTime);
+    if (Number.isNaN(start.getTime())) {
+      return res.status(400).json({ error: "Invalid startTime." });
+    }
+    if (!duration) {
+      duration = 60; // fallback if nothing else
+    }
+
+    const staff_id = staffId ? Number(staffId) : null;
+    const resource_id = resourceId ? Number(resourceId) : null;
+
+    // conflict checks for staff/resource
+    const conflicts = await checkConflicts({
+      tenantId: resolvedTenantId,
+      staffId: staff_id,
+      resourceId: resource_id,
+      startTime: start.toISOString(),
+      durationMinutes: duration,
+    });
+
+    if (conflicts.staffConflict || conflicts.resourceConflict) {
+      return res.status(409).json({
+        error: "Booking conflicts with an existing booking.",
+        conflicts,
       });
     }
 
-    // Final safety for duration
-    if (!duration || duration <= 0) {
-      // very last fallback – 60 minutes default if something is off
-      duration = 60;
-    }
-
-    // ---- Enforce service requirements for staff/resource ------------------
-    if (serviceRow) {
-      if (serviceRow.requires_staff && !staff_id_to_use) {
-        return res.status(400).json({
-          error: "This service requires a staff member (stylist/coach).",
-        });
-      }
-      if (serviceRow.requires_resource && !resource_id_to_use) {
-        return res.status(400).json({
-          error: "This service requires a resource (e.g. simulator, room).",
-        });
-      }
-    }
-
-    // ---- Conflict / double-booking checks ---------------------------------
-    //
-    // Overlap rule:
-    //   existing.start < newEnd AND existingEnd > newStart
-    //
-    // Priority:
-    // 1) If resource_id specified -> block overlapping bookings for that resource
-    // 2) If staff_id specified   -> block overlapping bookings for that staff
-    // 3) Else if service has no staff/resource and we have serviceId ->
-    //    block overlapping bookings for same tenant+service
-    //
-
-    // 1) Resource conflict
-    if (resource_id_to_use) {
-      const resourceConflict = await db.query(
-        `
-        SELECT id
-        FROM bookings
-        WHERE resource_id = $1
-          AND status <> 'cancelled'
-          AND start_time < ($2::timestamptz + make_interval(mins => $3::int))
-          AND (start_time + make_interval(mins => duration_minutes)) > $2::timestamptz
-        LIMIT 1;
-        `,
-        [resource_id_to_use, startTime, duration]
-      );
-
-      if (resourceConflict.rows.length > 0) {
-        return res.status(409).json({
-          error: "Time slot already booked for this resource.",
-        });
-      }
-    }
-
-    // 2) Staff conflict
-    if (staff_id_to_use) {
-      const staffConflict = await db.query(
-        `
-        SELECT id
-        FROM bookings
-        WHERE staff_id = $1
-          AND status <> 'cancelled'
-          AND start_time < ($2::timestamptz + make_interval(mins => $3::int))
-          AND (start_time + make_interval(mins => duration_minutes)) > $2::timestamptz
-        LIMIT 1;
-        `,
-        [staff_id_to_use, startTime, duration]
-      );
-
-      if (staffConflict.rows.length > 0) {
-        return res.status(409).json({
-          error: "Time slot already booked for this staff member.",
-        });
-      }
-    }
-
-    // 3) Fallback: single-capacity service conflict (no staff/resource)
-    if (
-      tenantId &&
-      resolvedServiceId &&
-      serviceRow &&
-      !serviceRow.requires_staff &&
-      !serviceRow.requires_resource &&
-      !resource_id_to_use &&
-      !staff_id_to_use
-    ) {
-      const conflictResult = await db.query(
-        `
-        SELECT id
-        FROM bookings
-        WHERE tenant_id = $1
-          AND service_id = $2
-          AND status <> 'cancelled'
-          AND start_time < ($3::timestamptz + make_interval(mins => $4::int))
-          AND (start_time + make_interval(mins => duration_minutes)) > $3::timestamptz
-        LIMIT 1;
-        `,
-        [tenantId, resolvedServiceId, startTime, duration]
-      );
-
-      if (conflictResult.rows.length > 0) {
-        return res.status(409).json({
-          error: "Time slot already booked for this service.",
-        });
-      }
-    }
-
-    // Insert booking with default status 'pending'
-    const insertResult = await db.query(
+    const insert = await db.query(
       `
-      INSERT INTO bookings (
-        tenant_id,
-        service_id,
-        staff_id,
-        resource_id,
-        start_time,
-        duration_minutes,
-        customer_name,
-        customer_phone,
-        customer_email,
-        status
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'pending')
+      INSERT INTO bookings
+        (tenant_id, service_id, staff_id, resource_id, start_time, duration_minutes,
+         customer_name, customer_phone, customer_email, status)
+      VALUES
+        ($1, $2, $3, $4, $5, $6,
+         $7, $8, $9, 'pending')
       RETURNING id;
       `,
       [
-        tenantId,
+        resolvedTenantId,
         resolvedServiceId,
-        staff_id_to_use,
-        resource_id_to_use,
-        startTime,
+        staff_id,
+        resource_id,
+        start.toISOString(),
         duration,
-        customerName,
+        customerName.trim(),
         customerPhone || null,
         customerEmail || null,
       ]
     );
 
-    const newId = insertResult.rows[0].id;
+    const bookingId = insert.rows[0].id;
+    const joined = await loadJoinedBookingById(bookingId);
 
-    // Return a joined row so the frontend can show it immediately
-    const fullResult = await db.query(
-      `
-      SELECT
-        b.id,
-        b.service_id,
-        b.staff_id,
-        b.resource_id,
-        b.start_time,
-        b.duration_minutes,
-        b.customer_name,
-        b.customer_phone,
-        b.customer_email,
-        b.status,
-        t.name  AS tenant,
-        t.slug  AS tenant_slug,
-        s.name  AS service_name,
-        st.name AS staff_name,
-        r.name  AS resource_name
-      FROM bookings b
-      JOIN tenants t       ON b.tenant_id = t.id
-      LEFT JOIN services  s ON b.service_id  = s.id
-      LEFT JOIN staff     st ON b.staff_id   = st.id
-      LEFT JOIN resources r  ON b.resource_id = r.id
-      WHERE b.id = $1;
-      `,
-      [newId]
-    );
-
-    res.status(201).json({ booking: fullResult.rows[0] });
+    res.status(201).json({ booking: joined });
   } catch (err) {
     console.error("Error creating booking:", err);
     res.status(500).json({ error: "Failed to create booking" });
   }
 });
 
-/**
- * Update booking status
- * POST /api/bookings/:id/status
- * Body JSON: { "status": "confirmed" | "cancelled" | "pending" }
- */
+// POST /api/bookings/:id/status
 app.post("/api/bookings/:id/status", async (req, res) => {
   try {
-    const { id } = req.params;
+    const id = Number(req.params.id);
     const { status } = req.body;
 
     const allowed = ["pending", "confirmed", "cancelled"];
     if (!allowed.includes(status)) {
-      return res.status(400).json({ error: "Invalid status value" });
+      return res.status(400).json({ error: "Invalid status." });
     }
 
-    // Update the booking status
-    const updated = await db.query(
+    await db.query(
       `
       UPDATE bookings
       SET status = $1
       WHERE id = $2
-      RETURNING id;
       `,
       [status, id]
     );
 
-    if (updated.rows.length === 0) {
-      return res.status(404).json({ error: "Booking not found" });
+    const joined = await loadJoinedBookingById(id);
+    if (!joined) {
+      return res.status(404).json({ error: "Booking not found." });
     }
 
-    // Return the joined row so the frontend can update its table
-    const joined = await db.query(
-      `
-      SELECT
-        b.id,
-        b.service_id,
-        b.staff_id,
-        b.resource_id,
-        b.start_time,
-        b.duration_minutes,
-        b.customer_name,
-        b.customer_phone,
-        b.customer_email,
-        b.status,
-        t.name  AS tenant,
-        t.slug  AS tenant_slug,
-        s.name  AS service_name,
-        st.name AS staff_name,
-        r.name  AS resource_name
-      FROM bookings b
-      JOIN tenants t       ON b.tenant_id = t.id
-      LEFT JOIN services  s ON b.service_id  = s.id
-      LEFT JOIN staff     st ON b.staff_id   = st.id
-      LEFT JOIN resources r  ON b.resource_id = r.id
-      WHERE b.id = $1;
-      `,
-      [id]
-    );
-
-    res.json({ booking: joined.rows[0] });
+    res.json({ booking: joined });
   } catch (err) {
     console.error("Error updating booking status:", err);
-    res.status(500).json({ error: "Failed to update status" });
-  }
-});
-
-/**
- * List bookings
- * GET /api/bookings?tenantId=1
- * GET /api/bookings?tenantSlug=salon-bella
- */
-app.get("/api/bookings", async (req, res) => {
-  try {
-    const { tenantId, tenantSlug } = req.query;
-
-    const params = [];
-    let where = "";
-
-    if (tenantId) {
-      params.push(tenantId);
-      where = "WHERE b.tenant_id = $1";
-    } else if (tenantSlug) {
-      params.push(tenantSlug);
-      where = "WHERE t.slug = $1";
-    }
-
-    const result = await db.query(
-      `
-      SELECT
-        b.id,
-        b.service_id,
-        b.staff_id,
-        b.resource_id,
-        b.start_time,
-        b.duration_minutes,
-        b.customer_name,
-        b.customer_phone,
-        b.customer_email,
-        b.status,
-        t.name  AS tenant,
-        t.slug  AS tenant_slug,
-        s.name  AS service_name,
-        st.name AS staff_name,
-        r.name  AS resource_name
-      FROM bookings b
-      JOIN tenants t       ON b.tenant_id = t.id
-      LEFT JOIN services  s ON b.service_id  = s.id
-      LEFT JOIN staff     st ON b.staff_id   = st.id
-      LEFT JOIN resources r  ON b.resource_id = r.id
-      ${where}
-      ORDER BY b.start_time DESC;
-      `,
-      params
-    );
-
-    res.json({ bookings: result.rows });
-  } catch (err) {
-    console.error("Error loading bookings:", err);
-    res.status(500).json({ error: "Failed to load bookings" });
+    res.status(500).json({ error: "Failed to update booking status" });
   }
 });
 
