@@ -154,9 +154,18 @@ app.get("/api/tenants", async (req, res) => {
 // ---------------------------------------------------------------------------
 
 // GET /api/tenant-settings?tenantSlug=&tenantId=
-app.get("/api/tenant-settings", async (req, res) => {
+app.patch("/api/tenant-settings", async (req, res) => {
   try {
-    const { tenantSlug, tenantId } = req.query;
+    const {
+      tenantSlug,
+      tenantId,
+      logoUrl,
+      logo_url,
+      coverImageUrl,
+      cover_image_url,
+      name,
+      kind,
+    } = req.body || {};
 
     let resolvedTenantId = tenantId ? Number(tenantId) : null;
     if (!resolvedTenantId && tenantSlug) {
@@ -168,81 +177,23 @@ app.get("/api/tenant-settings", async (req, res) => {
         .json({ error: "You must provide tenantSlug or tenantId." });
     }
 
-    const tRes = await db.query(
-      `
-      SELECT
-        id,
-        slug,
-        name,
-        kind,
-        timezone,
-        logo_url,
-        cover_image_url
-      FROM tenants
-      WHERE id = $1
-      `,
-      [resolvedTenantId]
-    );
+    // Accept both camelCase and snake_case
+    const effectiveLogoUrl =
+      typeof logoUrl !== "undefined" ? logoUrl : logo_url;
+    const effectiveCoverUrl =
+      typeof coverImageUrl !== "undefined" ? coverImageUrl : cover_image_url;
 
-    if (tRes.rows.length === 0) {
-      return res.status(404).json({ error: "Tenant not found." });
-    }
-
-    // also load hours
-    const hRes = await db.query(
-      `
-      SELECT
-        id,
-        day_of_week,
-        open_time,
-        close_time,
-        is_closed
-      FROM tenant_hours
-      WHERE tenant_id = $1
-      ORDER BY day_of_week ASC
-      `,
-      [resolvedTenantId]
-    );
-
-    res.json({
-      tenant: tRes.rows[0],
-      hours: hRes.rows,
-    });
-  } catch (err) {
-    console.error("Error loading tenant settings:", err);
-    res.status(500).json({ error: "Failed to load tenant settings." });
-  }
-});
-
-// PATCH /api/tenant-settings
-// Body: { tenantSlug? | tenantId?, logoUrl?, coverImageUrl?, name?, kind? }
-app.patch("/api/tenant-settings", async (req, res) => {
-  try {
-    const { tenantSlug, tenantId, logoUrl, coverImageUrl, name, kind } =
-      req.body || {};
-
-    let resolvedTenantId = tenantId || null;
-    if (!resolvedTenantId && tenantSlug) {
-      resolvedTenantId = await getTenantIdFromSlug(tenantSlug);
-    }
-    if (!resolvedTenantId) {
-      return res
-        .status(400)
-        .json({ error: "You must provide tenantSlug or tenantId." });
-    }
-
-    // Build dynamic SET clause
     const fields = [];
     const params = [];
     let idx = 1;
 
-    if (typeof logoUrl !== "undefined") {
+    if (typeof effectiveLogoUrl !== "undefined") {
       fields.push(`logo_url = $${idx++}`);
-      params.push(logoUrl || null);
+      params.push(effectiveLogoUrl || null);
     }
-    if (typeof coverImageUrl !== "undefined") {
+    if (typeof effectiveCoverUrl !== "undefined") {
       fields.push(`cover_image_url = $${idx++}`);
-      params.push(coverImageUrl || null);
+      params.push(effectiveCoverUrl || null);
     }
     if (typeof name !== "undefined") {
       fields.push(`name = $${idx++}`);
