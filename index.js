@@ -68,7 +68,9 @@ app.get("/api/services", async (req, res) => {
         t.name  AS tenant,
         s.name  AS name,
         s.duration_minutes,
-        s.price_jd
+        s.price_jd,
+        s.requires_staff,
+        s.requires_resource
       FROM services s
       JOIN tenants t ON s.tenant_id = t.id
       ${where}
@@ -85,6 +87,98 @@ app.get("/api/services", async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
+// Staff
+// ---------------------------------------------------------------------------
+
+/**
+ * GET /api/staff
+ * Optional: ?tenantSlug=birdie-golf
+ */
+app.get("/api/staff", async (req, res) => {
+  try {
+    const { tenantSlug } = req.query;
+
+    const params = [];
+    let where = "WHERE s.is_active = TRUE";
+
+    if (tenantSlug) {
+      params.push(tenantSlug);
+      where += ` AND t.slug = $${params.length}`;
+    }
+
+    const result = await db.query(
+      `
+      SELECT
+        s.id,
+        s.tenant_id,
+        t.slug  AS tenant_slug,
+        t.name  AS tenant,
+        s.name,
+        s.role,
+        s.is_active,
+        s.created_at
+      FROM staff s
+      JOIN tenants t ON s.tenant_id = t.id
+      ${where}
+      ORDER BY t.name, s.name;
+      `,
+      params
+    );
+
+    res.json({ staff: result.rows });
+  } catch (err) {
+    console.error("Error loading staff:", err);
+    res.status(500).json({ error: "Failed to load staff" });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Resources
+// ---------------------------------------------------------------------------
+
+/**
+ * GET /api/resources
+ * Optional: ?tenantSlug=birdie-golf
+ */
+app.get("/api/resources", async (req, res) => {
+  try {
+    const { tenantSlug } = req.query;
+
+    const params = [];
+    let where = "WHERE r.is_active = TRUE";
+
+    if (tenantSlug) {
+      params.push(tenantSlug);
+      where += ` AND t.slug = $${params.length}`;
+    }
+
+    const result = await db.query(
+      `
+      SELECT
+        r.id,
+        r.tenant_id,
+        t.slug  AS tenant_slug,
+        t.name  AS tenant,
+        r.name,
+        r.type,
+        r.is_active,
+        r.created_at
+      FROM resources r
+      JOIN tenants t ON r.tenant_id = t.id
+      ${where}
+      ORDER BY t.name, r.name;
+      `,
+      params
+    );
+
+    res.json({ resources: result.rows });
+  } catch (err) {
+    console.error("Error loading resources:", err);
+    res.status(500).json({ error: "Failed to load resources" });
+  }
+});
+
+// ---------------------------------------------------------------------------
 // Bookings
 // ---------------------------------------------------------------------------
 
@@ -92,12 +186,14 @@ app.get("/api/services", async (req, res) => {
  * Create a booking
  * POST /api/bookings
  *
- * New owner UI (manual booking):
+ * New flexible body:
  *  {
- *    "tenantSlug": "birdie-golf",
- *    "serviceId": 1,                // optional
+ *    "tenantSlug": "birdie-golf",           // preferred
+ *    "serviceId": 1,                        // optional for manual bookings
+ *    "staffId": 3,                          // optional; required if service.requires_staff
+ *    "resourceId": 5,                       // optional; required if service.requires_resource
  *    "startTime": "2025-12-05T18:00:00Z",
- *    "durationMinutes": 60,         // optional; falls back to service/default
+ *    "durationMinutes": 60,                 // optional; falls back to service/default
  *    "customerName": "Akef",
  *    "customerPhone": "+962...",
  *    "customerEmail": "you@example.com"
@@ -115,6 +211,8 @@ app.post("/api/bookings", async (req, res) => {
     const {
       tenantSlug,
       serviceId,
+      staffId,
+      resourceId,
       startTime,
       durationMinutes,
       customerName,
@@ -136,6 +234,12 @@ app.post("/api/bookings", async (req, res) => {
         ? Number(durationMinutes)
         : null;
 
+    let serviceRow = null; // will hold requires_staff / requires_resource
+
+    // Normalise staff/resource IDs
+    const staff_id_to_use = staffId ? Number(staffId) : null;
+    const resource_id_to_use = resourceId ? Number(resourceId) : null;
+
     // --- Preferred: tenantSlug + optional serviceId ------------------------
     if (tenantSlug) {
       const tRes = await db.query(
@@ -152,7 +256,7 @@ app.post("/api/bookings", async (req, res) => {
       if (resolvedServiceId) {
         const sRes = await db.query(
           `
-          SELECT id, duration_minutes
+          SELECT id, tenant_id, duration_minutes, requires_staff, requires_resource
           FROM services
           WHERE id = $1 AND tenant_id = $2 AND is_active = TRUE;
           `,
@@ -165,15 +269,21 @@ app.post("/api/bookings", async (req, res) => {
           });
         }
 
+        serviceRow = sRes.rows[0];
+
         if (!duration) {
-          duration = sRes.rows[0].duration_minutes;
+          duration = serviceRow.duration_minutes;
         }
       }
     }
     // --- Fallback: only serviceId (legacy) ---------------------------------
     else if (resolvedServiceId) {
       const sRes = await db.query(
-        "SELECT tenant_id, duration_minutes FROM services WHERE id = $1",
+        `
+        SELECT id, tenant_id, duration_minutes, requires_staff, requires_resource
+        FROM services
+        WHERE id = $1 AND is_active = TRUE;
+        `,
         [resolvedServiceId]
       );
 
@@ -181,9 +291,11 @@ app.post("/api/bookings", async (req, res) => {
         return res.status(400).json({ error: "Service not found." });
       }
 
-      tenantId = sRes.rows[0].tenant_id;
+      serviceRow = sRes.rows[0];
+      tenantId = serviceRow.tenant_id;
+
       if (!duration) {
-        duration = sRes.rows[0].duration_minutes;
+        duration = serviceRow.duration_minutes;
       }
     } else {
       return res.status(400).json({
@@ -197,17 +309,89 @@ app.post("/api/bookings", async (req, res) => {
       duration = 60;
     }
 
-    // ---- NEW: conflict / double-booking check -----------------------------
+    // ---- Enforce service requirements for staff/resource ------------------
+    if (serviceRow) {
+      if (serviceRow.requires_staff && !staff_id_to_use) {
+        return res.status(400).json({
+          error: "This service requires a staff member (stylist/coach).",
+        });
+      }
+      if (serviceRow.requires_resource && !resource_id_to_use) {
+        return res.status(400).json({
+          error: "This service requires a resource (e.g. simulator, room).",
+        });
+      }
+    }
+
+    // ---- Conflict / double-booking checks ---------------------------------
     //
-    // Only check when we have a specific service (sim/chair/class).
-    // Conflict rule: another non-cancelled booking for same tenant+service
-    // where time ranges overlap:
+    // Overlap rule:
     //   existing.start < newEnd AND existingEnd > newStart
     //
-    if (tenantId && resolvedServiceId) {
+    // Priority:
+    // 1) If resource_id specified -> block overlapping bookings for that resource
+    // 2) If staff_id specified   -> block overlapping bookings for that staff
+    // 3) Else if service has no staff/resource and we have serviceId ->
+    //    block overlapping bookings for same tenant+service
+    //
+
+    // 1) Resource conflict
+    if (resource_id_to_use) {
+      const resourceConflict = await db.query(
+        `
+        SELECT id
+        FROM bookings
+        WHERE resource_id = $1
+          AND status <> 'cancelled'
+          AND start_time < ($2::timestamptz + make_interval(mins => $3::int))
+          AND (start_time + make_interval(mins => duration_minutes)) > $2::timestamptz
+        LIMIT 1;
+        `,
+        [resource_id_to_use, startTime, duration]
+      );
+
+      if (resourceConflict.rows.length > 0) {
+        return res.status(409).json({
+          error: "Time slot already booked for this resource.",
+        });
+      }
+    }
+
+    // 2) Staff conflict
+    if (staff_id_to_use) {
+      const staffConflict = await db.query(
+        `
+        SELECT id
+        FROM bookings
+        WHERE staff_id = $1
+          AND status <> 'cancelled'
+          AND start_time < ($2::timestamptz + make_interval(mins => $3::int))
+          AND (start_time + make_interval(mins => duration_minutes)) > $2::timestamptz
+        LIMIT 1;
+        `,
+        [staff_id_to_use, startTime, duration]
+      );
+
+      if (staffConflict.rows.length > 0) {
+        return res.status(409).json({
+          error: "Time slot already booked for this staff member.",
+        });
+      }
+    }
+
+    // 3) Fallback: single-capacity service conflict (no staff/resource)
+    if (
+      tenantId &&
+      resolvedServiceId &&
+      serviceRow &&
+      !serviceRow.requires_staff &&
+      !serviceRow.requires_resource &&
+      !resource_id_to_use &&
+      !staff_id_to_use
+    ) {
       const conflictResult = await db.query(
         `
-        SELECT id, start_time, duration_minutes
+        SELECT id
         FROM bookings
         WHERE tenant_id = $1
           AND service_id = $2
@@ -232,18 +416,22 @@ app.post("/api/bookings", async (req, res) => {
       INSERT INTO bookings (
         tenant_id,
         service_id,
+        staff_id,
+        resource_id,
         start_time,
         duration_minutes,
         customer_name,
         customer_phone,
         customer_email,
         status
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending')
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'pending')
       RETURNING id;
       `,
       [
         tenantId,
         resolvedServiceId,
+        staff_id_to_use,
+        resource_id_to_use,
         startTime,
         duration,
         customerName,
@@ -260,6 +448,8 @@ app.post("/api/bookings", async (req, res) => {
       SELECT
         b.id,
         b.service_id,
+        b.staff_id,
+        b.resource_id,
         b.start_time,
         b.duration_minutes,
         b.customer_name,
@@ -268,10 +458,14 @@ app.post("/api/bookings", async (req, res) => {
         b.status,
         t.name  AS tenant,
         t.slug  AS tenant_slug,
-        s.name  AS service_name
+        s.name  AS service_name,
+        st.name AS staff_name,
+        r.name  AS resource_name
       FROM bookings b
       JOIN tenants t       ON b.tenant_id = t.id
-      LEFT JOIN services s ON b.service_id = s.id
+      LEFT JOIN services  s ON b.service_id  = s.id
+      LEFT JOIN staff     st ON b.staff_id   = st.id
+      LEFT JOIN resources r  ON b.resource_id = r.id
       WHERE b.id = $1;
       `,
       [newId]
@@ -320,6 +514,8 @@ app.post("/api/bookings/:id/status", async (req, res) => {
       SELECT
         b.id,
         b.service_id,
+        b.staff_id,
+        b.resource_id,
         b.start_time,
         b.duration_minutes,
         b.customer_name,
@@ -328,10 +524,14 @@ app.post("/api/bookings/:id/status", async (req, res) => {
         b.status,
         t.name  AS tenant,
         t.slug  AS tenant_slug,
-        s.name  AS service_name
+        s.name  AS service_name,
+        st.name AS staff_name,
+        r.name  AS resource_name
       FROM bookings b
       JOIN tenants t       ON b.tenant_id = t.id
-      LEFT JOIN services s ON b.service_id = s.id
+      LEFT JOIN services  s ON b.service_id  = s.id
+      LEFT JOIN staff     st ON b.staff_id   = st.id
+      LEFT JOIN resources r  ON b.resource_id = r.id
       WHERE b.id = $1;
       `,
       [id]
@@ -369,6 +569,8 @@ app.get("/api/bookings", async (req, res) => {
       SELECT
         b.id,
         b.service_id,
+        b.staff_id,
+        b.resource_id,
         b.start_time,
         b.duration_minutes,
         b.customer_name,
@@ -377,10 +579,14 @@ app.get("/api/bookings", async (req, res) => {
         b.status,
         t.name  AS tenant,
         t.slug  AS tenant_slug,
-        s.name  AS service_name
+        s.name  AS service_name,
+        st.name AS staff_name,
+        r.name  AS resource_name
       FROM bookings b
       JOIN tenants t       ON b.tenant_id = t.id
-      LEFT JOIN services s ON b.service_id = s.id
+      LEFT JOIN services  s ON b.service_id  = s.id
+      LEFT JOIN staff     st ON b.staff_id   = st.id
+      LEFT JOIN resources r  ON b.resource_id = r.id
       ${where}
       ORDER BY b.start_time DESC;
       `,
