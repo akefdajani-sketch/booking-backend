@@ -609,6 +609,141 @@ app.delete("/api/resources/:id", async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
+// Customers
+// ---------------------------------------------------------------------------
+
+// GET /api/customers?tenantSlug=&tenantId=
+app.get("/api/customers", async (req, res) => {
+  try {
+    const { tenantSlug, tenantId } = req.query;
+
+    let resolvedTenantId = tenantId ? Number(tenantId) : null;
+    if (!resolvedTenantId && tenantSlug) {
+      resolvedTenantId = await getTenantIdFromSlug(tenantSlug);
+      if (!resolvedTenantId) {
+        return res.status(400).json({ error: "Unknown tenant." });
+      }
+    }
+
+    if (!resolvedTenantId) {
+      return res
+        .status(400)
+        .json({ error: "You must provide tenantSlug or tenantId." });
+    }
+
+    const customersRes = await db.query(
+      `
+      SELECT
+        id,
+        tenant_id,
+        name,
+        phone,
+        email,
+        notes,
+        created_at,
+        updated_at
+      FROM customers
+      WHERE tenant_id = $1
+      ORDER BY created_at DESC
+      `,
+      [resolvedTenantId]
+    );
+
+    res.json({ customers: customersRes.rows });
+  } catch (err) {
+    console.error("Error loading customers:", err);
+    res.status(500).json({ error: "Failed to load customers." });
+  }
+});
+
+// POST /api/customers
+// Body: { tenantSlug?, tenantId?, name, phone?, email?, notes? }
+app.post("/api/customers", async (req, res) => {
+  try {
+    const { tenantSlug, tenantId, name, phone, email, notes } = req.body || {};
+
+    if (!name || !name.trim()) {
+      return res.status(400).json({ error: "Customer name is required." });
+    }
+
+    let resolvedTenantId = tenantId || null;
+    if (!resolvedTenantId && tenantSlug) {
+      resolvedTenantId = await getTenantIdFromSlug(tenantSlug);
+      if (!resolvedTenantId) {
+        return res.status(400).json({ error: "Unknown tenantSlug." });
+      }
+    }
+
+    if (!resolvedTenantId) {
+      return res
+        .status(400)
+        .json({ error: "You must provide tenantSlug or tenantId." });
+    }
+
+    // Try to find an existing customer by phone/email
+    let existing = null;
+    if (phone || email) {
+      const existingRes = await db.query(
+        `
+        SELECT *
+        FROM customers
+        WHERE tenant_id = $1
+          AND (
+            ($2 IS NOT NULL AND phone = $2) OR
+            ($3 IS NOT NULL AND email = $3)
+          )
+        LIMIT 1
+        `,
+        [resolvedTenantId, phone || null, email || null]
+      );
+      if (existingRes.rows.length > 0) {
+        existing = existingRes.rows[0];
+      }
+    }
+
+    if (existing) {
+      let updated = existing;
+
+      if (
+        (notes && notes.trim() && notes.trim() !== (existing.notes || "")) ||
+        (name && name.trim() && name.trim() !== existing.name)
+      ) {
+        const updateRes = await db.query(
+          `
+          UPDATE customers
+          SET
+            name = $1,
+            notes = $2,
+            updated_at = NOW()
+          WHERE id = $3
+          RETURNING *
+          `,
+          [name.trim(), notes || existing.notes, existing.id]
+        );
+        updated = updateRes.rows[0];
+      }
+
+      return res.json({ customer: updated, existing: true });
+    }
+
+    // Insert new customer
+    const insertRes = await db.query(
+      `
+      INSERT INTO customers (tenant_id, name, phone, email, notes)
+      VALUES ($1, $2, $3, $4, $5)
+      RETURNING *
+      `,
+      [resolvedTenantId, name.trim(), phone || null, email || null, notes || null]
+    );
+
+    res.status(201).json({ customer: insertRes.rows[0], existing: false });
+  } catch (err) {
+    console.error("Error creating customer:", err);
+    res.status(500).json({ error: "Failed to create customer." });
+  }
+});
+
+// ---------------------------------------------------------------------------
 // Bookings
 // ---------------------------------------------------------------------------
 
@@ -772,6 +907,7 @@ app.post("/api/bookings", async (req, res) => {
       });
     }
 
+    // Insert booking
     const insert = await db.query(
       `
       INSERT INTO bookings
@@ -796,8 +932,55 @@ app.post("/api/bookings", async (req, res) => {
     );
 
     const bookingId = insert.rows[0].id;
-    const joined = await loadJoinedBookingById(bookingId);
 
+    // Auto-create / upsert customer (non-blocking for booking success)
+    if (resolvedTenantId && (customerPhone || customerEmail)) {
+      try {
+        const existingRes = await db.query(
+          `
+          SELECT id
+          FROM customers
+          WHERE tenant_id = $1
+            AND (
+              ($2 IS NOT NULL AND phone = $2) OR
+              ($3 IS NOT NULL AND email = $3)
+            )
+          LIMIT 1
+          `,
+          [resolvedTenantId, customerPhone || null, customerEmail || null]
+        );
+
+        if (existingRes.rows.length === 0) {
+          await db.query(
+            `
+            INSERT INTO customers (tenant_id, name, phone, email)
+            VALUES ($1, $2, $3, $4)
+            `,
+            [
+              resolvedTenantId,
+              customerName.trim(),
+              customerPhone || null,
+              customerEmail || null,
+            ]
+          );
+        } else {
+          // Optional: keep name fresh
+          await db.query(
+            `
+            UPDATE customers
+            SET name = $1, updated_at = NOW()
+            WHERE id = $2
+            `,
+            [customerName.trim(), existingRes.rows[0].id]
+          );
+        }
+      } catch (custErr) {
+        console.error("Error upserting customer from booking:", custErr);
+        // Don't fail the booking if customer insert fails
+      }
+    }
+
+    const joined = await loadJoinedBookingById(bookingId);
     res.status(201).json({ booking: joined });
   } catch (err) {
     console.error("Error creating booking:", err);
