@@ -135,6 +135,8 @@ app.get("/api/tenants", async (req, res) => {
         name,
         kind,
         timezone,
+        logo_url,
+        cover_image_url,
         created_at
       FROM tenants
       ORDER BY name ASC
@@ -144,6 +146,230 @@ app.get("/api/tenants", async (req, res) => {
   } catch (err) {
     console.error("Error loading tenants:", err);
     res.status(500).json({ error: "Failed to load tenants" });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Tenant settings (logo, cover, etc.)
+// ---------------------------------------------------------------------------
+
+// GET /api/tenant-settings?tenantSlug=&tenantId=
+app.get("/api/tenant-settings", async (req, res) => {
+  try {
+    const { tenantSlug, tenantId } = req.query;
+
+    let resolvedTenantId = tenantId ? Number(tenantId) : null;
+    if (!resolvedTenantId && tenantSlug) {
+      resolvedTenantId = await getTenantIdFromSlug(tenantSlug);
+    }
+    if (!resolvedTenantId) {
+      return res
+        .status(400)
+        .json({ error: "You must provide tenantSlug or tenantId." });
+    }
+
+    const tRes = await db.query(
+      `
+      SELECT
+        id,
+        slug,
+        name,
+        kind,
+        timezone,
+        logo_url,
+        cover_image_url
+      FROM tenants
+      WHERE id = $1
+      `,
+      [resolvedTenantId]
+    );
+
+    if (tRes.rows.length === 0) {
+      return res.status(404).json({ error: "Tenant not found." });
+    }
+
+    // also load hours
+    const hRes = await db.query(
+      `
+      SELECT
+        id,
+        day_of_week,
+        open_time,
+        close_time,
+        is_closed
+      FROM tenant_hours
+      WHERE tenant_id = $1
+      ORDER BY day_of_week ASC
+      `,
+      [resolvedTenantId]
+    );
+
+    res.json({
+      tenant: tRes.rows[0],
+      hours: hRes.rows,
+    });
+  } catch (err) {
+    console.error("Error loading tenant settings:", err);
+    res.status(500).json({ error: "Failed to load tenant settings." });
+  }
+});
+
+// PATCH /api/tenant-settings
+// Body: { tenantSlug? | tenantId?, logoUrl?, coverImageUrl?, name?, kind? }
+app.patch("/api/tenant-settings", async (req, res) => {
+  try {
+    const { tenantSlug, tenantId, logoUrl, coverImageUrl, name, kind } =
+      req.body || {};
+
+    let resolvedTenantId = tenantId || null;
+    if (!resolvedTenantId && tenantSlug) {
+      resolvedTenantId = await getTenantIdFromSlug(tenantSlug);
+    }
+    if (!resolvedTenantId) {
+      return res
+        .status(400)
+        .json({ error: "You must provide tenantSlug or tenantId." });
+    }
+
+    // Build dynamic SET clause
+    const fields = [];
+    const params = [];
+    let idx = 1;
+
+    if (typeof logoUrl !== "undefined") {
+      fields.push(`logo_url = $${idx++}`);
+      params.push(logoUrl || null);
+    }
+    if (typeof coverImageUrl !== "undefined") {
+      fields.push(`cover_image_url = $${idx++}`);
+      params.push(coverImageUrl || null);
+    }
+    if (typeof name !== "undefined") {
+      fields.push(`name = $${idx++}`);
+      params.push(name || null);
+    }
+    if (typeof kind !== "undefined") {
+      fields.push(`kind = $${idx++}`);
+      params.push(kind || null);
+    }
+
+    if (fields.length === 0) {
+      return res.status(400).json({ error: "No fields to update." });
+    }
+
+    params.push(resolvedTenantId);
+
+    const q = `
+      UPDATE tenants
+      SET ${fields.join(", ")}
+      WHERE id = $${idx}
+      RETURNING id, slug, name, kind, timezone, logo_url, cover_image_url
+    `;
+
+    const result = await db.query(q, params);
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: "Tenant not found." });
+    }
+
+    res.json({ tenant: result.rows[0] });
+  } catch (err) {
+    console.error("Error updating tenant settings:", err);
+    res.status(500).json({ error: "Failed to update tenant settings." });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Tenant working hours
+// ---------------------------------------------------------------------------
+
+// GET /api/tenant-hours?tenantSlug=&tenantId=
+app.get("/api/tenant-hours", async (req, res) => {
+  try {
+    const { tenantSlug, tenantId } = req.query;
+    let resolvedTenantId = tenantId ? Number(tenantId) : null;
+
+    if (!resolvedTenantId && tenantSlug) {
+      resolvedTenantId = await getTenantIdFromSlug(tenantSlug);
+    }
+    if (!resolvedTenantId) {
+      return res
+        .status(400)
+        .json({ error: "You must provide tenantSlug or tenantId." });
+    }
+
+    const result = await db.query(
+      `
+      SELECT
+        id,
+        day_of_week,
+        open_time,
+        close_time,
+        is_closed
+      FROM tenant_hours
+      WHERE tenant_id = $1
+      ORDER BY day_of_week ASC
+      `,
+      [resolvedTenantId]
+    );
+
+    res.json({ hours: result.rows });
+  } catch (err) {
+    console.error("Error loading tenant hours:", err);
+    res.status(500).json({ error: "Failed to load tenant hours." });
+  }
+});
+
+// POST /api/tenant-hours
+// Body: { tenantSlug? | tenantId?, dayOfWeek, openTime?, closeTime?, isClosed? }
+app.post("/api/tenant-hours", async (req, res) => {
+  try {
+    const { tenantSlug, tenantId, dayOfWeek, openTime, closeTime, isClosed } =
+      req.body || {};
+
+    if (
+      typeof dayOfWeek !== "number" ||
+      dayOfWeek < 0 ||
+      dayOfWeek > 6
+    ) {
+      return res
+        .status(400)
+        .json({ error: "dayOfWeek must be 0–6 (0 = Sunday)." });
+    }
+
+    let resolvedTenantId = tenantId || null;
+    if (!resolvedTenantId && tenantSlug) {
+      resolvedTenantId = await getTenantIdFromSlug(tenantSlug);
+    }
+    if (!resolvedTenantId) {
+      return res
+        .status(400)
+        .json({ error: "You must provide tenantSlug or tenantId." });
+    }
+
+    const result = await db.query(
+      `
+      INSERT INTO tenant_hours (tenant_id, day_of_week, open_time, close_time, is_closed)
+      VALUES ($1, $2, $3::time, $4::time, COALESCE($5, FALSE))
+      ON CONFLICT (tenant_id, day_of_week)
+      DO UPDATE SET
+        open_time  = EXCLUDED.open_time,
+        close_time = EXCLUDED.close_time,
+        is_closed  = EXCLUDED.is_closed
+      RETURNING id, tenant_id, day_of_week, open_time, close_time, is_closed
+      `,
+      [
+        resolvedTenantId,
+        dayOfWeek,
+        openTime || null,
+        closeTime || null,
+        typeof isClosed === "boolean" ? isClosed : false,
+      ]
+    );
+
+    res.json({ hour: result.rows[0] });
+  } catch (err) {
+    console.error("Error saving tenant hours:", err);
+    res.status(500).json({ error: "Failed to save tenant hours." });
   }
 });
 
