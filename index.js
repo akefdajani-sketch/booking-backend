@@ -855,9 +855,17 @@ app.post("/api/customers", async (req, res) => {
         .json({ error: "You must provide tenantSlug or tenantId." });
     }
 
+    // Normalise optional fields: avoid undefined reaching Postgres
+    const cleanPhone =
+      typeof phone === "string" && phone.trim() !== "" ? phone.trim() : null;
+    const cleanEmail =
+      typeof email === "string" && email.trim() !== "" ? email.trim() : null;
+    const cleanNotes =
+      typeof notes === "string" && notes.trim() !== "" ? notes.trim() : null;
+
     // Try to find an existing customer by phone/email
     let existing = null;
-    if (phone || email) {
+    if (cleanPhone || cleanEmail) {
       const existingRes = await db.query(
         `
         SELECT *
@@ -869,7 +877,7 @@ app.post("/api/customers", async (req, res) => {
           )
         LIMIT 1
         `,
-        [resolvedTenantId, phone || null, email || null]
+        [resolvedTenantId, cleanPhone, cleanEmail]
       );
       if (existingRes.rows.length > 0) {
         existing = existingRes.rows[0];
@@ -880,7 +888,7 @@ app.post("/api/customers", async (req, res) => {
       let updated = existing;
 
       if (
-        (notes && notes.trim() && notes.trim() !== (existing.notes || "")) ||
+        (cleanNotes && cleanNotes !== (existing.notes || "")) ||
         (name && name.trim() && name.trim() !== existing.name)
       ) {
         const updateRes = await db.query(
@@ -888,11 +896,12 @@ app.post("/api/customers", async (req, res) => {
           UPDATE customers
           SET
             name = $1,
-            notes = $2
+            notes = $2,
+            updated_at = NOW()
           WHERE id = $3
           RETURNING *
           `,
-          [name.trim(), notes || existing.notes, existing.id]
+          [name.trim(), cleanNotes || existing.notes, existing.id]
         );
         updated = updateRes.rows[0];
       }
@@ -907,7 +916,7 @@ app.post("/api/customers", async (req, res) => {
       VALUES ($1, $2, $3, $4, $5)
       RETURNING *
       `,
-      [resolvedTenantId, name.trim(), phone || null, email || null, notes || null]
+      [resolvedTenantId, name.trim(), cleanPhone, cleanEmail, cleanNotes]
     );
 
     res.status(201).json({ customer: insertRes.rows[0], existing: false });
