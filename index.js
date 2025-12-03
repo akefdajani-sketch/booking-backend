@@ -841,7 +841,25 @@ app.post("/api/customers", async (req, res) => {
       return res.status(400).json({ error: "Customer name is required." });
     }
 
-    let resolvedTenantId = tenantId || null;
+    // Normalise values
+    const cleanName = name.trim();
+    const cleanPhone =
+      typeof phone === "string" && phone.trim().length > 0
+        ? phone.trim()
+        : null;
+    const cleanEmail =
+      typeof email === "string" && email.trim().length > 0
+        ? email.trim()
+        : null;
+    const cleanNotes =
+      typeof notes === "string" && notes.trim().length > 0
+        ? notes.trim()
+        : null;
+
+    // Resolve tenant
+    let resolvedTenantId =
+      typeof tenantId === "number" ? tenantId : tenantId ? Number(tenantId) : null;
+
     if (!resolvedTenantId && tenantSlug) {
       resolvedTenantId = await getTenantIdFromSlug(tenantSlug);
       if (!resolvedTenantId) {
@@ -855,41 +873,35 @@ app.post("/api/customers", async (req, res) => {
         .json({ error: "You must provide tenantSlug or tenantId." });
     }
 
-    // Normalise optional fields: avoid undefined reaching Postgres
-    const cleanPhone =
-      typeof phone === "string" && phone.trim() !== "" ? phone.trim() : null;
-    const cleanEmail =
-      typeof email === "string" && email.trim() !== "" ? email.trim() : null;
-    const cleanNotes =
-      typeof notes === "string" && notes.trim() !== "" ? notes.trim() : null;
-
     // Try to find an existing customer by phone/email
     let existing = null;
     if (cleanPhone || cleanEmail) {
       const existingRes = await db.query(
         `
-        SELECT *
+        SELECT id, tenant_id, name, phone, email, notes, created_at, updated_at
         FROM customers
         WHERE tenant_id = $1
           AND (
-            ($2 IS NOT NULL AND phone = $2) OR
-            ($3 IS NOT NULL AND email = $3)
+            ($2::text IS NOT NULL AND phone = $2::text) OR
+            ($3::text IS NOT NULL AND email = $3::text)
           )
         LIMIT 1
         `,
         [resolvedTenantId, cleanPhone, cleanEmail]
       );
+
       if (existingRes.rows.length > 0) {
         existing = existingRes.rows[0];
       }
     }
 
+    // If customer exists, optionally update name/notes
     if (existing) {
       let updated = existing;
 
       if (
         (cleanNotes && cleanNotes !== (existing.notes || "")) ||
-        (name && name.trim() && name.trim() !== existing.name)
+        (cleanName && cleanName !== existing.name)
       ) {
         const updateRes = await db.query(
           `
@@ -899,9 +911,9 @@ app.post("/api/customers", async (req, res) => {
             notes = $2,
             updated_at = NOW()
           WHERE id = $3
-          RETURNING *
+          RETURNING id, tenant_id, name, phone, email, notes, created_at, updated_at
           `,
-          [name.trim(), cleanNotes || existing.notes, existing.id]
+          [cleanName, cleanNotes || existing.notes, existing.id]
         );
         updated = updateRes.rows[0];
       }
@@ -914,9 +926,9 @@ app.post("/api/customers", async (req, res) => {
       `
       INSERT INTO customers (tenant_id, name, phone, email, notes)
       VALUES ($1, $2, $3, $4, $5)
-      RETURNING *
+      RETURNING id, tenant_id, name, phone, email, notes, created_at, updated_at
       `,
-      [resolvedTenantId, name.trim(), cleanPhone, cleanEmail, cleanNotes]
+      [resolvedTenantId, cleanName, cleanPhone, cleanEmail, cleanNotes]
     );
 
     res.status(201).json({ customer: insertRes.rows[0], existing: false });
