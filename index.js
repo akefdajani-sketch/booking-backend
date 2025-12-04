@@ -160,7 +160,7 @@ app.get("/api/availability", async (req, res) => {
       return res.status(400).json({ error: "Unknown tenantSlug." });
     }
 
-    // 1) Load service
+    // 1) Load service to know duration & requirements
     const svcRes = await db.query(
       "SELECT * FROM services WHERE id = $1 AND tenant_id = $2",
       [serviceId, tenantId]
@@ -181,7 +181,7 @@ app.get("/api/availability", async (req, res) => {
     const slotIntervalMinutes =
       svc.slot_interval_minutes && Number(svc.slot_interval_minutes) > 0
         ? Number(svc.slot_interval_minutes)
-        : durationMinutes;
+        : durationMinutes; // for now align with duration
 
     const maxParallel =
       svc.max_parallel_bookings && Number(svc.max_parallel_bookings) > 0
@@ -199,12 +199,12 @@ app.get("/api/availability", async (req, res) => {
         .json({ error: "This service requires selecting a resource." });
     }
 
-    // 2) Working hours (simple fallback)
+    // 2) Working hours – **local time**, not UTC
     let openHHMM = "08:00";
     let closeHHMM = "23:00";
 
     try {
-      const day = new Date(date + "T00:00:00Z").getUTCDay(); // 0-6
+      const day = new Date(date + "T00:00:00").getDay(); // 0-6 local time
       const whRes = await db.query(
         `
         SELECT open_time, close_time
@@ -225,25 +225,27 @@ app.get("/api/availability", async (req, res) => {
     const { h: openH, m: openM } = parseHHMM(openHHMM);
     const { h: closeH, m: closeM } = parseHHMM(closeHHMM);
 
-    const dayStart = new Date(date + "T00:00:00Z");
+    // Day anchor in LOCAL time (no "Z")
+    const dayStart = new Date(date + "T00:00:00");
     const openDate = new Date(dayStart);
-    openDate.setUTCHours(openH, openM, 0, 0);
+    openDate.setHours(openH, openM, 0, 0);
     const closeDate = new Date(dayStart);
-    closeDate.setUTCHours(closeH, closeM, 0, 0);
+    closeDate.setHours(closeH, closeM, 0, 0);
 
-    // 3) Bookings for that day
+    // 3) Load bookings for that day (ignore cancelled)
     const bookingsRes = await db.query(
       `
       SELECT id, service_id, staff_id, resource_id, start_time, duration_minutes
       FROM bookings
       WHERE tenant_id = $1
+        AND status <> 'cancelled'
         AND start_time::date = $2::date
       `,
       [tenantId, date]
     );
     const bookings = bookingsRes.rows || [];
 
-    // 4) Generate slots
+    // 4) Generate slots and check conflicts
     const slots = [];
     let cursor = new Date(openDate);
 
@@ -255,7 +257,7 @@ app.get("/api/availability", async (req, res) => {
       let conflicts = 0;
 
       for (const b of bookings) {
-        const bStart = new Date(b.start_time);
+        const bStart = new Date(b.start_time); // JS will convert to local time
         const bEnd = addMinutes(
           bStart,
           b.duration_minutes && Number(b.duration_minutes) > 0
@@ -269,12 +271,16 @@ app.get("/api/availability", async (req, res) => {
         const bResourceId = b.resource_id ? String(b.resource_id) : null;
 
         if (!requiresStaff && !requiresResource) {
+          // capacity/service-only mode
           if (String(b.service_id) === String(serviceId)) conflicts += 1;
         } else if (requiresStaff && !requiresResource) {
+          // staff-only
           if (staffId && bStaffId === String(staffId)) conflicts += 1;
         } else if (!requiresStaff && requiresResource) {
+          // resource-only
           if (resourceId && bResourceId === String(resourceId)) conflicts += 1;
         } else {
+          // staff AND resource
           let clash = false;
           if (staffId && bStaffId === String(staffId)) clash = true;
           if (resourceId && bResourceId === String(resourceId)) clash = true;
@@ -288,10 +294,10 @@ app.get("/api/availability", async (req, res) => {
           : conflicts === 0;
 
       const minutesFromMidnight =
-        slotStart.getUTCHours() * 60 + slotStart.getUTCMinutes();
+        slotStart.getHours() * 60 + slotStart.getMinutes();
       const label = formatLabelFromMinutes(minutesFromMidnight);
-      const hh = String(slotStart.getUTCHours()).padStart(2, "0");
-      const mm = String(slotStart.getUTCMinutes()).padStart(2, "0");
+      const hh = String(slotStart.getHours()).padStart(2, "0");
+      const mm = String(slotStart.getMinutes()).padStart(2, "0");
 
       slots.push({
         time: `${hh}:${mm}`,
