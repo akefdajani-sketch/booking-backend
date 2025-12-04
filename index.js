@@ -120,6 +120,199 @@ async function checkConflicts({
   return conflicts;
 }
 
+/* 🔽🔽🔽  ADD THE AVAILABILITY HELPERS + ROUTE RIGHT HERE 🔽🔽🔽 */
+
+function parseHHMM(hhmm) {
+  const [h, m] = hhmm.split(":").map(Number);
+  return { h: h || 0, m: m || 0 };
+}
+
+function formatLabelFromMinutes(totalMinutes) {
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  const period = hours >= 12 ? "PM" : "AM";
+  const h12 = ((hours + 11) % 12) + 1;
+  const mm = String(minutes).padStart(2, "0");
+  return `${h12}:${mm} ${period}`;
+}
+
+function addMinutes(date, minutes) {
+  return new Date(date.getTime() + minutes * 60 * 1000);
+}
+
+function rangesOverlap(startA, endA, startB, endB) {
+  return !(endA <= startB || endB <= startA);
+}
+
+// GET /api/availability
+app.get("/api/availability", async (req, res) => {
+  try {
+    const { tenantSlug, serviceId, date, staffId, resourceId } = req.query;
+
+    if (!tenantSlug || !serviceId || !date) {
+      return res.status(400).json({
+        error: "Missing required query params (tenantSlug, serviceId, date).",
+      });
+    }
+
+    const tenantId = await getTenantIdFromSlug(tenantSlug);
+    if (!tenantId) {
+      return res.status(400).json({ error: "Unknown tenantSlug." });
+    }
+
+    // 1) Load service
+    const svcRes = await db.query(
+      "SELECT * FROM services WHERE id = $1 AND tenant_id = $2",
+      [serviceId, tenantId]
+    );
+    if (svcRes.rows.length === 0) {
+      return res.status(404).json({ error: "Service not found for tenant." });
+    }
+    const svc = svcRes.rows[0];
+
+    const requiresStaff = !!svc.requires_staff;
+    const requiresResource = !!svc.requires_resource;
+
+    const durationMinutes =
+      svc.duration_minutes && Number(svc.duration_minutes) > 0
+        ? Number(svc.duration_minutes)
+        : 60;
+
+    const slotIntervalMinutes =
+      svc.slot_interval_minutes && Number(svc.slot_interval_minutes) > 0
+        ? Number(svc.slot_interval_minutes)
+        : durationMinutes;
+
+    const maxParallel =
+      svc.max_parallel_bookings && Number(svc.max_parallel_bookings) > 0
+        ? Number(svc.max_parallel_bookings)
+        : 1;
+
+    if (requiresStaff && !staffId) {
+      return res
+        .status(400)
+        .json({ error: "This service requires selecting a staff member." });
+    }
+    if (requiresResource && !resourceId) {
+      return res
+        .status(400)
+        .json({ error: "This service requires selecting a resource." });
+    }
+
+    // 2) Working hours (simple fallback)
+    let openHHMM = "08:00";
+    let closeHHMM = "23:00";
+
+    try {
+      const day = new Date(date + "T00:00:00Z").getUTCDay(); // 0-6
+      const whRes = await db.query(
+        `
+        SELECT open_time, close_time
+        FROM tenant_hours
+        WHERE tenant_id = $1 AND day_of_week = $2 AND is_open = true
+        LIMIT 1
+        `,
+        [tenantId, day]
+      );
+      if (whRes.rows.length > 0) {
+        openHHMM = whRes.rows[0].open_time || openHHMM;
+        closeHHMM = whRes.rows[0].close_time || closeHHMM;
+      }
+    } catch (e) {
+      console.warn("tenant_hours lookup failed, using fallback hours", e);
+    }
+
+    const { h: openH, m: openM } = parseHHMM(openHHMM);
+    const { h: closeH, m: closeM } = parseHHMM(closeHHMM);
+
+    const dayStart = new Date(date + "T00:00:00Z");
+    const openDate = new Date(dayStart);
+    openDate.setUTCHours(openH, openM, 0, 0);
+    const closeDate = new Date(dayStart);
+    closeDate.setUTCHours(closeH, closeM, 0, 0);
+
+    // 3) Bookings for that day
+    const bookingsRes = await db.query(
+      `
+      SELECT id, service_id, staff_id, resource_id, start_time, duration_minutes
+      FROM bookings
+      WHERE tenant_id = $1
+        AND start_time::date = $2::date
+      `,
+      [tenantId, date]
+    );
+    const bookings = bookingsRes.rows || [];
+
+    // 4) Generate slots
+    const slots = [];
+    let cursor = new Date(openDate);
+
+    while (cursor < closeDate) {
+      const slotStart = new Date(cursor);
+      const slotEnd = addMinutes(slotStart, durationMinutes);
+      if (slotEnd > closeDate) break;
+
+      let conflicts = 0;
+
+      for (const b of bookings) {
+        const bStart = new Date(b.start_time);
+        const bEnd = addMinutes(
+          bStart,
+          b.duration_minutes && Number(b.duration_minutes) > 0
+            ? Number(b.duration_minutes)
+            : durationMinutes
+        );
+
+        if (!rangesOverlap(slotStart, slotEnd, bStart, bEnd)) continue;
+
+        const bStaffId = b.staff_id ? String(b.staff_id) : null;
+        const bResourceId = b.resource_id ? String(b.resource_id) : null;
+
+        if (!requiresStaff && !requiresResource) {
+          if (String(b.service_id) === String(serviceId)) conflicts += 1;
+        } else if (requiresStaff && !requiresResource) {
+          if (staffId && bStaffId === String(staffId)) conflicts += 1;
+        } else if (!requiresStaff && requiresResource) {
+          if (resourceId && bResourceId === String(resourceId)) conflicts += 1;
+        } else {
+          let clash = false;
+          if (staffId && bStaffId === String(staffId)) clash = true;
+          if (resourceId && bResourceId === String(resourceId)) clash = true;
+          if (clash) conflicts += 1;
+        }
+      }
+
+      const available =
+        !requiresStaff && !requiresResource
+          ? conflicts < maxParallel
+          : conflicts === 0;
+
+      const minutesFromMidnight =
+        slotStart.getUTCHours() * 60 + slotStart.getUTCMinutes();
+      const label = formatLabelFromMinutes(minutesFromMidnight);
+      const hh = String(slotStart.getUTCHours()).padStart(2, "0");
+      const mm = String(slotStart.getUTCMinutes()).padStart(2, "0");
+
+      slots.push({
+        time: `${hh}:${mm}`,
+        label,
+        available,
+      });
+
+      cursor = addMinutes(cursor, slotIntervalMinutes);
+    }
+
+    res.json({ slots, durationMinutes });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to compute availability." });
+  }
+});
+
+/* 🔼🔼🔼  END OF AVAILABILITY BLOCK 🔼🔼🔼 */
+
+
+
 // ---------------------------------------------------------------------------
 // Tenants
 // ---------------------------------------------------------------------------
