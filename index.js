@@ -635,6 +635,7 @@ app.post("/api/tenants/:tenantId/working-hours", async (req, res) => {
     });
   }
 });
+
 // ---------------------------------------------------------------------------
 // Tenant logo upload
 // ---------------------------------------------------------------------------
@@ -684,6 +685,107 @@ app.post(
   }
 );
 
+// ---------------------------------------------------------------------------
+// Service image upload
+// ---------------------------------------------------------------------------
+
+app.post(
+  "/api/services/:id/image",
+  upload.single("file"),
+  async (req, res) => {
+    try {
+      const id = Number(req.params.id);
+      if (!id) {
+        return res.status(400).json({ error: "Invalid service id." });
+      }
+
+      if (!req.file) {
+        return res.status(400).json({ error: "No file uploaded." });
+      }
+
+      const imageUrl = `/uploads/${req.file.filename}`;
+
+      await db.query(
+        "UPDATE services SET image_url = $1 WHERE id = $2",
+        [imageUrl, id]
+      );
+
+      const sRes = await db.query("SELECT * FROM services WHERE id = $1", [id]);
+      return res.json({ ok: true, imageUrl, service: sRes.rows[0] });
+    } catch (err) {
+      console.error("Service image upload error:", err);
+      return res.status(500).json({ error: "Failed to upload image." });
+    }
+  }
+);
+
+// ---------------------------------------------------------------------------
+// Staff avatar upload
+// ---------------------------------------------------------------------------
+
+app.post(
+  "/api/staff/:id/image",
+  upload.single("file"),
+  async (req, res) => {
+    try {
+      const id = Number(req.params.id);
+      if (!id) {
+        return res.status(400).json({ error: "Invalid staff id." });
+      }
+
+      if (!req.file) {
+        return res.status(400).json({ error: "No file uploaded." });
+      }
+
+      const avatarUrl = `/uploads/${req.file.filename}`;
+
+      await db.query(
+        "UPDATE staff SET avatar_url = $1 WHERE id = $2",
+        [avatarUrl, id]
+      );
+
+      const sRes = await db.query("SELECT * FROM staff WHERE id = $1", [id]);
+      return res.json({ ok: true, avatarUrl, staff: sRes.rows[0] });
+    } catch (err) {
+      console.error("Staff image upload error:", err);
+      return res.status(500).json({ error: "Failed to upload image." });
+    }
+  }
+);
+
+// ---------------------------------------------------------------------------
+// Resource image upload
+// ---------------------------------------------------------------------------
+
+app.post(
+  "/api/resources/:id/image",
+  upload.single("file"),
+  async (req, res) => {
+    try {
+      const id = Number(req.params.id);
+      if (!id) {
+        return res.status(400).json({ error: "Invalid resource id." });
+      }
+
+      if (!req.file) {
+        return res.status(400).json({ error: "No file uploaded." });
+      }
+
+      const imageUrl = `/uploads/${req.file.filename}`;
+
+      await db.query(
+        "UPDATE resources SET image_url = $1 WHERE id = $2",
+        [imageUrl, id]
+      );
+
+      const rRes = await db.query("SELECT * FROM resources WHERE id = $1", [id]);
+      return res.json({ ok: true, imageUrl, resource: rRes.rows[0] });
+    } catch (err) {
+      console.error("Resource image upload error:", err);
+      return res.status(500).json({ error: "Failed to upload image." });
+    }
+  }
+);
 
 // ---------------------------------------------------------------------------
 // Services
