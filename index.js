@@ -531,7 +531,8 @@ app.post("/api/tenant-hours", async (req, res) => {
 app.post("/api/tenants/:tenantId/working-hours", async (req, res) => {
   const rawTenantId = req.params.tenantId;
   const tenantId = Number(rawTenantId);
-  const { workingHours } = req.body || {};
+  const body = req.body || {};
+  const workingHours = body.workingHours;
 
   if (!tenantId) {
     return res.status(400).json({ error: "Invalid tenant id." });
@@ -567,17 +568,21 @@ app.post("/api/tenants/:tenantId/working-hours", async (req, res) => {
     const params = [];
     let p = 1;
 
-    for (const [key, conf] of Object.entries(workingHours)) {
+    const entries = Object.entries(workingHours);
+    for (let i = 0; i < entries.length; i++) {
+      const pair = entries[i];
+      const key = pair[0];
+      const conf = pair[1] || {};
+
       const idx = dayKeyToIndex[key];
       if (idx === undefined) continue;
 
-      const c = conf as any;
-      const closed = !!c.closed;
+      const closed = !!conf.closed;
 
       // only insert rows for open days
       if (!closed) {
-        const open = c.open || "10:00";
-        const close = c.close || "22:00";
+        const open = conf.open || "10:00";
+        const close = conf.close || "22:00";
 
         values.push(
           `($${p++}, $${p++}, $${p++}, $${p++}, $${p++})`
@@ -614,9 +619,6 @@ app.post("/api/tenants/:tenantId/working-hours", async (req, res) => {
     return res.status(500).json({ error: "Failed to save working hours." });
   }
 });
-
-
-
 
 // ---------------------------------------------------------------------------
 // Services
