@@ -3,12 +3,43 @@
 const express = require("express");
 const cors = require("cors");
 const db = require("./db");
+const path = require("path");
+const fs = require("fs");
+const multer = require("multer");
 
 const app = express();
 const PORT = process.env.PORT || 3001;
 
 app.use(cors());
 app.use(express.json());
+
+// ---------------------------------------------------------------------------
+// File uploads (tenant logos)
+// ---------------------------------------------------------------------------
+
+const uploadDir = path.join(__dirname, "uploads");
+
+// ensure uploads directory exists
+if (!fs.existsSync(uploadDir)) {
+  fs.mkdirSync(uploadDir, { recursive: true });
+}
+
+// store files as: uploads/tenant-<id>-logo.ext
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    cb(null, uploadDir);
+  },
+  filename: (req, file, cb) => {
+    const tenantId = req.params.tenantId || "unknown";
+    const ext = path.extname(file.originalname || "");
+    cb(null, `tenant-${tenantId}-logo${ext || ""}`);
+  },
+});
+
+const upload = multer({ storage });
+
+// serve the uploads folder statically so frontend can show the logo
+app.use("/uploads", express.static(uploadDir));
 
 // ---------------------------------------------------------------------------
 // Health check
@@ -601,6 +632,54 @@ app.post("/api/tenants/:tenantId/working-hours", async (req, res) => {
     });
   }
 });
+// ---------------------------------------------------------------------------
+// Tenant logo upload
+// ---------------------------------------------------------------------------
+
+app.post(
+  "/api/tenants/:tenantId/logo",
+  upload.single("file"), // field name is "file" from FormData
+  async (req, res) => {
+    try {
+      const tenantId = Number(req.params.tenantId);
+      if (!tenantId) {
+        return res.status(400).json({ error: "Invalid tenant id." });
+      }
+
+      if (!req.file) {
+        return res.status(400).json({ error: "No file uploaded." });
+      }
+
+      // URL that frontend can use to display the logo
+      const logoUrl = `/uploads/${req.file.filename}`;
+
+      // save to tenants table (make sure there is a logo_url column)
+      await db.query(
+        "UPDATE tenants SET logo_url = $1 WHERE id = $2",
+        [logoUrl, tenantId]
+      );
+
+      // return updated tenant so frontend can refresh UI
+      const tRes = await db.query(
+        "SELECT id, slug, name, kind, logo_url FROM tenants WHERE id = $1",
+        [tenantId]
+      );
+
+      const tenant = tRes.rows[0] || null;
+
+      return res.json({
+        ok: true,
+        logoUrl,
+        tenant,
+      });
+    } catch (err) {
+      console.error("Error uploading tenant logo:", err);
+      return res
+        .status(500)
+        .json({ error: "Failed to upload logo.", details: String(err) });
+    }
+  }
+);
 
 
 // ---------------------------------------------------------------------------
