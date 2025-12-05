@@ -525,12 +525,10 @@ app.post("/api/tenant-hours", async (req, res) => {
 
 
 // ---------------------------------------------------------------------------
-// Tenant working hours (save + sync to tenant_hours table)
+// Tenant working hours — writes directly to tenant_hours table
 // ---------------------------------------------------------------------------
-
 app.post("/api/tenants/:tenantId/working-hours", async (req, res) => {
-  const rawTenantId = req.params.tenantId;
-  const tenantId = Number(rawTenantId);
+  const tenantId = Number(req.params.tenantId);
   const body = req.body || {};
   const workingHours = body.workingHours;
 
@@ -541,8 +539,8 @@ app.post("/api/tenants/:tenantId/working-hours", async (req, res) => {
     return res.status(400).json({ error: "Missing workingHours." });
   }
 
-  // map keys sun..sat -> 0..6 (or whatever you use)
-  const dayKeyToIndex = {
+  // UI keys -> database day_of_week
+  const mapDay = {
     sun: 0,
     mon: 1,
     tue: 2,
@@ -555,70 +553,55 @@ app.post("/api/tenants/:tenantId/working-hours", async (req, res) => {
   try {
     await db.query("BEGIN");
 
-    // 1) store JSON on tenants.working_hours (for the UI)
-    await db.query(
-      "UPDATE tenants SET working_hours = $1 WHERE id = $2",
-      [JSON.stringify(workingHours), tenantId]
-    );
-
-    // 2) rebuild tenant_hours table (for availability)
+    // wipe old hours
     await db.query("DELETE FROM tenant_hours WHERE tenant_id = $1", [tenantId]);
 
-    const values = [];
-    const params = [];
+    const entries = Object.entries(workingHours);
+    let params = [];
+    let values = [];
     let p = 1;
 
-    const entries = Object.entries(workingHours);
-    for (let i = 0; i < entries.length; i++) {
-      const pair = entries[i];
-      const key = pair[0];
-      const conf = pair[1] || {};
-
-      const idx = dayKeyToIndex[key];
+    for (const [key, conf] of entries) {
+      const idx = mapDay[key];
       if (idx === undefined) continue;
 
-      const closed = !!conf.closed;
+      const isClosed = !!conf.closed;
 
-      // only insert rows for open days
-      if (!closed) {
-        const open = conf.open || "10:00";
-        const close = conf.close || "22:00";
+      // open_time & close_time only stored when NOT closed
+      const openTime = isClosed ? null : conf.open;
+      const closeTime = isClosed ? null : conf.close;
 
-        values.push(
-          `($${p++}, $${p++}, $${p++}, $${p++}, $${p++})`
-        );
-        params.push(
-          tenantId,
-          idx,
-          true,        // is_open
-          open,
-          close
-        );
-      }
+      values.push(`($${p++}, $${p++}, $${p++}, $${p++}, $${p++})`);
+      params.push(
+        tenantId,
+        idx,
+        openTime,
+        closeTime,
+        isClosed // matches your "is_closed" column
+      );
     }
 
-    if (values.length) {
-      await db.query(
-        `
+    if (values.length > 0) {
+      const sql = `
         INSERT INTO tenant_hours
-          (tenant_id, day_of_week, is_open, open_time, close_time)
-        VALUES
-          ${values.join(",")}
-        `,
-        params
-      );
+          (tenant_id, day_of_week, open_time, close_time, is_closed)
+        VALUES ${values.join(",")}
+      `;
+      await db.query(sql, params);
     }
 
     await db.query("COMMIT");
     return res.json({ ok: true });
   } catch (err) {
     console.error("Error saving working hours:", err);
-    try {
-      await db.query("ROLLBACK");
-    } catch (_) {}
-    return res.status(500).json({ error: "Failed to save working hours." });
+    await db.query("ROLLBACK");
+    return res.status(500).json({
+      error: "Failed to save working hours.",
+      details: err.message,
+    });
   }
 });
+
 
 // ---------------------------------------------------------------------------
 // Services
