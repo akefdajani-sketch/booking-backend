@@ -30,9 +30,12 @@ const storage = multer.diskStorage({
     cb(null, uploadDir);
   },
   filename: (req, file, cb) => {
-    const tenantId = req.params.tenantId || "unknown";
     const ext = path.extname(file.originalname || "");
-    cb(null, `tenant-${tenantId}-logo${ext || ""}`);
+    const base =
+      path.basename(file.originalname || "file", ext).replace(/\s+/g, "-") ||
+      "file";
+    const unique = Date.now();
+    cb(null, `${base.toLowerCase()}-${unique}${ext || ""}`);
   },
 });
 
@@ -854,6 +857,52 @@ app.delete("/api/services/:id", async (req, res) => {
       .json({ error: err.message || "Failed to delete service" });
   }
 });
+
+// ---------------------------------------------------------------------------
+// Service image upload
+// ---------------------------------------------------------------------------
+
+app.post(
+  "/api/services/:serviceId/image",
+  upload.single("file"), // field name must match FormData.append(...)
+  async (req, res) => {
+    try {
+      const serviceId = Number(req.params.serviceId);
+      if (!serviceId) {
+        return res.status(400).json({ error: "Invalid service id." });
+      }
+
+      if (!req.file) {
+        return res.status(400).json({ error: "No file uploaded." });
+      }
+
+      const imageUrl = `/uploads/${req.file.filename}`;
+
+      // Save URL in services table
+      await db.query(
+        "UPDATE services SET image_url = $1 WHERE id = $2",
+        [imageUrl, serviceId]
+      );
+
+      // Return updated service so frontend can refresh UI
+      const sRes = await db.query(
+        "SELECT id, tenant_id, name, duration_minutes, price, needs_staff, needs_resource, image_url FROM services WHERE id = $1",
+        [serviceId]
+      );
+
+      const service = sRes.rows[0] || null;
+
+      return res.json({ ok: true, imageUrl, service });
+    } catch (err) {
+      console.error("Error uploading service image:", err);
+      return res
+        .status(500)
+        .json({ error: "Failed to upload image.", details: String(err) });
+    }
+  }
+);
+
+
 
 // ---------------------------------------------------------------------------
 // Staff
