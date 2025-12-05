@@ -523,6 +523,101 @@ app.post("/api/tenant-hours", async (req, res) => {
   }
 });
 
+
+// ---------------------------------------------------------------------------
+// Tenant working hours (save + sync to tenant_hours table)
+// ---------------------------------------------------------------------------
+
+app.post("/api/tenants/:tenantId/working-hours", async (req, res) => {
+  const rawTenantId = req.params.tenantId;
+  const tenantId = Number(rawTenantId);
+  const { workingHours } = req.body || {};
+
+  if (!tenantId) {
+    return res.status(400).json({ error: "Invalid tenant id." });
+  }
+  if (!workingHours || typeof workingHours !== "object") {
+    return res.status(400).json({ error: "Missing workingHours." });
+  }
+
+  // map keys sun..sat -> 0..6 (or whatever you use)
+  const dayKeyToIndex = {
+    sun: 0,
+    mon: 1,
+    tue: 2,
+    wed: 3,
+    thu: 4,
+    fri: 5,
+    sat: 6,
+  };
+
+  try {
+    await db.query("BEGIN");
+
+    // 1) store JSON on tenants.working_hours (for the UI)
+    await db.query(
+      "UPDATE tenants SET working_hours = $1 WHERE id = $2",
+      [JSON.stringify(workingHours), tenantId]
+    );
+
+    // 2) rebuild tenant_hours table (for availability)
+    await db.query("DELETE FROM tenant_hours WHERE tenant_id = $1", [tenantId]);
+
+    const values = [];
+    const params = [];
+    let p = 1;
+
+    for (const [key, conf] of Object.entries(workingHours)) {
+      const idx = dayKeyToIndex[key];
+      if (idx === undefined) continue;
+
+      const c = conf as any;
+      const closed = !!c.closed;
+
+      // only insert rows for open days
+      if (!closed) {
+        const open = c.open || "10:00";
+        const close = c.close || "22:00";
+
+        values.push(
+          `($${p++}, $${p++}, $${p++}, $${p++}, $${p++})`
+        );
+        params.push(
+          tenantId,
+          idx,
+          true,        // is_open
+          open,
+          close
+        );
+      }
+    }
+
+    if (values.length) {
+      await db.query(
+        `
+        INSERT INTO tenant_hours
+          (tenant_id, day_of_week, is_open, open_time, close_time)
+        VALUES
+          ${values.join(",")}
+        `,
+        params
+      );
+    }
+
+    await db.query("COMMIT");
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error("Error saving working hours:", err);
+    try {
+      await db.query("ROLLBACK");
+    } catch (_) {}
+    return res.status(500).json({ error: "Failed to save working hours." });
+  }
+});
+
+
+
+
 // ---------------------------------------------------------------------------
 // Services
 // ---------------------------------------------------------------------------
