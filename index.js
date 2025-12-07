@@ -233,12 +233,15 @@ app.get("/api/availability", async (req, res) => {
         .json({ error: "This service requires selecting a resource." });
     }
 
-    // 2) Working hours – as HH:MM -> minutes-from-midnight (no JS Date)
+    // ---------------------------------------------------------------------
+    // 2) Working hours (local Jordan time) as minutes-from-midnight
+    // ---------------------------------------------------------------------
+
     let openHHMM = "08:00";
     let closeHHMM = "23:00";
 
     try {
-      const day = new Date(date + "T00:00:00").getDay(); // 0-6
+      const day = new Date(date + "T00:00:00").getDay(); // 0-6 (local view of that date)
       const whRes = await db.query(
         `
         SELECT open_time, close_time
@@ -262,8 +265,16 @@ app.get("/api/availability", async (req, res) => {
     const openMinutes = openH * 60 + openM;
     const closeMinutes = closeH * 60 + closeM;
 
-    // 3) Load bookings for that day (ignore cancelled)
-    //    and pre-compute their local hour/minute in SQL.
+    // ---------------------------------------------------------------------
+    // 3) Load bookings for that day (ignore cancelled).
+    //
+    //    Postgres EXTRACT(HOUR/MINUTE FROM start_time) will give us the
+    //    hour/minute in the DB timezone (very often UTC on production).
+    //    Birdie is in Jordan (UTC+3), so we convert UTC -> local by adding
+    //    180 minutes. If you support other timezones later, make this
+    //    tenant-specific.
+    // ---------------------------------------------------------------------
+
     const bookingsRes = await db.query(
       `
       SELECT
@@ -284,12 +295,18 @@ app.get("/api/availability", async (req, res) => {
     );
     const bookings = bookingsRes.rows || [];
 
-    // Helper: check overlap in minutes-from-midnight
+    // DB times assumed UTC; Jordan is UTC+3 -> +180 minutes
+    const DB_TO_LOCAL_OFFSET_MIN = 3 * 60;
+
+    // Simple overlap helper in minutes-from-midnight
     function minutesOverlap(aStart, aEnd, bStart, bEnd) {
       return aStart < bEnd && bStart < aEnd;
     }
 
+    // ---------------------------------------------------------------------
     // 4) Generate slots and check conflicts (all integer minutes)
+    // ---------------------------------------------------------------------
+
     const slots = [];
 
     for (
@@ -301,8 +318,13 @@ app.get("/api/availability", async (req, res) => {
       let conflicts = 0;
 
       for (const b of bookings) {
-        const bStartMinutes =
+        // Minutes from midnight in DB timezone (likely UTC)
+        const dbStartMinutes =
           Number(b.start_hour) * 60 + Number(b.start_minute);
+
+        // Convert to local Jordan minutes (UTC+3)
+        const bStartMinutes =
+          (dbStartMinutes + DB_TO_LOCAL_OFFSET_MIN + 1440) % 1440;
 
         const bDuration =
           b.duration_minutes && Number(b.duration_minutes) > 0
@@ -311,7 +333,14 @@ app.get("/api/availability", async (req, res) => {
 
         const bEndMinutes = bStartMinutes + bDuration;
 
-        if (!minutesOverlap(slotStartMinutes, slotEndMinutes, bStartMinutes, bEndMinutes)) {
+        if (
+          !minutesOverlap(
+            slotStartMinutes,
+            slotEndMinutes,
+            bStartMinutes,
+            bEndMinutes
+          )
+        ) {
           continue;
         }
 
@@ -346,8 +375,8 @@ app.get("/api/availability", async (req, res) => {
       const mm = String(slotStartMinutes % 60).padStart(2, "0");
 
       slots.push({
-        time: `${hh}:${mm}`, // "HH:MM"
-        label,               // e.g. "8:00 PM"
+        time: `${hh}:${mm}`, // "HH:MM" for the frontend
+        label,               // e.g. "9:00 PM"
         available,
       });
     }
