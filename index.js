@@ -234,45 +234,62 @@ app.get("/api/availability", async (req, res) => {
     }
 
     // ---------------------------------------------------------------------
-    // 2) Working hours (local Jordan time) as minutes-from-midnight
+    // 2) Working hours from tenant_hours (your schema: is_closed)
+    //    Stored as open_time / close_time (time), + is_closed (bool).
+    //    If close_time = 00:00, we treat it as midnight (24:00).
     // ---------------------------------------------------------------------
 
     let openHHMM = "08:00";
     let closeHHMM = "23:00";
 
     try {
-      const day = new Date(date + "T00:00:00").getDay(); // 0-6 (local view of that date)
+      const day = new Date(date + "T00:00:00").getDay(); // 0-6 local
       const whRes = await db.query(
         `
-        SELECT open_time, close_time
+        SELECT open_time, close_time, is_closed
         FROM tenant_hours
-        WHERE tenant_id = $1 AND day_of_week = $2 AND is_open = true
+        WHERE tenant_id = $1 AND day_of_week = $2
         LIMIT 1
         `,
         [tenantId, day]
       );
       if (whRes.rows.length > 0) {
-        openHHMM = whRes.rows[0].open_time || openHHMM;
-        closeHHMM = whRes.rows[0].close_time || closeHHMM;
+        const row = whRes.rows[0];
+
+        if (row.is_closed) {
+          // Day is marked closed → no slots at all
+          return res.json({ slots: [], durationMinutes });
+        }
+
+        if (row.open_time) {
+          // Convert "10:00:00" -> "10:00"
+          openHHMM = row.open_time.toString().slice(0, 5);
+        }
+        if (row.close_time) {
+          // Convert "00:00:00" -> "00:00"
+          closeHHMM = row.close_time.toString().slice(0, 5);
+        }
       }
     } catch (e) {
       console.warn("tenant_hours lookup failed, using fallback hours", e);
     }
 
     const { h: openH, m: openM } = parseHHMM(openHHMM);
-    const { h: closeH, m: closeM } = parseHHMM(closeHHMM);
+    const { h: closeHRaw, m: closeM } = parseHHMM(closeHHMM);
 
-    const openMinutes = openH * 60 + openM;
-    const closeMinutes = closeH * 60 + closeM;
+    let openMinutes = openH * 60 + openM;
+    let closeMinutes = closeHRaw * 60 + closeM;
+
+    // If close <= open, assume it means "until midnight" (24:00)
+    // e.g. open = 10:00 (600), close = 00:00 (0) -> treat close = 24:00 (1440)
+    if (closeMinutes <= openMinutes) {
+      closeMinutes += 24 * 60;
+    }
 
     // ---------------------------------------------------------------------
     // 3) Load bookings for that day (ignore cancelled).
-    //
-    //    Postgres EXTRACT(HOUR/MINUTE FROM start_time) will give us the
-    //    hour/minute in the DB timezone (very often UTC on production).
-    //    Birdie is in Jordan (UTC+3), so we convert UTC -> local by adding
-    //    180 minutes. If you support other timezones later, make this
-    //    tenant-specific.
+    //    DB stores start_time in UTC; Birdie is UTC+3 (Jordan), so we apply
+    //    a fixed +180 minute conversion to local.
     // ---------------------------------------------------------------------
 
     const bookingsRes = await db.query(
@@ -298,7 +315,6 @@ app.get("/api/availability", async (req, res) => {
     // DB times assumed UTC; Jordan is UTC+3 -> +180 minutes
     const DB_TO_LOCAL_OFFSET_MIN = 3 * 60;
 
-    // Simple overlap helper in minutes-from-midnight
     function minutesOverlap(aStart, aEnd, bStart, bEnd) {
       return aStart < bEnd && bStart < aEnd;
     }
@@ -370,13 +386,13 @@ app.get("/api/availability", async (req, res) => {
           ? conflicts < maxParallel
           : conflicts === 0;
 
-      const label = formatLabelFromMinutes(slotStartMinutes);
-      const hh = String(Math.floor(slotStartMinutes / 60)).padStart(2, "0");
+      const label = formatLabelFromMinutes(slotStartMinutes % (24 * 60));
+      const hh = String(Math.floor(slotStartMinutes / 60) % 24).padStart(2, "0");
       const mm = String(slotStartMinutes % 60).padStart(2, "0");
 
       slots.push({
         time: `${hh}:${mm}`, // "HH:MM" for the frontend
-        label,               // e.g. "9:00 PM"
+        label,               // e.g. "10:00 AM", "11:00 PM"
         available,
       });
     }
@@ -387,6 +403,7 @@ app.get("/api/availability", async (req, res) => {
     res.status(500).json({ error: "Failed to compute availability." });
   }
 });
+
 
 
 /* 🔼🔼🔼  END OF AVAILABILITY BLOCK 🔼🔼🔼 */
