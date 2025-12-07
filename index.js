@@ -233,12 +233,12 @@ app.get("/api/availability", async (req, res) => {
         .json({ error: "This service requires selecting a resource." });
     }
 
-    // 2) Working hours – **local time**, not UTC
+    // 2) Working hours – as HH:MM -> minutes-from-midnight (no JS Date)
     let openHHMM = "08:00";
     let closeHHMM = "23:00";
 
     try {
-      const day = new Date(date + "T00:00:00").getDay(); // 0-6 local time
+      const day = new Date(date + "T00:00:00").getDay(); // 0-6
       const whRes = await db.query(
         `
         SELECT open_time, close_time
@@ -259,17 +259,22 @@ app.get("/api/availability", async (req, res) => {
     const { h: openH, m: openM } = parseHHMM(openHHMM);
     const { h: closeH, m: closeM } = parseHHMM(closeHHMM);
 
-    // Day anchor in LOCAL time (no "Z")
-    const dayStart = new Date(date + "T00:00:00");
-    const openDate = new Date(dayStart);
-    openDate.setHours(openH, openM, 0, 0);
-    const closeDate = new Date(dayStart);
-    closeDate.setHours(closeH, closeM, 0, 0);
+    const openMinutes = openH * 60 + openM;
+    const closeMinutes = closeH * 60 + closeM;
 
     // 3) Load bookings for that day (ignore cancelled)
+    //    and pre-compute their local hour/minute in SQL.
     const bookingsRes = await db.query(
       `
-      SELECT id, service_id, staff_id, resource_id, start_time, duration_minutes
+      SELECT
+        id,
+        service_id,
+        staff_id,
+        resource_id,
+        start_time,
+        duration_minutes,
+        EXTRACT(HOUR   FROM start_time) AS start_hour,
+        EXTRACT(MINUTE FROM start_time) AS start_minute
       FROM bookings
       WHERE tenant_id = $1
         AND status <> 'cancelled'
@@ -279,27 +284,36 @@ app.get("/api/availability", async (req, res) => {
     );
     const bookings = bookingsRes.rows || [];
 
-    // 4) Generate slots and check conflicts
+    // Helper: check overlap in minutes-from-midnight
+    function minutesOverlap(aStart, aEnd, bStart, bEnd) {
+      return aStart < bEnd && bStart < aEnd;
+    }
+
+    // 4) Generate slots and check conflicts (all integer minutes)
     const slots = [];
-    let cursor = new Date(openDate);
 
-    while (cursor < closeDate) {
-      const slotStart = new Date(cursor);
-      const slotEnd = addMinutes(slotStart, durationMinutes);
-      if (slotEnd > closeDate) break;
-
+    for (
+      let slotStartMinutes = openMinutes;
+      slotStartMinutes + durationMinutes <= closeMinutes;
+      slotStartMinutes += slotIntervalMinutes
+    ) {
+      const slotEndMinutes = slotStartMinutes + durationMinutes;
       let conflicts = 0;
 
       for (const b of bookings) {
-        const bStart = new Date(b.start_time); // JS will convert to local time
-        const bEnd = addMinutes(
-          bStart,
+        const bStartMinutes =
+          Number(b.start_hour) * 60 + Number(b.start_minute);
+
+        const bDuration =
           b.duration_minutes && Number(b.duration_minutes) > 0
             ? Number(b.duration_minutes)
-            : durationMinutes
-        );
+            : durationMinutes;
 
-        if (!rangesOverlap(slotStart, slotEnd, bStart, bEnd)) continue;
+        const bEndMinutes = bStartMinutes + bDuration;
+
+        if (!minutesOverlap(slotStartMinutes, slotEndMinutes, bStartMinutes, bEndMinutes)) {
+          continue;
+        }
 
         const bStaffId = b.staff_id ? String(b.staff_id) : null;
         const bResourceId = b.resource_id ? String(b.resource_id) : null;
@@ -327,19 +341,15 @@ app.get("/api/availability", async (req, res) => {
           ? conflicts < maxParallel
           : conflicts === 0;
 
-      const minutesFromMidnight =
-        slotStart.getHours() * 60 + slotStart.getMinutes();
-      const label = formatLabelFromMinutes(minutesFromMidnight);
-      const hh = String(slotStart.getHours()).padStart(2, "0");
-      const mm = String(slotStart.getMinutes()).padStart(2, "0");
+      const label = formatLabelFromMinutes(slotStartMinutes);
+      const hh = String(Math.floor(slotStartMinutes / 60)).padStart(2, "0");
+      const mm = String(slotStartMinutes % 60).padStart(2, "0");
 
       slots.push({
-        time: `${hh}:${mm}`,
-        label,
+        time: `${hh}:${mm}`, // "HH:MM"
+        label,               // e.g. "8:00 PM"
         available,
       });
-
-      cursor = addMinutes(cursor, slotIntervalMinutes);
     }
 
     res.json({ slots, durationMinutes });
@@ -348,6 +358,7 @@ app.get("/api/availability", async (req, res) => {
     res.status(500).json({ error: "Failed to compute availability." });
   }
 });
+
 
 /* 🔼🔼🔼  END OF AVAILABILITY BLOCK 🔼🔼🔼 */
 
