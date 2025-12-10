@@ -1607,7 +1607,8 @@ app.post("/api/bookings", async (req, res) => {
       customerEmail,
       staffId,
       resourceId,
-    } = req.body;
+      customerId,          // NEW: optional existing customer id
+    } = req.body || {};
 
     if (!customerName || !customerName.trim() || !startTime) {
       return res.status(400).json({
@@ -1615,8 +1616,19 @@ app.post("/api/bookings", async (req, res) => {
       });
     }
 
-    let resolvedTenantId = tenantId || null;
-    let resolvedServiceId = serviceId || null;
+    let resolvedTenantId =
+      typeof tenantId === "number"
+        ? tenantId
+        : tenantId
+        ? Number(tenantId)
+        : null;
+    let resolvedServiceId =
+      typeof serviceId === "number"
+        ? serviceId
+        : serviceId
+        ? Number(serviceId)
+        : null;
+
     let duration =
       durationMinutes && Number(durationMinutes) > 0
         ? Number(durationMinutes)
@@ -1631,7 +1643,7 @@ app.post("/api/bookings", async (req, res) => {
       resolvedTenantId = tid;
     }
 
-    // If serviceId is provided, verify it and infer tenant if still missing
+    // If serviceId is provided, verify it and infer tenant / duration
     if (resolvedServiceId) {
       const sRes = await db.query(
         `
@@ -1643,7 +1655,7 @@ app.post("/api/bookings", async (req, res) => {
       );
 
       if (sRes.rows.length === 0) {
-        return res.status(400).json({ error: "Unknown service." });
+        return res.status(400).json({ error: "Unknown serviceId." });
       }
 
       const s = sRes.rows[0];
@@ -1660,7 +1672,10 @@ app.post("/api/bookings", async (req, res) => {
 
       // if duration not provided, default to service duration
       if (!duration) {
-        duration = s.duration_minutes || 60;
+        duration =
+          s.duration_minutes && Number(s.duration_minutes) > 0
+            ? Number(s.duration_minutes)
+            : 60;
       }
     }
 
@@ -1675,13 +1690,15 @@ app.post("/api/bookings", async (req, res) => {
       return res.status(400).json({ error: "Invalid startTime." });
     }
     if (!duration) {
-      duration = 60; // fallback if nothing else
+      duration = 60; // final fallback
     }
 
     const staff_id = staffId ? Number(staffId) : null;
     const resource_id = resourceId ? Number(resourceId) : null;
 
-    // conflict checks for staff/resource
+    // ---------------------------------------------------------------------
+    // 1) Check conflicts for staff/resource
+    // ---------------------------------------------------------------------
     const conflicts = await checkConflicts({
       tenantId: resolvedTenantId,
       staffId: staff_id,
@@ -1697,15 +1714,96 @@ app.post("/api/bookings", async (req, res) => {
       });
     }
 
-    // Insert booking
+    // ---------------------------------------------------------------------
+    // 2) Resolve / upsert customer and get a customer_id
+    // ---------------------------------------------------------------------
+    const cleanName = customerName.trim();
+    const cleanPhone =
+      typeof customerPhone === "string" && customerPhone.trim().length
+        ? customerPhone.trim()
+        : null;
+    const cleanEmail =
+      typeof customerEmail === "string" && customerEmail.trim().length
+        ? customerEmail.trim()
+        : null;
+
+    let finalCustomerId = null;
+
+    // 2a) If client sent an explicit customerId, verify it belongs to this tenant
+    if (customerId) {
+      const cid = Number(customerId);
+      const cRes = await db.query(
+        `
+        SELECT id
+        FROM customers
+        WHERE id = $1 AND tenant_id = $2
+        `,
+        [cid, resolvedTenantId]
+      );
+      if (cRes.rows.length > 0) {
+        finalCustomerId = cRes.rows[0].id;
+      }
+    }
+
+    // 2b) If no valid customerId yet but we have phone/email, upsert
+    if (!finalCustomerId && (cleanPhone || cleanEmail)) {
+      const existingRes = await db.query(
+        `
+        SELECT id, name
+        FROM customers
+        WHERE tenant_id = $1
+          AND (
+            ($2::text IS NOT NULL AND phone = $2::text) OR
+            ($3::text IS NOT NULL AND email = $3::text)
+          )
+        LIMIT 1
+        `,
+        [resolvedTenantId, cleanPhone, cleanEmail]
+      );
+
+      if (existingRes.rows.length > 0) {
+        // Existing customer – update name if changed
+        finalCustomerId = existingRes.rows[0].id;
+
+        if (
+          cleanName &&
+          cleanName.length &&
+          cleanName !== existingRes.rows[0].name
+        ) {
+          await db.query(
+            `
+            UPDATE customers
+            SET name = $1, updated_at = NOW()
+            WHERE id = $2
+            `,
+            [cleanName, finalCustomerId]
+          );
+        }
+      } else {
+        // Insert new customer
+        const insertCust = await db.query(
+          `
+          INSERT INTO customers (tenant_id, name, phone, email, notes, created_at)
+          VALUES ($1, $2, $3, $4, NULL, NOW())
+          RETURNING id
+          `,
+          [resolvedTenantId, cleanName, cleanPhone, cleanEmail]
+        );
+        finalCustomerId = insertCust.rows[0].id;
+      }
+    }
+
+    // ---------------------------------------------------------------------
+    // 3) Insert booking with customer_id
+    // ---------------------------------------------------------------------
     const insert = await db.query(
       `
       INSERT INTO bookings
         (tenant_id, service_id, staff_id, resource_id, start_time, duration_minutes,
-         customer_name, customer_phone, customer_email, status)
+         customer_id, customer_name, customer_phone, customer_email, status)
       VALUES
         ($1, $2, $3, $4, $5, $6,
-         $7, $8, $9, 'pending')
+         $7, $8, $9, $10, 'pending')
       RETURNING id;
       `,
       [
@@ -1715,130 +1813,25 @@ app.post("/api/bookings", async (req, res) => {
         resource_id,
         start.toISOString(),
         duration,
-        customerName.trim(),
-        customerPhone || null,
-        customerEmail || null,
+        finalCustomerId,                   // NEW: link to customers table
+        cleanName,
+        cleanPhone,
+        cleanEmail,
       ]
     );
 
     const bookingId = insert.rows[0].id;
 
-    // Auto-create / upsert customer (non-blocking for booking success)
-    if (resolvedTenantId && (customerPhone || customerEmail)) {
-      try {
-        const existingRes = await db.query(
-          `
-          SELECT id
-          FROM customers
-          WHERE tenant_id = $1
-            AND (
-              ($2 IS NOT NULL AND phone = $2) OR
-              ($3 IS NOT NULL AND email = $3)
-            )
-          LIMIT 1
-          `,
-          [resolvedTenantId, customerPhone || null, customerEmail || null]
-        );
-
-        if (existingRes.rows.length === 0) {
-          await db.query(
-            `
-            INSERT INTO customers (tenant_id, name, phone, email)
-            VALUES ($1, $2, $3, $4)
-            `,
-            [
-              resolvedTenantId,
-              customerName.trim(),
-              customerPhone || null,
-              customerEmail || null,
-            ]
-          );
-        } else {
-          // Optional: keep name fresh (no updated_at column in your table)
-          await db.query(
-            `
-            UPDATE customers
-            SET name = $1
-            WHERE id = $2
-            `,
-            [customerName.trim(), existingRes.rows[0].id]
-          );
-        }
-      } catch (custErr) {
-        console.error("Error upserting customer from booking:", custErr);
-        // Don't fail the booking if customer insert fails
-      }
-    }
-
     const joined = await loadJoinedBookingById(bookingId);
-    res.status(201).json({ booking: joined });
+    return res.status(201).json({ booking: joined });
   } catch (err) {
     console.error("Error creating booking:", err);
-    res.status(500).json({ error: "Failed to create booking" });
-  }
-});
-
-// POST /api/bookings/:id/status
-app.post("/api/bookings/:id/status", async (req, res) => {
-  try {
-    const id = Number(req.params.id);
-    const { status } = req.body;
-
-    const allowed = ["pending", "confirmed", "cancelled"];
-    if (!allowed.includes(status)) {
-      return res.status(400).json({ error: "Invalid status." });
-    }
-
-    await db.query(
-      `
-      UPDATE bookings
-      SET status = $1
-      WHERE id = $2
-      `,
-      [status, id]
-    );
-
-    const joined = await loadJoinedBookingById(id);
-    if (!joined) {
-      return res.status(404).json({ error: "Booking not found." });
-    }
-
-    res.json({ booking: joined });
-  } catch (err) {
-    console.error("Error updating booking status:", err);
-    res.status(500).json({ error: "Failed to update booking status" });
-  }
-});
-
-// DELETE /api/bookings/:id
-app.delete("/api/bookings/:id", async (req, res) => {
-  const id = Number(req.params.id);
-  if (!id) {
-    return res.status(400).json({ error: "Invalid booking id." });
-  }
-
-  try {
-    const result = await db.query(
-      `
-      DELETE FROM bookings
-      WHERE id = $1
-      RETURNING id;
-      `,
-      [id]
-    );
-
-    if (result.rows.length === 0) {
-      return res.status(404).json({ error: "Booking not found." });
-    }
-
-    return res.json({ success: true });
-  } catch (err) {
-    console.error("Error deleting booking:", err);
     return res
       .status(500)
-      .json({ error: err.message || "Failed to delete booking" });
+      .json({ error: "Failed to create booking.", details: String(err) });
   }
 });
+
 
 // ---------------------------------------------------------------------------
 // Start server
