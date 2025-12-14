@@ -1821,6 +1821,18 @@ app.post("/api/bookings", async (req, res) => {
     );
 
     const bookingId = insert.rows[0].id;
+    const firstLetter = (customerName || "X").trim().charAt(0).toUpperCase() || "X";
+    
+    // created date in YYYYMMDD (use server time)
+    const ymd = new Date().toISOString().slice(0, 10).replaceAll("-", "");
+    
+    // Example format: A-<tenantId>-<serviceId>-<YYYYMMDD>-<bookingId>
+    const bookingCode = `${firstLetter}-${resolvedTenantId || 0}-${resolvedServiceId || 0}-${ymd}-${bookingId}`;
+    
+    await db.query(
+      `UPDATE bookings SET booking_code = $1 WHERE id = $2`,
+      [bookingCode, bookingId]
+    );
 
     const joined = await loadJoinedBookingById(bookingId);
     return res.status(201).json({ booking: joined });
