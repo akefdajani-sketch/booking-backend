@@ -1955,9 +1955,11 @@ app.post("/api/customer-memberships/subscribe", async (req, res) => {
 
     const cid = Number(customerId);
     const pid = Number(planId);
-    if (!cid || !pid) return res.status(400).json({ error: "Invalid customerId or planId." });
+    if (!cid || !pid) {
+      return res.status(400).json({ error: "Invalid customerId or planId." });
+    }
 
-    // validate customer belongs to tenant
+    // customer belongs to tenant?
     const cRes = await client.query(
       "SELECT id FROM customers WHERE id = $1 AND tenant_id = $2",
       [cid, tenantId]
@@ -1966,117 +1968,87 @@ app.post("/api/customer-memberships/subscribe", async (req, res) => {
       return res.status(404).json({ error: "Customer not found for tenant." });
     }
 
-    // validate plan belongs to tenant and active
+    // plan belongs to tenant and active?
     const pRes = await client.query(
-      `
-      SELECT *
-      FROM membership_plans
-      WHERE id = $1 AND tenant_id = $2 AND is_active = TRUE
-      `,
+      `SELECT id, included_minutes, included_uses, validity_days, is_active
+       FROM membership_plans
+       WHERE id = $1 AND tenant_id = $2`,
       [pid, tenantId]
     );
     if (pRes.rows.length === 0) {
       return res.status(404).json({ error: "Membership plan not found for tenant." });
     }
+
     const plan = pRes.rows[0];
 
-    const includedMinutes = plan.included_minutes != null ? Number(plan.included_minutes) : null;
-    const includedUses = plan.included_uses != null ? Number(plan.included_uses) : null;
+    if (plan.is_active === false) {
+      return res.status(400).json({ error: "This plan is not active." });
+    }
+
+    const includedMinutes =
+      plan.included_minutes != null ? Number(plan.included_minutes) : null;
+
+    const includedUses =
+      plan.included_uses != null ? Number(plan.included_uses) : null;
+
+    const validityDays =
+      plan.validity_days != null ? Number(plan.validity_days) : null;
 
     if (includedMinutes == null && includedUses == null) {
       return res.status(400).json({
-        error: "Plan must have included_minutes or included_uses set.",
+        error: "Plan is missing included_minutes or included_uses.",
       });
-    }
-
-    // determine end date from validity_days (optional)
-    let endAt = null;
-    if (plan.validity_days && Number(plan.validity_days) > 0) {
-      // use DB interval to avoid timezone confusion
-      // end_at = now() + validity_days days
-      endAt = true;
     }
 
     await client.query("BEGIN");
 
-    // create membership row
-    const insertMembership = await client.query(
-      `
-      INSERT INTO customer_memberships (
-        tenant_id,
-        customer_id,
-        plan_id,
-        status,
-        start_at,
-        end_at,
-        minutes_remaining,
-        uses_remaining
-      )
-      VALUES (
-        $1, $2, $3,
-        'active',
-        NOW(),
-        ${endAt ? "NOW() + ($4 || ' days')::interval" : "NULL"},
-        $5,
-        $6
-      )
-      RETURNING *
-      `,
-      endAt
-        ? [tenantId, cid, pid, Number(plan.validity_days), includedMinutes, includedUses]
-        : [tenantId, cid, pid, includedMinutes, includedUses]
+    // optional: end any current active membership first
+    await client.query(
+      `UPDATE customer_memberships
+       SET status = 'inactive', end_at = NOW(), updated_at = NOW()
+       WHERE tenant_id = $1 AND customer_id = $2 AND status = 'active'`,
+      [tenantId, cid]
     );
 
-    const membership = insertMembership.rows[0];
-
-    // ledger "grant"
-    await client.query(
-      `
-      INSERT INTO membership_ledger (
-        tenant_id,
-        customer_membership_id,
-        booking_id,
-        type,
-        minutes_delta,
-        uses_delta,
-        note
-      )
-      VALUES ($1, $2, NULL, 'grant', $3, $4, $5)
-      `,
+    // insert new membership (matches your table)
+    const ins = await client.query(
+      `INSERT INTO customer_memberships
+        (tenant_id, customer_id, plan_id, status,
+         start_at, end_at,
+         minutes_remaining, uses_remaining,
+         created_at, updated_at)
+       VALUES
+        ($1,$2,$3,'active',
+         NOW(),
+         CASE WHEN $6 IS NULL THEN NULL ELSE NOW() + ($6 || ' days')::interval END,
+         $4,
+         $5,
+         NOW(), NOW()
+        )
+       RETURNING *`,
       [
         tenantId,
-        membership.id,
-        includedMinutes,
-        includedUses,
-        `Initial grant for plan ${plan.name}`,
+        cid,
+        pid,
+        includedMinutes, // minutes_remaining
+        includedUses,    // uses_remaining
+        validityDays,    // end_at
       ]
     );
 
     await client.query("COMMIT");
-
-    // return with plan_name for UI convenience
-    return res.status(201).json({
-      membership: {
-        id: membership.id,
-        tenant_id: membership.tenant_id,
-        customer_id: membership.customer_id,
-        plan_id: membership.plan_id,
-        status: membership.status,
-        start_at: membership.start_at,
-        end_at: membership.end_at,
-        minutes_remaining: membership.minutes_remaining,
-        uses_remaining: membership.uses_remaining,
-        plan_name: plan.name,
-      },
-    });
+    return res.json({ membership: ins.rows[0] });
   } catch (err) {
-    await db.query("ROLLBACK").catch(() => {});
-    console.error("POST /api/customer-memberships/subscribe error:", err);
-    return res.status(500).json({ error: "Failed to subscribe." });
+    try {
+      await client.query("ROLLBACK");
+    } catch (_) {}
+    console.error("Subscribe membership error:", err);
+    return res.status(500).json({ error: "Server error subscribing to plan." });
   } finally {
     client.release();
   }
 });
+
 
 // GET /api/customer-memberships/:id/ledger?tenantSlug=...
 app.get("/api/customer-memberships/:id/ledger", async (req, res) => {
