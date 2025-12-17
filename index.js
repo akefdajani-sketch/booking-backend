@@ -16,27 +16,32 @@ const allowedOrigins = [
   "http://localhost:3000",
 ];
 
-const corsOptions = {
-  origin: (origin, cb) => {
-    // Allow server-to-server / curl
-    if (!origin) return cb(null, true);
+app.use(
+  cors({
+    origin: (origin, cb) => {
+      // allow non-browser tools
+      if (!origin) return cb(null, true);
 
-    if (allowedOrigins.includes(origin)) {
-      return cb(null, origin); // MUST echo the origin
-    }
+      // allow Vercel preview deployments too (optional but recommended)
+      const isVercelPreview =
+        origin.endsWith(".vercel.app") && origin.includes("booking-frontend");
 
-    return cb(new Error("CORS blocked origin: " + origin));
-  },
-  credentials: true,
-  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization"],
-};
+      if (allowedOrigins.includes(origin) || isVercelPreview) {
+        return cb(null, origin); // echo origin
+      }
 
-// ✅ Apply CORS to ALL requests
-app.use(cors(corsOptions));
+      // ✅ IMPORTANT: do NOT error (errors can remove all CORS headers)
+      // just deny by returning false
+      return cb(null, false);
+    },
+    credentials: true,
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"],
+  })
+);
 
-// ✅ Apply SAME CORS to preflight (THIS WAS MISSING)
-app.options("*", cors(corsOptions));
+// Preflight with SAME settings
+app.options("*", cors());
 
 app.use(express.json());
 
