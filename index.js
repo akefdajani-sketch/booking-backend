@@ -10,38 +10,25 @@ const multer = require("multer");
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-// ✅ Single CORS config (used everywhere)
+// -------------------- CORS (must be before routes) ------------------------
 const allowedOrigins = [
   "https://booking-frontend-psi.vercel.app",
   "http://localhost:3000",
 ];
 
-app.use(
-  cors({
-    origin: (origin, cb) => {
-      // allow non-browser tools
-      if (!origin) return cb(null, true);
+const corsOptions = {
+  origin: (origin, cb) => {
+    if (!origin) return cb(null, true); // allow curl / server-to-server
+    if (allowedOrigins.includes(origin)) return cb(null, origin); // echo origin
+    return cb(null, false); // do NOT throw
+  },
+  credentials: true,
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"],
+};
 
-      // allow Vercel preview deployments too (optional but recommended)
-      const isVercelPreview =
-        origin.endsWith(".vercel.app") && origin.includes("booking-frontend");
-
-      if (allowedOrigins.includes(origin) || isVercelPreview) {
-        return cb(null, origin); // echo origin
-      }
-
-      // ✅ IMPORTANT: do NOT error (errors can remove all CORS headers)
-      // just deny by returning false
-      return cb(null, false);
-    },
-    credentials: true,
-    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization"],
-  })
-);
-
-// Preflight with SAME settings
-app.options("*", cors(corsOptions));
+app.use(cors(corsOptions));
+app.options("*", cors(corsOptions)); // ✅ preflight uses SAME config
 
 app.use(express.json());
 
