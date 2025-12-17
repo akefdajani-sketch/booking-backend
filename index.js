@@ -10,7 +10,32 @@ const multer = require("multer");
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-app.use(cors());
+// ✅ Replace app.use(cors()) with this:
+const allowedOrigins = [
+  "https://booking-frontend-psi.vercel.app",
+  "http://localhost:3000",
+];
+
+app.use(
+  cors({
+    origin: (origin, cb) => {
+      // Allow server-to-server/curl (no Origin header)
+      if (!origin) return cb(null, true);
+
+      // Allow only known frontends
+      if (allowedOrigins.includes(origin)) return cb(null, origin);
+
+      return cb(new Error("CORS blocked origin: " + origin));
+    },
+    credentials: true,
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"],
+  })
+);
+
+// ✅ Ensure preflight works for POST/JSON
+app.options("*", cors());
+
 app.use(express.json());
 
 // ---------------------------------------------------------------------------
