@@ -10,7 +10,6 @@ const multer = require("multer");
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-// -------------------- CORS (must be before routes) ------------------------
 const allowedOrigins = [
   "https://booking-frontend-psi.vercel.app",
   "http://localhost:3000",
@@ -18,9 +17,9 @@ const allowedOrigins = [
 
 const corsOptions = {
   origin: (origin, cb) => {
-    if (!origin) return cb(null, true); // allow curl / server-to-server
-    if (allowedOrigins.includes(origin)) return cb(null, origin); // echo origin
-    return cb(null, false); // do NOT throw
+    if (!origin) return cb(null, true);
+    if (allowedOrigins.includes(origin)) return cb(null, origin);
+    return cb(null, false);
   },
   credentials: true,
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
@@ -28,8 +27,7 @@ const corsOptions = {
 };
 
 app.use(cors(corsOptions));
-app.options("*", cors(corsOptions)); // ✅ preflight uses SAME config
-
+app.options("*", cors(corsOptions));
 app.use(express.json());
 
 
@@ -1988,7 +1986,7 @@ app.post("/api/customer-memberships/subscribe", async (req, res) => {
       return res.status(404).json({ error: "Customer not found for tenant." });
     }
 
-    // validate plan belongs to tenant and is active
+    // validate plan belongs to tenant and active
     const pRes = await client.query(
       `
       SELECT *
@@ -2055,7 +2053,6 @@ app.post("/api/customer-memberships/subscribe", async (req, res) => {
       membership = ins.rows[0];
     }
 
-    // ledger "grant"
     await client.query(
       `
       INSERT INTO membership_ledger (
@@ -2102,7 +2099,6 @@ app.post("/api/customer-memberships/subscribe", async (req, res) => {
     client.release();
   }
 });
-
 
 
 // GET /api/customer-memberships/:id/ledger?tenantSlug=...
