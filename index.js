@@ -10,33 +10,36 @@ const multer = require("multer");
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-// ✅ Replace app.use(cors()) with this:
+// ✅ Single CORS config (used everywhere)
 const allowedOrigins = [
   "https://booking-frontend-psi.vercel.app",
   "http://localhost:3000",
 ];
 
-app.use(
-  cors({
-    origin: (origin, cb) => {
-      // Allow server-to-server/curl (no Origin header)
-      if (!origin) return cb(null, true);
+const corsOptions = {
+  origin: (origin, cb) => {
+    // Allow server-to-server / curl
+    if (!origin) return cb(null, true);
 
-      // Allow only known frontends
-      if (allowedOrigins.includes(origin)) return cb(null, origin);
+    if (allowedOrigins.includes(origin)) {
+      return cb(null, origin); // MUST echo the origin
+    }
 
-      return cb(new Error("CORS blocked origin: " + origin));
-    },
-    credentials: true,
-    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization"],
-  })
-);
+    return cb(new Error("CORS blocked origin: " + origin));
+  },
+  credentials: true,
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"],
+};
 
-// ✅ Ensure preflight works for POST/JSON
-app.options("*", cors());
+// ✅ Apply CORS to ALL requests
+app.use(cors(corsOptions));
+
+// ✅ Apply SAME CORS to preflight (THIS WAS MISSING)
+app.options("*", cors(corsOptions));
 
 app.use(express.json());
+
 
 // ---------------------------------------------------------------------------
 // File uploads (tenant logos)
