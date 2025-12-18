@@ -1973,11 +1973,6 @@ app.post("/api/customer-memberships/subscribe", async (req, res) => {
       return res.status(400).json({ error: "Invalid tenantSlug" });
     }
 
-    // keep rest of logic the same
-
-    const tenantId = await getTenantIdFromSlug(tenantSlug);
-    if (!tenantId) return res.status(400).json({ error: "Unknown tenantSlug." });
-
     const cid = Number(customerId);
     const pid = Number(planId);
     if (!cid || !pid) return res.status(400).json({ error: "customerId and planId are required." });
