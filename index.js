@@ -1957,11 +1957,24 @@ app.get("/api/customer-memberships", async (req, res) => {
 
 // POST /api/customer-memberships/subscribe
 app.post("/api/customer-memberships/subscribe", async (req, res) => {
-  const client = await db.connect();
-  try {
-    const { tenantSlug, customerId, planId } = req.body || {};
+  console.log("SUBSCRIBE BODY:", req.body);
 
-    if (!tenantSlug) return res.status(400).json({ error: "tenantSlug is required." });
+  try {
+    const { tenantSlug, customerId, planId } = req.body;
+
+    console.log("tenantSlug:", tenantSlug);
+    console.log("customerId:", customerId);
+    console.log("planId:", planId);
+
+    const tenantId = await getTenantIdFromSlug(tenantSlug);
+    console.log("tenantId:", tenantId);
+
+    if (!tenantId) {
+      return res.status(400).json({ error: "Invalid tenantSlug" });
+    }
+
+    // keep rest of logic the same
+
     const tenantId = await getTenantIdFromSlug(tenantSlug);
     if (!tenantId) return res.status(400).json({ error: "Unknown tenantSlug." });
 
