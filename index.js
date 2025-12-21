@@ -1862,6 +1862,55 @@ app.post("/api/bookings", async (req, res) => {
   }
 });
 
+// DELETE /api/bookings/:id
+// "Cancel" booking (soft delete) by setting status='cancelled'
+app.delete("/api/bookings/:id", async (req, res) => {
+  try {
+    const bookingId = Number(req.params.id);
+    if (!bookingId) return res.status(400).send("Invalid booking id");
+
+    // allow tenantSlug/customerId in body OR query
+    const tenantSlug = req.body?.tenantSlug || req.query?.tenantSlug;
+    const customerIdRaw = req.body?.customerId || req.query?.customerId;
+    const customerId = customerIdRaw ? Number(customerIdRaw) : null;
+
+    if (!tenantSlug) return res.status(400).send("tenantSlug is required");
+
+    const tenantId = await getTenantIdFromSlug(tenantSlug);
+    if (!tenantId) return res.status(400).send("Unknown tenantSlug");
+
+    // Ensure booking belongs to tenant (and customer if provided)
+    const check = await db.query(
+      `
+      SELECT id, customer_id
+      FROM bookings
+      WHERE id = $1 AND tenant_id = $2
+      `,
+      [bookingId, tenantId]
+    );
+
+    if (check.rows.length === 0) return res.status(404).send("Booking not found");
+
+    if (customerId && Number(check.rows[0].customer_id) !== customerId) {
+      return res.status(403).send("Not allowed");
+    }
+
+    await db.query(
+      `
+      UPDATE bookings
+      SET status = 'cancelled'
+      WHERE id = $1 AND tenant_id = $2
+      `,
+      [bookingId, tenantId]
+    );
+
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error("DELETE /api/bookings/:id error:", err);
+    return res.status(500).send("Failed to cancel booking");
+  }
+});
+
 
 // ---------------------------------------------------------------------------
 // Memberships (Plans + Customer Memberships + Ledger)
