@@ -1891,7 +1891,13 @@ app.delete("/api/bookings/:id", async (req, res) => {
 
     if (check.rows.length === 0) return res.status(404).send("Booking not found");
 
-    if (customerId && Number(check.rows[0].customer_id) !== customerId) {
+    const bookingCustomerId = check.rows[0].customer_id;
+
+    if (
+      customerId &&
+      bookingCustomerId !== null &&
+      Number(bookingCustomerId) !== customerId
+    ) {
       return res.status(403).send("Not allowed");
     }
 
