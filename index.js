@@ -1889,10 +1889,15 @@ app.delete("/api/bookings/:id", async (req, res) => {
       [bookingId, tenantId]
     );
 
-    if (check.rows.length === 0) return res.status(404).send("Booking not found");
+    if (check.rows.length === 0) {
+      return res.status(404).send("Booking not found");
+    }
 
+    // ✅ FIX: define row
+    const row = check.rows[0];
     const bookingCustomerId = row.customer_id; // could be null
 
+    // If customerId is provided, enforce match ONLY when booking has a customer_id
     if (
       customerId &&
       bookingCustomerId !== null &&
@@ -1900,7 +1905,6 @@ app.delete("/api/bookings/:id", async (req, res) => {
     ) {
       return res.status(403).send("Not allowed");
     }
-
 
     await db.query(
       `
