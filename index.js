@@ -1867,45 +1867,57 @@ app.post("/api/bookings", async (req, res) => {
 app.delete("/api/bookings/:id", async (req, res) => {
   try {
     const bookingId = Number(req.params.id);
-    if (!bookingId) return res.status(400).send("Invalid booking id");
+    if (!bookingId) {
+      return res.status(400).send("Invalid booking id");
+    }
 
-    // allow tenantSlug/customerId in body OR query
-    const tenantSlug = req.body?.tenantSlug || req.query?.tenantSlug;
-    const customerIdRaw = req.body?.customerId || req.query?.customerId;
+    // Accept tenantSlug + customerId from body or query
+    const tenantSlug = req.body?.tenantSlug ?? req.query?.tenantSlug;
+    const customerIdRaw = req.body?.customerId ?? req.query?.customerId;
     const customerId = customerIdRaw ? Number(customerIdRaw) : null;
 
-    if (!tenantSlug) return res.status(400).send("tenantSlug is required");
+    if (!tenantSlug) {
+      return res.status(400).send("tenantSlug is required");
+    }
 
     const tenantId = await getTenantIdFromSlug(tenantSlug);
-    if (!tenantId) return res.status(400).send("Unknown tenantSlug");
+    if (!tenantId) {
+      return res.status(400).send("Unknown tenantSlug");
+    }
 
-    // Ensure booking belongs to tenant (and customer if provided)
-    const check = await db.query(
+    // Fetch booking
+    const { rows } = await db.query(
       `
-      SELECT id, customer_id
+      SELECT id, customer_id, status
       FROM bookings
       WHERE id = $1 AND tenant_id = $2
       `,
       [bookingId, tenantId]
     );
 
-    if (check.rows.length === 0) {
+    if (rows.length === 0) {
       return res.status(404).send("Booking not found");
     }
 
-    // ✅ FIX: define row
-    const row = check.rows[0];
-    const bookingCustomerId = row.customer_id; // could be null
+    const booking = rows[0];
 
-    // If customerId is provided, enforce match ONLY when booking has a customer_id
+    // Idempotent: already cancelled
+    if (booking.status === "cancelled") {
+      return res.json({ ok: true });
+    }
+
+    // Authorization rule:
+    // - If booking has customer_id → must match customerId
+    // - If booking.customer_id IS NULL → allow tenant/owner cancel
     if (
       customerId &&
-      bookingCustomerId !== null &&
-      Number(bookingCustomerId) !== Number(customerId)
+      booking.customer_id !== null &&
+      Number(booking.customer_id) !== Number(customerId)
     ) {
       return res.status(403).send("Not allowed");
     }
 
+    // Cancel booking
     await db.query(
       `
       UPDATE bookings
