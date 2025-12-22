@@ -1558,22 +1558,45 @@ app.delete("/api/customers/:id", async (req, res) => {
 // GET /api/bookings?tenantId=&tenantSlug=
 app.get("/api/bookings", async (req, res) => {
   try {
-    const { tenantId, tenantSlug } = req.query;
+    const { tenantId, tenantSlug, customerId, customerEmail } = req.query;
+
+    // 1) Resolve + REQUIRE tenant
     let resolvedTenantId = tenantId ? Number(tenantId) : null;
 
     if (!resolvedTenantId && tenantSlug) {
       resolvedTenantId = await getTenantIdFromSlug(tenantSlug);
-      if (!resolvedTenantId) {
-        return res.status(400).json({ error: "Unknown tenant." });
-      }
     }
 
-    const params = [];
-    let where = "";
-    if (resolvedTenantId) {
-      params.push(resolvedTenantId);
-      where = "WHERE b.tenant_id = $1";
+    if (!resolvedTenantId) {
+      return res.status(400).json({
+        error: "Missing or unknown tenant. Provide tenantId or tenantSlug.",
+      });
     }
+
+    // 2) Optional customer filter (for customer portal history)
+    const resolvedCustomerId =
+      typeof customerId === "string" && customerId.trim() !== ""
+        ? Number(customerId)
+        : null;
+
+    const resolvedCustomerEmail =
+      typeof customerEmail === "string" && customerEmail.trim() !== ""
+        ? customerEmail.trim().toLowerCase()
+        : null;
+
+    const params = [resolvedTenantId];
+    const whereParts = ["b.tenant_id = $1"];
+
+    // Prefer customerId if provided
+    if (resolvedCustomerId && Number.isFinite(resolvedCustomerId)) {
+      params.push(resolvedCustomerId);
+      whereParts.push(`b.customer_id = $${params.length}`);
+    } else if (resolvedCustomerEmail) {
+      params.push(resolvedCustomerEmail);
+      whereParts.push(`LOWER(COALESCE(b.customer_email, '')) = $${params.length}`);
+    }
+
+    const where = `WHERE ${whereParts.join(" AND ")}`;
 
     const q = `
       SELECT
@@ -1609,6 +1632,7 @@ app.get("/api/bookings", async (req, res) => {
     res.status(500).json({ error: "Failed to load bookings" });
   }
 });
+
 
 // POST /api/bookings
 // Flexible endpoint used by both owner + public pages
