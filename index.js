@@ -1863,61 +1863,76 @@ app.post("/api/bookings", async (req, res) => {
 });
 
 // DELETE /api/bookings/:id
-// "Cancel" booking (soft delete) by setting status='cancelled'
+// Cancel (soft-delete) a booking
+// - Customer cancels by matching customerEmail to bookings.customer_email
+// - Owner cancels with x-owner-token (set BOOKFLOW_OWNER_TOKEN on Render)
 app.delete("/api/bookings/:id", async (req, res) => {
   try {
     const bookingId = Number(req.params.id);
-    if (!bookingId) {
+    if (!Number.isFinite(bookingId) || bookingId <= 0) {
       return res.status(400).send("Invalid booking id");
     }
 
-    // Accept tenantSlug + customerId from body or query
+    // Accept params in body OR query (useful when some clients can't send DELETE bodies)
     const tenantSlug = req.body?.tenantSlug ?? req.query?.tenantSlug;
-    const customerIdRaw = req.body?.customerId ?? req.query?.customerId;
-    const customerId = customerIdRaw ? Number(customerIdRaw) : null;
+    const role = (req.body?.role ?? req.query?.role ?? "customer").toString(); // "customer" | "owner"
+    const customerEmailRaw = req.body?.customerEmail ?? req.query?.customerEmail;
+    const customerEmail = customerEmailRaw
+      ? String(customerEmailRaw).trim().toLowerCase()
+      : null;
 
-    if (!tenantSlug) {
-      return res.status(400).send("tenantSlug is required");
-    }
+    if (!tenantSlug) return res.status(400).send("tenantSlug is required");
 
-    const tenantId = await getTenantIdFromSlug(tenantSlug);
-    if (!tenantId) {
-      return res.status(400).send("Unknown tenantSlug");
-    }
+    const tenantId = await getTenantIdFromSlug(String(tenantSlug));
+    if (!tenantId) return res.status(400).send("Unknown tenantSlug");
 
-    // Fetch booking
-    const { rows } = await db.query(
+    // Load booking
+    const check = await db.query(
       `
-      SELECT id, customer_id, status
+      SELECT id, tenant_id, status, customer_email
       FROM bookings
       WHERE id = $1 AND tenant_id = $2
       `,
       [bookingId, tenantId]
     );
 
-    if (rows.length === 0) {
-      return res.status(404).send("Booking not found");
+    if (check.rows.length === 0) return res.status(404).send("Booking not found");
+
+    const row = check.rows[0];
+    const bookingEmail = row.customer_email
+      ? String(row.customer_email).trim().toLowerCase()
+      : null;
+
+    // Idempotent: already cancelled => OK
+    if (String(row.status).toLowerCase() === "cancelled") {
+      return res.json({ ok: true, alreadyCancelled: true });
     }
 
-    const booking = rows[0];
+    // Role-based authorization
+    if (role === "owner") {
+      const ownerToken = req.headers["x-owner-token"];
+      const expected = process.env.BOOKFLOW_OWNER_TOKEN;
 
-    // Idempotent: already cancelled
-    if (booking.status === "cancelled") {
-      return res.json({ ok: true });
+      if (!expected || !ownerToken || String(ownerToken) !== String(expected)) {
+        return res.status(403).send("Not allowed");
+      }
+    } else {
+      // customer role
+      if (!customerEmail) {
+        return res.status(400).send("customerEmail is required");
+      }
+
+      // Booking must have an email to validate against
+      if (!bookingEmail) {
+        return res.status(403).send("Not allowed");
+      }
+
+      if (bookingEmail !== customerEmail) {
+        return res.status(403).send("Not allowed");
+      }
     }
 
-    // Authorization rule:
-    // - If booking has customer_id → must match customerId
-    // - If booking.customer_id IS NULL → allow tenant/owner cancel
-    if (
-      customerId &&
-      booking.customer_id !== null &&
-      Number(booking.customer_id) !== Number(customerId)
-    ) {
-      return res.status(403).send("Not allowed");
-    }
-
-    // Cancel booking
+    // Perform cancellation (soft delete)
     await db.query(
       `
       UPDATE bookings
@@ -1933,7 +1948,6 @@ app.delete("/api/bookings/:id", async (req, res) => {
     return res.status(500).send("Failed to cancel booking");
   }
 });
-
 
 // ---------------------------------------------------------------------------
 // Memberships (Plans + Customer Memberships + Ledger)
