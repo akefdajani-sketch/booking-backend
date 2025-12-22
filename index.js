@@ -1893,13 +1893,13 @@ app.delete("/api/bookings/:id", async (req, res) => {
 
     const bookingCustomerId = row.customer_id; // could be null
 
-if (
-  customerId &&
-  bookingCustomerId !== null &&
-  Number(bookingCustomerId) !== Number(customerId)
-) {
-  return res.status(403).send("Not allowed");
-}
+    if (
+      customerId &&
+      bookingCustomerId !== null &&
+      Number(bookingCustomerId) !== Number(customerId)
+    ) {
+      return res.status(403).send("Not allowed");
+    }
 
 
     await db.query(
