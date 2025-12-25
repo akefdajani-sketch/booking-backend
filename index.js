@@ -7,42 +7,176 @@ const path = require("path");
 const fs = require("fs");
 const multer = require("multer");
 
+const { OAuth2Client } = require("google-auth-library");
+
+const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
+
+async function requireGoogleAuth(req, res, next) {
+  try {
+    const auth = req.headers.authorization || "";
+    const match = auth.match(/^Bearer\s+(.+)$/i);
+
+    if (!match) {
+      return res.status(401).json({ error: "Missing Bearer token" });
+    }
+
+    const idToken = match[1];
+
+    const ticket = await googleClient.verifyIdToken({
+      idToken,
+      audience: process.env.GOOGLE_CLIENT_ID,
+    });
+
+    const payload = ticket.getPayload();
+
+    req.user = {
+      email: payload.email,
+      sub: payload.sub,
+      name: payload.name,
+      picture: payload.picture,
+    };
+
+    next();
+  } catch (err) {
+    console.error("Auth error:", err.message);
+    return res.status(401).json({ error: "Invalid or expired Google token" });
+  }
+}
+
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-app.use(cors());
+const allowedOrigins = [
+  "https://booking-frontend-psi.vercel.app",
+  "http://localhost:3000",
+];
+
+const corsOptions = {
+  origin: (origin, cb) => {
+    if (!origin) return cb(null, true);
+    if (allowedOrigins.includes(origin)) return cb(null, origin);
+    return cb(null, false);
+  },
+  credentials: true,
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"],
+};
+
+app.use(cors(corsOptions));
+app.options("*", cors(corsOptions));
 app.use(express.json());
 
+
 // ---------------------------------------------------------------------------
-// File uploads (tenant logos)
+// Auth middleware (minimal) + Hardened file uploads
+// ---------------------------------------------------------------------------
+
+const crypto = require("crypto");
+
+// Minimal admin auth (use for owner/tenant-admin operations)
+// Client must send one of:
+//   - Authorization: Bearer <ADMIN_API_KEY>
+//   - x-admin-key: <ADMIN_API_KEY>
+function requireAdmin(req, res, next) {
+  const rawAuth = String(req.headers.authorization || "");
+  const bearer =
+    rawAuth.toLowerCase().startsWith("bearer ")
+      ? rawAuth.slice(7).trim()
+      : null;
+
+  const key =
+    bearer ||
+    String(req.headers["x-admin-key"] || "").trim() ||
+    String(req.headers["x-api-key"] || "").trim();
+
+  const expected = String(process.env.ADMIN_API_KEY || "").trim();
+
+  if (!expected) {
+    // Fail closed in production-like environments
+    return res.status(500).json({
+      error:
+        "Server misconfigured: ADMIN_API_KEY is not set. Upload/admin routes are disabled.",
+    });
+  }
+
+  if (!key || key !== expected) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+
+  return next();
+}
+
+// ---------------------------------------------------------------------------
+// Hardened file uploads
 // ---------------------------------------------------------------------------
 
 const uploadDir = path.join(__dirname, "uploads");
 
-// ensure uploads directory exists
+// Ensure uploads directory exists
 if (!fs.existsSync(uploadDir)) {
   fs.mkdirSync(uploadDir, { recursive: true });
 }
 
-// store files as: uploads/tenant-<id>-logo.ext
+// Only allow image uploads (no SVG by default for safety)
+const ALLOWED_MIME = new Map([
+  ["image/jpeg", "jpg"],
+  ["image/png", "png"],
+  ["image/webp", "webp"],
+]);
+
+function safeUploadFilename(file) {
+  const ext = ALLOWED_MIME.get(file.mimetype);
+  const rand = crypto.randomBytes(8).toString("hex");
+  const ts = Date.now();
+  // No user-provided filename is used (prevents weird chars/path tricks)
+  return `img-${ts}-${rand}.${ext}`;
+}
+
 const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    cb(null, uploadDir);
+  destination: (req, file, cb) => cb(null, uploadDir),
+  filename: (req, file, cb) => cb(null, safeUploadFilename(file)),
+});
+
+const upload = multer({
+  storage,
+  limits: {
+    fileSize: 2 * 1024 * 1024, // 2MB
+    files: 1,
   },
-  filename: (req, file, cb) => {
-    const ext = path.extname(file.originalname || "");
-    const base =
-      path.basename(file.originalname || "file", ext).replace(/\s+/g, "-") ||
-      "file";
-    const unique = Date.now();
-    cb(null, `${base.toLowerCase()}-${unique}${ext || ""}`);
+  fileFilter: (req, file, cb) => {
+    if (!ALLOWED_MIME.has(file.mimetype)) {
+      return cb(
+        new Error("Invalid file type. Only JPG, PNG, or WEBP are allowed.")
+      );
+    }
+    cb(null, true);
   },
 });
 
-const upload = multer({ storage });
+// Serve uploads statically (OK if these are purely public assets)
+// Add security headers + cache control
+app.use(
+  "/uploads",
+  express.static(uploadDir, {
+    fallthrough: false,
+    setHeaders: (res) => {
+      res.setHeader("X-Content-Type-Options", "nosniff");
+      res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+    },
+  })
+);
 
-// serve the uploads folder statically so frontend can show the logo
-app.use("/uploads", express.static(uploadDir));
+// Friendly multer error handler for upload endpoints
+function uploadErrorHandler(err, req, res, next) {
+  if (!err) return next();
+
+  // Multer limit errors
+  if (err.code === "LIMIT_FILE_SIZE") {
+    return res.status(413).json({ error: "File too large (max 2MB)." });
+  }
+
+  return res.status(400).json({ error: err.message || "Upload failed." });
+}
 
 // ---------------------------------------------------------------------------
 // Health check
@@ -233,43 +367,76 @@ app.get("/api/availability", async (req, res) => {
         .json({ error: "This service requires selecting a resource." });
     }
 
-    // 2) Working hours – **local time**, not UTC
+    // ---------------------------------------------------------------------
+    // 2) Working hours from tenant_hours (your schema: is_closed)
+    //    Stored as open_time / close_time (time), + is_closed (bool).
+    //    If close_time = 00:00, we treat it as midnight (24:00).
+    // ---------------------------------------------------------------------
+
     let openHHMM = "08:00";
     let closeHHMM = "23:00";
 
     try {
-      const day = new Date(date + "T00:00:00").getDay(); // 0-6 local time
+      const day = new Date(date + "T00:00:00").getDay(); // 0-6 local
       const whRes = await db.query(
         `
-        SELECT open_time, close_time
+        SELECT open_time, close_time, is_closed
         FROM tenant_hours
-        WHERE tenant_id = $1 AND day_of_week = $2 AND is_open = true
+        WHERE tenant_id = $1 AND day_of_week = $2
         LIMIT 1
         `,
         [tenantId, day]
       );
       if (whRes.rows.length > 0) {
-        openHHMM = whRes.rows[0].open_time || openHHMM;
-        closeHHMM = whRes.rows[0].close_time || closeHHMM;
+        const row = whRes.rows[0];
+
+        if (row.is_closed) {
+          // Day is marked closed → no slots at all
+          return res.json({ slots: [], durationMinutes });
+        }
+
+        if (row.open_time) {
+          // Convert "10:00:00" -> "10:00"
+          openHHMM = row.open_time.toString().slice(0, 5);
+        }
+        if (row.close_time) {
+          // Convert "00:00:00" -> "00:00"
+          closeHHMM = row.close_time.toString().slice(0, 5);
+        }
       }
     } catch (e) {
       console.warn("tenant_hours lookup failed, using fallback hours", e);
     }
 
     const { h: openH, m: openM } = parseHHMM(openHHMM);
-    const { h: closeH, m: closeM } = parseHHMM(closeHHMM);
+    const { h: closeHRaw, m: closeM } = parseHHMM(closeHHMM);
 
-    // Day anchor in LOCAL time (no "Z")
-    const dayStart = new Date(date + "T00:00:00");
-    const openDate = new Date(dayStart);
-    openDate.setHours(openH, openM, 0, 0);
-    const closeDate = new Date(dayStart);
-    closeDate.setHours(closeH, closeM, 0, 0);
+    let openMinutes = openH * 60 + openM;
+    let closeMinutes = closeHRaw * 60 + closeM;
 
-    // 3) Load bookings for that day (ignore cancelled)
+    // If close <= open, assume it means "until midnight" (24:00)
+    // e.g. open = 10:00 (600), close = 00:00 (0) -> treat close = 24:00 (1440)
+    if (closeMinutes <= openMinutes) {
+      closeMinutes += 24 * 60;
+    }
+
+    // ---------------------------------------------------------------------
+    // 3) Load bookings for that day (ignore cancelled).
+    //    DB stores start_time in UTC; Birdie is UTC+3 (Jordan), so we apply
+    //    a fixed +180 minute conversion to local.
+    // ---------------------------------------------------------------------
+
     const bookingsRes = await db.query(
       `
-      SELECT id, service_id, staff_id, resource_id, start_time, duration_minutes
+      SELECT
+        id,
+        service_id,
+        staff_id,
+        resource_id,
+        start_time,
+        duration_minutes,
+        EXTRACT(HOUR   FROM start_time) AS start_hour,
+        EXTRACT(MINUTE FROM start_time) AS start_minute
       FROM bookings
       WHERE tenant_id = $1
         AND status <> 'cancelled'
@@ -279,27 +446,53 @@ app.get("/api/availability", async (req, res) => {
     );
     const bookings = bookingsRes.rows || [];
 
-    // 4) Generate slots and check conflicts
+    // DB times assumed UTC; Jordan is UTC+3 -> +180 minutes
+    const DB_TO_LOCAL_OFFSET_MIN = 3 * 60;
+
+    function minutesOverlap(aStart, aEnd, bStart, bEnd) {
+      return aStart < bEnd && bStart < aEnd;
+    }
+
+    // ---------------------------------------------------------------------
+    // 4) Generate slots and check conflicts (all integer minutes)
+    // ---------------------------------------------------------------------
+
     const slots = [];
-    let cursor = new Date(openDate);
 
-    while (cursor < closeDate) {
-      const slotStart = new Date(cursor);
-      const slotEnd = addMinutes(slotStart, durationMinutes);
-      if (slotEnd > closeDate) break;
-
+    for (
+      let slotStartMinutes = openMinutes;
+      slotStartMinutes + durationMinutes <= closeMinutes;
+      slotStartMinutes += slotIntervalMinutes
+    ) {
+      const slotEndMinutes = slotStartMinutes + durationMinutes;
       let conflicts = 0;
 
       for (const b of bookings) {
-        const bStart = new Date(b.start_time); // JS will convert to local time
-        const bEnd = addMinutes(
-          bStart,
+        // Minutes from midnight in DB timezone (likely UTC)
+        const dbStartMinutes =
+          Number(b.start_hour) * 60 + Number(b.start_minute);
+
+        // Convert to local Jordan minutes (UTC+3)
+        const bStartMinutes =
+          (dbStartMinutes + DB_TO_LOCAL_OFFSET_MIN + 1440) % 1440;
+
+        const bDuration =
           b.duration_minutes && Number(b.duration_minutes) > 0
             ? Number(b.duration_minutes)
-            : durationMinutes
-        );
+            : durationMinutes;
 
-        if (!rangesOverlap(slotStart, slotEnd, bStart, bEnd)) continue;
+        const bEndMinutes = bStartMinutes + bDuration;
+
+        if (
+          !minutesOverlap(
+            slotStartMinutes,
+            slotEndMinutes,
+            bStartMinutes,
+            bEndMinutes
+          )
+        ) {
+          continue;
+        }
 
         const bStaffId = b.staff_id ? String(b.staff_id) : null;
         const bResourceId = b.resource_id ? String(b.resource_id) : null;
@@ -327,19 +520,15 @@ app.get("/api/availability", async (req, res) => {
           ? conflicts < maxParallel
           : conflicts === 0;
 
-      const minutesFromMidnight =
-        slotStart.getHours() * 60 + slotStart.getMinutes();
-      const label = formatLabelFromMinutes(minutesFromMidnight);
-      const hh = String(slotStart.getHours()).padStart(2, "0");
-      const mm = String(slotStart.getMinutes()).padStart(2, "0");
+      const label = formatLabelFromMinutes(slotStartMinutes % (24 * 60));
+      const hh = String(Math.floor(slotStartMinutes / 60) % 24).padStart(2, "0");
+      const mm = String(slotStartMinutes % 60).padStart(2, "0");
 
       slots.push({
-        time: `${hh}:${mm}`,
-        label,
+        time: `${hh}:${mm}`, // "HH:MM" for the frontend
+        label,               // e.g. "10:00 AM", "11:00 PM"
         available,
       });
-
-      cursor = addMinutes(cursor, slotIntervalMinutes);
     }
 
     res.json({ slots, durationMinutes });
@@ -348,6 +537,8 @@ app.get("/api/availability", async (req, res) => {
     res.status(500).json({ error: "Failed to compute availability." });
   }
 });
+
+
 
 /* 🔼🔼🔼  END OF AVAILABILITY BLOCK 🔼🔼🔼 */
 
@@ -387,7 +578,7 @@ app.get("/api/tenants", async (req, res) => {
 // ---------------------------------------------------------------------------
 
 // GET /api/tenant-settings?tenantSlug=&tenantId=
-app.patch("/api/tenant-settings", async (req, res) => {
+app.patch("/api/tenant-settings", requireAdmin, async (req, res) => {
   try {
     const {
       tenantSlug,
@@ -467,7 +658,7 @@ app.patch("/api/tenant-settings", async (req, res) => {
 // ---------------------------------------------------------------------------
 
 // GET /api/tenant-hours?tenantSlug=&tenantId=
-app.get("/api/tenant-hours", async (req, res) => {
+app.post("/api/tenant-hours", requireAdmin, async (req, res) => {
   try {
     const { tenantSlug, tenantId } = req.query;
     let resolvedTenantId = tenantId ? Number(tenantId) : null;
@@ -505,7 +696,7 @@ app.get("/api/tenant-hours", async (req, res) => {
 
 // POST /api/tenant-hours
 // Body: { tenantSlug? | tenantId?, dayOfWeek, openTime?, closeTime?, isClosed? }
-app.post("/api/tenant-hours", async (req, res) => {
+app.post("/api/tenant-hours", requireAdmin, async (req, res) => {
   try {
     const { tenantSlug, tenantId, dayOfWeek, openTime, closeTime, isClosed } =
       req.body || {};
@@ -561,7 +752,7 @@ app.post("/api/tenant-hours", async (req, res) => {
 // ---------------------------------------------------------------------------
 // Tenant working hours — writes directly to tenant_hours table
 // ---------------------------------------------------------------------------
-app.post("/api/tenants/:tenantId/working-hours", async (req, res) => {
+app.post("/api/tenants/:tenantId/working-hours", requireAdmin, async (req, res) => {
   const tenantId = Number(req.params.tenantId);
   const body = req.body || {};
   const workingHours = body.workingHours;
@@ -642,7 +833,9 @@ app.post("/api/tenants/:tenantId/working-hours", async (req, res) => {
 
 app.post(
   "/api/tenants/:tenantId/logo",
-  upload.single("file"), // field name is "file" from FormData
+  requireGoogleAuth,
+  upload.single("file"),
+  uploadErrorHandler,
   async (req, res) => {
     try {
       const tenantId = Number(req.params.tenantId);
@@ -691,7 +884,9 @@ app.post(
 
 app.post(
   "/api/services/:id/image",
+  requireGoogleAuth,
   upload.single("file"),
+  uploadErrorHandler,
   async (req, res) => {
     try {
       const id = Number(req.params.id);
@@ -725,7 +920,9 @@ app.post(
 
 app.post(
   "/api/staff/:id/image",
+  requireGoogleAuth,
   upload.single("file"),
+  uploadErrorHandler,
   async (req, res) => {
     try {
       const id = Number(req.params.id);
@@ -759,7 +956,9 @@ app.post(
 
 app.post(
   "/api/resources/:id/image",
+  requireGoogleAuth,
   upload.single("file"),
+  uploadErrorHandler,
   async (req, res) => {
     try {
       const id = Number(req.params.id);
@@ -1483,22 +1682,45 @@ app.delete("/api/customers/:id", async (req, res) => {
 // GET /api/bookings?tenantId=&tenantSlug=
 app.get("/api/bookings", async (req, res) => {
   try {
-    const { tenantId, tenantSlug } = req.query;
+    const { tenantId, tenantSlug, customerId, customerEmail } = req.query;
+
+    // 1) Resolve + REQUIRE tenant
     let resolvedTenantId = tenantId ? Number(tenantId) : null;
 
     if (!resolvedTenantId && tenantSlug) {
       resolvedTenantId = await getTenantIdFromSlug(tenantSlug);
-      if (!resolvedTenantId) {
-        return res.status(400).json({ error: "Unknown tenant." });
-      }
     }
 
-    const params = [];
-    let where = "";
-    if (resolvedTenantId) {
-      params.push(resolvedTenantId);
-      where = "WHERE b.tenant_id = $1";
+    if (!resolvedTenantId) {
+      return res.status(400).json({
+        error: "Missing or unknown tenant. Provide tenantId or tenantSlug.",
+      });
     }
+
+    // 2) Optional customer filter (for customer portal history)
+    const resolvedCustomerId =
+      typeof customerId === "string" && customerId.trim() !== ""
+        ? Number(customerId)
+        : null;
+
+    const resolvedCustomerEmail =
+      typeof customerEmail === "string" && customerEmail.trim() !== ""
+        ? customerEmail.trim().toLowerCase()
+        : null;
+
+    const params = [resolvedTenantId];
+    const whereParts = ["b.tenant_id = $1"];
+
+    // Prefer customerId if provided
+    if (resolvedCustomerId && Number.isFinite(resolvedCustomerId)) {
+      params.push(resolvedCustomerId);
+      whereParts.push(`b.customer_id = $${params.length}`);
+    } else if (resolvedCustomerEmail) {
+      params.push(resolvedCustomerEmail);
+      whereParts.push(`LOWER(COALESCE(b.customer_email, '')) = $${params.length}`);
+    }
+
+    const where = `WHERE ${whereParts.join(" AND ")}`;
 
     const q = `
       SELECT
@@ -1535,6 +1757,7 @@ app.get("/api/bookings", async (req, res) => {
   }
 });
 
+
 // POST /api/bookings
 // Flexible endpoint used by both owner + public pages
 app.post("/api/bookings", async (req, res) => {
@@ -1550,7 +1773,8 @@ app.post("/api/bookings", async (req, res) => {
       customerEmail,
       staffId,
       resourceId,
-    } = req.body;
+      customerId,          // NEW: optional existing customer id
+    } = req.body || {};
 
     if (!customerName || !customerName.trim() || !startTime) {
       return res.status(400).json({
@@ -1558,8 +1782,19 @@ app.post("/api/bookings", async (req, res) => {
       });
     }
 
-    let resolvedTenantId = tenantId || null;
-    let resolvedServiceId = serviceId || null;
+    let resolvedTenantId =
+      typeof tenantId === "number"
+        ? tenantId
+        : tenantId
+        ? Number(tenantId)
+        : null;
+    let resolvedServiceId =
+      typeof serviceId === "number"
+        ? serviceId
+        : serviceId
+        ? Number(serviceId)
+        : null;
+
     let duration =
       durationMinutes && Number(durationMinutes) > 0
         ? Number(durationMinutes)
@@ -1574,7 +1809,7 @@ app.post("/api/bookings", async (req, res) => {
       resolvedTenantId = tid;
     }
 
-    // If serviceId is provided, verify it and infer tenant if still missing
+    // If serviceId is provided, verify it and infer tenant / duration
     if (resolvedServiceId) {
       const sRes = await db.query(
         `
@@ -1586,7 +1821,7 @@ app.post("/api/bookings", async (req, res) => {
       );
 
       if (sRes.rows.length === 0) {
-        return res.status(400).json({ error: "Unknown service." });
+        return res.status(400).json({ error: "Unknown serviceId." });
       }
 
       const s = sRes.rows[0];
@@ -1603,7 +1838,10 @@ app.post("/api/bookings", async (req, res) => {
 
       // if duration not provided, default to service duration
       if (!duration) {
-        duration = s.duration_minutes || 60;
+        duration =
+          s.duration_minutes && Number(s.duration_minutes) > 0
+            ? Number(s.duration_minutes)
+            : 60;
       }
     }
 
@@ -1618,13 +1856,15 @@ app.post("/api/bookings", async (req, res) => {
       return res.status(400).json({ error: "Invalid startTime." });
     }
     if (!duration) {
-      duration = 60; // fallback if nothing else
+      duration = 60; // final fallback
     }
 
     const staff_id = staffId ? Number(staffId) : null;
     const resource_id = resourceId ? Number(resourceId) : null;
 
-    // conflict checks for staff/resource
+    // ---------------------------------------------------------------------
+    // 1) Check conflicts for staff/resource
+    // ---------------------------------------------------------------------
     const conflicts = await checkConflicts({
       tenantId: resolvedTenantId,
       staffId: staff_id,
@@ -1640,15 +1880,96 @@ app.post("/api/bookings", async (req, res) => {
       });
     }
 
-    // Insert booking
+    // ---------------------------------------------------------------------
+    // 2) Resolve / upsert customer and get a customer_id
+    // ---------------------------------------------------------------------
+    const cleanName = customerName.trim();
+    const cleanPhone =
+      typeof customerPhone === "string" && customerPhone.trim().length
+        ? customerPhone.trim()
+        : null;
+    const cleanEmail =
+      typeof customerEmail === "string" && customerEmail.trim().length
+        ? customerEmail.trim()
+        : null;
+
+    let finalCustomerId = null;
+
+    // 2a) If client sent an explicit customerId, verify it belongs to this tenant
+    if (customerId) {
+      const cid = Number(customerId);
+      const cRes = await db.query(
+        `
+        SELECT id
+        FROM customers
+        WHERE id = $1 AND tenant_id = $2
+        `,
+        [cid, resolvedTenantId]
+      );
+      if (cRes.rows.length > 0) {
+        finalCustomerId = cRes.rows[0].id;
+      }
+    }
+
+    // 2b) If no valid customerId yet but we have phone/email, upsert
+    if (!finalCustomerId && (cleanPhone || cleanEmail)) {
+      const existingRes = await db.query(
+        `
+        SELECT id, name
+        FROM customers
+        WHERE tenant_id = $1
+          AND (
+            ($2::text IS NOT NULL AND phone = $2::text) OR
+            ($3::text IS NOT NULL AND email = $3::text)
+          )
+        LIMIT 1
+        `,
+        [resolvedTenantId, cleanPhone, cleanEmail]
+      );
+
+      if (existingRes.rows.length > 0) {
+        // Existing customer – update name if changed
+        finalCustomerId = existingRes.rows[0].id;
+
+        if (
+          cleanName &&
+          cleanName.length &&
+          cleanName !== existingRes.rows[0].name
+        ) {
+          await db.query(
+            `
+            UPDATE customers
+            SET name = $1, updated_at = NOW()
+            WHERE id = $2
+            `,
+            [cleanName, finalCustomerId]
+          );
+        }
+      } else {
+        // Insert new customer
+        const insertCust = await db.query(
+          `
+          INSERT INTO customers (tenant_id, name, phone, email, notes, created_at)
+          VALUES ($1, $2, $3, $4, NULL, NOW())
+          RETURNING id
+          `,
+          [resolvedTenantId, cleanName, cleanPhone, cleanEmail]
+        );
+        finalCustomerId = insertCust.rows[0].id;
+      }
+    }
+
+    // ---------------------------------------------------------------------
+    // 3) Insert booking with customer_id
+    // ---------------------------------------------------------------------
     const insert = await db.query(
       `
       INSERT INTO bookings
         (tenant_id, service_id, staff_id, resource_id, start_time, duration_minutes,
-         customer_name, customer_phone, customer_email, status)
+         customer_id, customer_name, customer_phone, customer_email, status)
       VALUES
         ($1, $2, $3, $4, $5, $6,
-         $7, $8, $9, 'pending')
+         $7, $8, $9, $10, 'pending')
       RETURNING id;
       `,
       [
@@ -1658,130 +1979,371 @@ app.post("/api/bookings", async (req, res) => {
         resource_id,
         start.toISOString(),
         duration,
-        customerName.trim(),
-        customerPhone || null,
-        customerEmail || null,
+        finalCustomerId,                   // NEW: link to customers table
+        cleanName,
+        cleanPhone,
+        cleanEmail,
       ]
     );
 
     const bookingId = insert.rows[0].id;
-
-    // Auto-create / upsert customer (non-blocking for booking success)
-    if (resolvedTenantId && (customerPhone || customerEmail)) {
-      try {
-        const existingRes = await db.query(
-          `
-          SELECT id
-          FROM customers
-          WHERE tenant_id = $1
-            AND (
-              ($2 IS NOT NULL AND phone = $2) OR
-              ($3 IS NOT NULL AND email = $3)
-            )
-          LIMIT 1
-          `,
-          [resolvedTenantId, customerPhone || null, customerEmail || null]
-        );
-
-        if (existingRes.rows.length === 0) {
-          await db.query(
-            `
-            INSERT INTO customers (tenant_id, name, phone, email)
-            VALUES ($1, $2, $3, $4)
-            `,
-            [
-              resolvedTenantId,
-              customerName.trim(),
-              customerPhone || null,
-              customerEmail || null,
-            ]
-          );
-        } else {
-          // Optional: keep name fresh (no updated_at column in your table)
-          await db.query(
-            `
-            UPDATE customers
-            SET name = $1
-            WHERE id = $2
-            `,
-            [customerName.trim(), existingRes.rows[0].id]
-          );
-        }
-      } catch (custErr) {
-        console.error("Error upserting customer from booking:", custErr);
-        // Don't fail the booking if customer insert fails
-      }
-    }
-
-    const joined = await loadJoinedBookingById(bookingId);
-    res.status(201).json({ booking: joined });
-  } catch (err) {
-    console.error("Error creating booking:", err);
-    res.status(500).json({ error: "Failed to create booking" });
-  }
-});
-
-// POST /api/bookings/:id/status
-app.post("/api/bookings/:id/status", async (req, res) => {
-  try {
-    const id = Number(req.params.id);
-    const { status } = req.body;
-
-    const allowed = ["pending", "confirmed", "cancelled"];
-    if (!allowed.includes(status)) {
-      return res.status(400).json({ error: "Invalid status." });
-    }
-
+    const firstLetter = (customerName || "X").trim().charAt(0).toUpperCase() || "X";
+    
+    // created date in YYYYMMDD (use server time)
+    const ymd = new Date().toISOString().slice(0, 10).replaceAll("-", "");
+    
+    // Example format: A-<tenantId>-<serviceId>-<YYYYMMDD>-<bookingId>
+    const bookingCode = `${firstLetter}-${resolvedTenantId || 0}-${resolvedServiceId || 0}-${ymd}-${bookingId}`;
+    
     await db.query(
-      `
-      UPDATE bookings
-      SET status = $1
-      WHERE id = $2
-      `,
-      [status, id]
+      `UPDATE bookings SET booking_code = $1 WHERE id = $2`,
+      [bookingCode, bookingId]
     );
 
-    const joined = await loadJoinedBookingById(id);
-    if (!joined) {
-      return res.status(404).json({ error: "Booking not found." });
-    }
-
-    res.json({ booking: joined });
+    const joined = await loadJoinedBookingById(bookingId);
+    return res.status(201).json({ booking: joined });
   } catch (err) {
-    console.error("Error updating booking status:", err);
-    res.status(500).json({ error: "Failed to update booking status" });
+    console.error("Error creating booking:", err);
+    return res
+      .status(500)
+      .json({ error: "Failed to create booking.", details: String(err) });
   }
 });
 
 // DELETE /api/bookings/:id
+// Cancel (soft-delete) a booking
+// - Customer cancels by matching customerEmail to bookings.customer_email
+// - Owner cancels with x-owner-token (set BOOKFLOW_OWNER_TOKEN on Render)
 app.delete("/api/bookings/:id", async (req, res) => {
-  const id = Number(req.params.id);
-  if (!id) {
-    return res.status(400).json({ error: "Invalid booking id." });
-  }
-
   try {
-    const result = await db.query(
-      `
-      DELETE FROM bookings
-      WHERE id = $1
-      RETURNING id;
-      `,
-      [id]
-    );
-
-    if (result.rows.length === 0) {
-      return res.status(404).json({ error: "Booking not found." });
+    const bookingId = Number(req.params.id);
+    if (!Number.isFinite(bookingId) || bookingId <= 0) {
+      return res.status(400).send("Invalid booking id");
     }
 
-    return res.json({ success: true });
+    // Accept params in body OR query (useful when some clients can't send DELETE bodies)
+    const tenantSlug = req.body?.tenantSlug ?? req.query?.tenantSlug;
+    const role = (req.body?.role ?? req.query?.role ?? "customer").toString(); // "customer" | "owner"
+    const customerEmailRaw = req.body?.customerEmail ?? req.query?.customerEmail;
+    const customerEmail = customerEmailRaw
+      ? String(customerEmailRaw).trim().toLowerCase()
+      : null;
+
+    if (!tenantSlug) return res.status(400).send("tenantSlug is required");
+
+    const tenantId = await getTenantIdFromSlug(String(tenantSlug));
+    if (!tenantId) return res.status(400).send("Unknown tenantSlug");
+
+    // Load booking
+    const check = await db.query(
+      `
+      SELECT id, tenant_id, status, customer_email
+      FROM bookings
+      WHERE id = $1 AND tenant_id = $2
+      `,
+      [bookingId, tenantId]
+    );
+
+    if (check.rows.length === 0) return res.status(404).send("Booking not found");
+
+    const row = check.rows[0];
+    const bookingEmail = row.customer_email
+      ? String(row.customer_email).trim().toLowerCase()
+      : null;
+
+    // Idempotent: already cancelled => OK
+    if (String(row.status).toLowerCase() === "cancelled") {
+      return res.json({ ok: true, alreadyCancelled: true });
+    }
+
+    // Role-based authorization
+    if (role === "owner") {
+      const ownerToken = req.headers["x-owner-token"];
+      const expected = process.env.BOOKFLOW_OWNER_TOKEN;
+
+      if (!expected || !ownerToken || String(ownerToken) !== String(expected)) {
+        return res.status(403).send("Not allowed");
+      }
+    } else {
+      // customer role
+      if (!customerEmail) {
+        return res.status(400).send("customerEmail is required");
+      }
+
+      // Booking must have an email to validate against
+      if (!bookingEmail) {
+        return res.status(403).send("Not allowed");
+      }
+
+      if (bookingEmail !== customerEmail) {
+        return res.status(403).send("Not allowed");
+      }
+    }
+
+    // Perform cancellation (soft delete)
+    await db.query(
+      `
+      UPDATE bookings
+      SET status = 'cancelled'
+      WHERE id = $1 AND tenant_id = $2
+      `,
+      [bookingId, tenantId]
+    );
+
+    return res.json({ ok: true });
   } catch (err) {
-    console.error("Error deleting booking:", err);
-    return res
-      .status(500)
-      .json({ error: err.message || "Failed to delete booking" });
+    console.error("DELETE /api/bookings/:id error:", err);
+    return res.status(500).send("Failed to cancel booking");
   }
 });
+
+// ---------------------------------------------------------------------------
+// Memberships (Plans + Customer Memberships + Ledger)
+// ---------------------------------------------------------------------------
+
+// GET /api/membership-plans?tenantSlug=...
+app.get("/api/membership-plans", async (req, res) => {
+  try {
+    const { tenantSlug } = req.query;
+    if (!tenantSlug) {
+      return res.status(400).json({ error: "tenantSlug is required." });
+    }
+
+    const tenantId = await getTenantIdFromSlug(tenantSlug);
+    if (!tenantId) return res.status(400).json({ error: "Unknown tenantSlug." });
+
+    const q = `
+      SELECT
+        id,
+        tenant_id,
+        name,
+        description,
+        billing_type,
+        price,
+        currency,
+        included_minutes,
+        included_uses,
+        validity_days,
+        is_active,
+        created_at,
+        updated_at
+      FROM membership_plans
+      WHERE tenant_id = $1 AND is_active = TRUE
+      ORDER BY id DESC
+    `;
+    const r = await db.query(q, [tenantId]);
+    return res.json({ plans: r.rows });
+  } catch (err) {
+    console.error("GET /api/membership-plans error:", err);
+    return res.status(500).json({ error: "Failed to load membership plans." });
+  }
+});
+
+// GET /api/customer-memberships?tenantSlug=...&customerId=...
+// Returns plan_name joined for display
+app.get("/api/customer-memberships", async (req, res) => {
+  try {
+    const { tenantSlug, customerId } = req.query;
+
+    if (!tenantSlug || !customerId) {
+      return res.status(400).json({ error: "tenantSlug and customerId are required." });
+    }
+
+    const tenantId = await getTenantIdFromSlug(tenantSlug);
+    if (!tenantId) return res.status(400).json({ error: "Unknown tenantSlug." });
+
+    const cid = Number(customerId);
+    if (!cid) return res.status(400).json({ error: "Invalid customerId." });
+
+    // make sure customer belongs to tenant
+    const cRes = await db.query(
+      "SELECT id FROM customers WHERE id = $1 AND tenant_id = $2",
+      [cid, tenantId]
+    );
+    if (cRes.rows.length === 0) {
+      return res.status(404).json({ error: "Customer not found for tenant." });
+    }
+
+    const q = `
+      SELECT
+        cm.id,
+        cm.tenant_id,
+        cm.customer_id,
+        cm.plan_id,
+        cm.status,
+        cm.start_at,
+        cm.end_at,
+        cm.minutes_remaining,
+        cm.uses_remaining,
+        mp.name AS plan_name
+      FROM customer_memberships cm
+      JOIN membership_plans mp ON mp.id = cm.plan_id
+      WHERE cm.tenant_id = $1 AND cm.customer_id = $2
+      ORDER BY cm.id DESC
+    `;
+    const r = await db.query(q, [tenantId, cid]);
+    return res.json({ memberships: r.rows });
+  } catch (err) {
+    console.error("GET /api/customer-memberships error:", err);
+    return res.status(500).json({ error: "Failed to load memberships." });
+  }
+});
+
+// POST /api/customer-memberships/subscribe
+app.post("/api/customer-memberships/subscribe", async (req, res) => {
+  const client = await db.connect();
+
+  try {
+    const { tenantSlug, customerId, planId } = req.body;
+
+    if (!tenantSlug || !customerId || !planId) {
+      return res.status(400).json({ error: "Missing required fields." });
+    }
+
+    // Resolve tenant
+    const tenantRes = await client.query(
+      "SELECT id FROM tenants WHERE slug = $1",
+      [tenantSlug]
+    );
+    const tenantId = tenantRes.rows[0]?.id;
+    if (!tenantId) {
+      return res.status(400).json({ error: "Invalid tenantSlug." });
+    }
+
+    // Validate customer belongs to tenant
+    const custRes = await client.query(
+      "SELECT id FROM customers WHERE id = $1 AND tenant_id = $2",
+      [customerId, tenantId]
+    );
+    if (custRes.rows.length === 0) {
+      return res.status(400).json({ error: "Customer does not belong to tenant." });
+    }
+
+    // Load membership plan
+    const planRes = await client.query(
+      `SELECT id, name, included_minutes, included_uses, validity_days
+       FROM membership_plans
+       WHERE id = $1 AND tenant_id = $2 AND is_active = true`,
+      [planId, tenantId]
+    );
+    if (planRes.rows.length === 0) {
+      return res.status(400).json({ error: "Invalid or inactive plan." });
+    }
+
+    const plan = planRes.rows[0];
+    const minutes = plan.included_minutes ?? 0;
+    const uses = plan.included_uses ?? 0;
+    const validityDays = plan.validity_days;
+
+    await client.query("BEGIN");
+
+    // Expire existing memberships
+    await client.query(
+      `UPDATE customer_memberships
+       SET status = 'expired', end_at = NOW(), updated_at = NOW()
+       WHERE tenant_id = $1 AND customer_id = $2 AND status = 'active'`,
+      [tenantId, customerId]
+    );
+
+    // Create new membership
+    const membershipRes = await client.query(
+      `INSERT INTO customer_memberships
+       (tenant_id, customer_id, plan_id, status,
+        start_at, end_at,
+        minutes_remaining, uses_remaining,
+        created_at, updated_at)
+       VALUES
+       ($1, $2, $3, 'active',
+        NOW(),
+        NOW() + ($6 || ' days')::interval,
+        $4, $5,
+        NOW(), NOW())
+       RETURNING *`,
+      [
+        tenantId,
+        customerId,
+        planId,
+        minutes,
+        uses,
+        validityDays,
+      ]
+    );
+
+    const membership = membershipRes.rows[0];
+
+    // Ledger entry (grant)
+    await client.query(
+      `INSERT INTO membership_ledger
+       (tenant_id, customer_membership_id, type,
+        minutes_delta, uses_delta, note, created_at)
+       VALUES
+       ($1, $2, 'grant', $3, $4, $5, NOW())`,
+      [
+        tenantId,
+        membership.id,
+        minutes,
+        uses,
+        `Initial grant for ${plan.name}`,
+      ]
+    );
+
+    await client.query("COMMIT");
+
+    res.status(201).json({ membership });
+  } catch (err) {
+    await client.query("ROLLBACK");
+    console.error("SUBSCRIBE ERROR:", err.message, err);
+    res.status(500).json({ error: "Failed to subscribe." });
+  } finally {
+    client.release();
+  }
+});
+
+
+// GET /api/customer-memberships/:id/ledger?tenantSlug=...
+app.get("/api/customer-memberships/:id/ledger", async (req, res) => {
+  try {
+    const { tenantSlug } = req.query;
+    const membershipId = Number(req.params.id);
+
+    if (!tenantSlug) return res.status(400).json({ error: "tenantSlug is required." });
+    if (!membershipId) return res.status(400).json({ error: "Invalid membership id." });
+
+    const tenantId = await getTenantIdFromSlug(tenantSlug);
+    if (!tenantId) return res.status(400).json({ error: "Unknown tenantSlug." });
+
+    // ensure membership belongs to tenant
+    const mRes = await db.query(
+      "SELECT id FROM customer_memberships WHERE id = $1 AND tenant_id = $2",
+      [membershipId, tenantId]
+    );
+    if (mRes.rows.length === 0) {
+      return res.status(404).json({ error: "Membership not found for tenant." });
+    }
+
+    const q = `
+      SELECT
+        id,
+        created_at,
+        type,
+        minutes_delta,
+        uses_delta,
+        note,
+        booking_id
+      FROM membership_ledger
+      WHERE tenant_id = $1 AND customer_membership_id = $2
+      ORDER BY created_at DESC
+      LIMIT 200
+    `;
+    const r = await db.query(q, [tenantId, membershipId]);
+    return res.json({ ledger: r.rows });
+  } catch (err) {
+    console.error("GET /api/customer-memberships/:id/ledger error:", err);
+    return res.status(500).json({ error: "Failed to load ledger." });
+  }
+});
+
+
 
 // ---------------------------------------------------------------------------
 // Start server
