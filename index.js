@@ -7,6 +7,42 @@ const path = require("path");
 const fs = require("fs");
 const multer = require("multer");
 
+const { OAuth2Client } = require("google-auth-library");
+
+const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
+
+async function requireGoogleAuth(req, res, next) {
+  try {
+    const auth = req.headers.authorization || "";
+    const match = auth.match(/^Bearer\s+(.+)$/i);
+
+    if (!match) {
+      return res.status(401).json({ error: "Missing Bearer token" });
+    }
+
+    const idToken = match[1];
+
+    const ticket = await googleClient.verifyIdToken({
+      idToken,
+      audience: process.env.GOOGLE_CLIENT_ID,
+    });
+
+    const payload = ticket.getPayload();
+
+    req.user = {
+      email: payload.email,
+      sub: payload.sub,
+      name: payload.name,
+      picture: payload.picture,
+    };
+
+    next();
+  } catch (err) {
+    console.error("Auth error:", err.message);
+    return res.status(401).json({ error: "Invalid or expired Google token" });
+  }
+}
+
 const app = express();
 const PORT = process.env.PORT || 3001;
 
@@ -622,7 +658,7 @@ app.patch("/api/tenant-settings", requireAdmin, async (req, res) => {
 // ---------------------------------------------------------------------------
 
 // GET /api/tenant-hours?tenantSlug=&tenantId=
-app.get("/api/tenant-hours", async (req, res) => {
+app.post("/api/tenant-hours", requireAdmin, async (req, res) => {
   try {
     const { tenantSlug, tenantId } = req.query;
     let resolvedTenantId = tenantId ? Number(tenantId) : null;
@@ -797,7 +833,7 @@ app.post("/api/tenants/:tenantId/working-hours", requireAdmin, async (req, res) 
 
 app.post(
   "/api/tenants/:tenantId/logo",
-  requireAdmin,
+  requireGoogleAuth,
   upload.single("file"),
   uploadErrorHandler,
   async (req, res) => {
@@ -848,7 +884,7 @@ app.post(
 
 app.post(
   "/api/services/:id/image",
-  requireAdmin,
+  requireGoogleAuth,
   upload.single("file"),
   uploadErrorHandler,
   async (req, res) => {
@@ -884,7 +920,7 @@ app.post(
 
 app.post(
   "/api/staff/:id/image",
-  requireAdmin,
+  requireGoogleAuth,
   upload.single("file"),
   uploadErrorHandler,
   async (req, res) => {
@@ -920,7 +956,7 @@ app.post(
 
 app.post(
   "/api/resources/:id/image",
-  requireAdmin,
+  requireGoogleAuth,
   upload.single("file"),
   uploadErrorHandler,
   async (req, res) => {
