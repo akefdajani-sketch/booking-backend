@@ -32,35 +32,115 @@ app.use(express.json());
 
 
 // ---------------------------------------------------------------------------
-// File uploads (tenant logos)
+// Auth middleware (minimal) + Hardened file uploads
+// ---------------------------------------------------------------------------
+
+const crypto = require("crypto");
+
+// Minimal admin auth (use for owner/tenant-admin operations)
+// Client must send one of:
+//   - Authorization: Bearer <ADMIN_API_KEY>
+//   - x-admin-key: <ADMIN_API_KEY>
+function requireAdmin(req, res, next) {
+  const rawAuth = String(req.headers.authorization || "");
+  const bearer =
+    rawAuth.toLowerCase().startsWith("bearer ")
+      ? rawAuth.slice(7).trim()
+      : null;
+
+  const key =
+    bearer ||
+    String(req.headers["x-admin-key"] || "").trim() ||
+    String(req.headers["x-api-key"] || "").trim();
+
+  const expected = String(process.env.ADMIN_API_KEY || "").trim();
+
+  if (!expected) {
+    // Fail closed in production-like environments
+    return res.status(500).json({
+      error:
+        "Server misconfigured: ADMIN_API_KEY is not set. Upload/admin routes are disabled.",
+    });
+  }
+
+  if (!key || key !== expected) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+
+  return next();
+}
+
+// ---------------------------------------------------------------------------
+// Hardened file uploads
 // ---------------------------------------------------------------------------
 
 const uploadDir = path.join(__dirname, "uploads");
 
-// ensure uploads directory exists
+// Ensure uploads directory exists
 if (!fs.existsSync(uploadDir)) {
   fs.mkdirSync(uploadDir, { recursive: true });
 }
 
-// store files as: uploads/tenant-<id>-logo.ext
+// Only allow image uploads (no SVG by default for safety)
+const ALLOWED_MIME = new Map([
+  ["image/jpeg", "jpg"],
+  ["image/png", "png"],
+  ["image/webp", "webp"],
+]);
+
+function safeUploadFilename(file) {
+  const ext = ALLOWED_MIME.get(file.mimetype);
+  const rand = crypto.randomBytes(8).toString("hex");
+  const ts = Date.now();
+  // No user-provided filename is used (prevents weird chars/path tricks)
+  return `img-${ts}-${rand}.${ext}`;
+}
+
 const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    cb(null, uploadDir);
+  destination: (req, file, cb) => cb(null, uploadDir),
+  filename: (req, file, cb) => cb(null, safeUploadFilename(file)),
+});
+
+const upload = multer({
+  storage,
+  limits: {
+    fileSize: 2 * 1024 * 1024, // 2MB
+    files: 1,
   },
-  filename: (req, file, cb) => {
-    const ext = path.extname(file.originalname || "");
-    const base =
-      path.basename(file.originalname || "file", ext).replace(/\s+/g, "-") ||
-      "file";
-    const unique = Date.now();
-    cb(null, `${base.toLowerCase()}-${unique}${ext || ""}`);
+  fileFilter: (req, file, cb) => {
+    if (!ALLOWED_MIME.has(file.mimetype)) {
+      return cb(
+        new Error("Invalid file type. Only JPG, PNG, or WEBP are allowed.")
+      );
+    }
+    cb(null, true);
   },
 });
 
-const upload = multer({ storage });
+// Serve uploads statically (OK if these are purely public assets)
+// Add security headers + cache control
+app.use(
+  "/uploads",
+  express.static(uploadDir, {
+    fallthrough: false,
+    setHeaders: (res) => {
+      res.setHeader("X-Content-Type-Options", "nosniff");
+      res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+    },
+  })
+);
 
-// serve the uploads folder statically so frontend can show the logo
-app.use("/uploads", express.static(uploadDir));
+// Friendly multer error handler for upload endpoints
+function uploadErrorHandler(err, req, res, next) {
+  if (!err) return next();
+
+  // Multer limit errors
+  if (err.code === "LIMIT_FILE_SIZE") {
+    return res.status(413).json({ error: "File too large (max 2MB)." });
+  }
+
+  return res.status(400).json({ error: err.message || "Upload failed." });
+}
 
 // ---------------------------------------------------------------------------
 // Health check
@@ -462,7 +542,7 @@ app.get("/api/tenants", async (req, res) => {
 // ---------------------------------------------------------------------------
 
 // GET /api/tenant-settings?tenantSlug=&tenantId=
-app.patch("/api/tenant-settings", async (req, res) => {
+app.patch("/api/tenant-settings", requireAdmin, async (req, res) => {
   try {
     const {
       tenantSlug,
@@ -580,7 +660,7 @@ app.get("/api/tenant-hours", async (req, res) => {
 
 // POST /api/tenant-hours
 // Body: { tenantSlug? | tenantId?, dayOfWeek, openTime?, closeTime?, isClosed? }
-app.post("/api/tenant-hours", async (req, res) => {
+app.post("/api/tenant-hours", requireAdmin, async (req, res) => {
   try {
     const { tenantSlug, tenantId, dayOfWeek, openTime, closeTime, isClosed } =
       req.body || {};
@@ -636,7 +716,7 @@ app.post("/api/tenant-hours", async (req, res) => {
 // ---------------------------------------------------------------------------
 // Tenant working hours — writes directly to tenant_hours table
 // ---------------------------------------------------------------------------
-app.post("/api/tenants/:tenantId/working-hours", async (req, res) => {
+app.post("/api/tenants/:tenantId/working-hours", requireAdmin, async (req, res) => {
   const tenantId = Number(req.params.tenantId);
   const body = req.body || {};
   const workingHours = body.workingHours;
@@ -717,7 +797,9 @@ app.post("/api/tenants/:tenantId/working-hours", async (req, res) => {
 
 app.post(
   "/api/tenants/:tenantId/logo",
-  upload.single("file"), // field name is "file" from FormData
+  requireAdmin,
+  upload.single("file"),
+  uploadErrorHandler,
   async (req, res) => {
     try {
       const tenantId = Number(req.params.tenantId);
@@ -766,7 +848,9 @@ app.post(
 
 app.post(
   "/api/services/:id/image",
+  requireAdmin,
   upload.single("file"),
+  uploadErrorHandler,
   async (req, res) => {
     try {
       const id = Number(req.params.id);
@@ -800,7 +884,9 @@ app.post(
 
 app.post(
   "/api/staff/:id/image",
+  requireAdmin,
   upload.single("file"),
+  uploadErrorHandler,
   async (req, res) => {
     try {
       const id = Number(req.params.id);
@@ -834,7 +920,9 @@ app.post(
 
 app.post(
   "/api/resources/:id/image",
+  requireAdmin,
   upload.single("file"),
+  uploadErrorHandler,
   async (req, res) => {
     try {
       const id = Number(req.params.id);
