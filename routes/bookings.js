@@ -2,7 +2,7 @@
 const express = require("express");
 const router = express.Router();
 
-const db = require("../db");
+const { pool } = require("../db");
 
 // If you already split helpers into utils, keep these requires.
 // (If you haven’t created them yet, tell me and I’ll generate them too.)
