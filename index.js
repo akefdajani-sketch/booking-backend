@@ -1,4 +1,5 @@
 // index.js — BookFlow backend (multi-tenant booking API)
+require("./src/server");
 
 const express = require("express");
 const cors = require("cors");
