@@ -2,6 +2,8 @@
 const express = require("express");
 const router = express.Router();
 const { pool } = require("../db");
+const db = pool;
+
 const requireGoogleAuth = require("../middleware/requireGoogleAuth");
 const { getTenantIdFromSlug } = require("../utils/tenants");
 
