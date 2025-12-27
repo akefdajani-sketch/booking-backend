@@ -54,7 +54,7 @@ router.get("/", async (req, res) => {
         s.requires_staff,
         s.requires_resource,
         s.image_url,
-        s.is_active,
+        s.is_active
       FROM services s
       JOIN tenants t ON s.tenant_id = t.id
       ${where}
