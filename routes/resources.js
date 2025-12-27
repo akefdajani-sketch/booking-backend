@@ -40,7 +40,7 @@ router.get("/", async (req, res) => {
         t.slug AS tenant_slug,
         t.name AS tenant_name,
         r.name,
-        r.kind,
+        r.type AS kind,
         r.is_active,
         r.created_at
       FROM resources r
@@ -83,7 +83,7 @@ router.post("/", requireAdmin, async (req, res) => {
       `
       INSERT INTO resources (tenant_id, name, kind, is_active)
       VALUES ($1, $2, $3, TRUE)
-      RETURNING id, tenant_id, name, kind, is_active, created_at
+      RETURNING id, tenant_id, name, type AS kind, is_active, created_at
       `,
       [resolvedTenantId, String(name).trim(), kind ? String(kind).trim() : null]
     );
