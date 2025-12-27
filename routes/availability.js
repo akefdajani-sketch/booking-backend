@@ -37,30 +37,45 @@ router.get("/", async (req, res) => {
     }
     if (!resolvedTenantId) return res.status(400).json({ error: "Unknown tenant." });
 
+    // ---- Service config --------------------------------------------------------
     const svcRes = await db.query(
-      `SELECT id, duration_minutes, requires_staff, requires_resource FROM services WHERE id = $1`,
+      `
+      SELECT
+        id,
+        duration_minutes,
+        requires_staff,
+        requires_resource,
+        slot_interval_minutes,
+        max_parallel_bookings
+      FROM services
+      WHERE id = $1
+      `,
       [Number(serviceId)]
     );
-    if (!svcRes.rows.length) return res.status(400).json({ error: "Unknown serviceId." });
-
+    
+    if (!svcRes.rows.length) {
+      return res.status(400).json({ error: "Unknown serviceId." });
+    }
+    
     const svc = svcRes.rows[0];
+    
+    // duration + slot step + capacity (with safe fallbacks)
     const duration = Number(svc.duration_minutes || 60);
-
+    const step = Number(svc.slot_interval_minutes || duration);
+    const maxParallel = Number(svc.max_parallel_bookings || 1);
+    
     const staff_id = staffId ? Number(staffId) : null;
     const resource_id = resourceId ? Number(resourceId) : null;
-
-    if (svc.requires_staff && !staff_id) {
-      return res.json({ slots: [] });
-    }
-    if (svc.requires_resource && !resource_id) {
-      return res.json({ slots: [] });
-    }
-
+    
+    // If required but missing, return empty slots
+    if (svc.requires_staff && !staff_id) return res.json({ slots: [] });
+    if (svc.requires_resource && !resource_id) return res.json({ slots: [] });
+    
     // Determine day_of_week from provided date (0=Sunday..6=Saturday)
     const d = new Date(`${date}T00:00:00`);
     const dayOfWeek = d.getDay();
-
-    // tenant hours
+    
+    // ---- Tenant hours ----------------------------------------------------------
     const hoursRes = await db.query(
       `
       SELECT open_time, close_time, is_closed
@@ -70,19 +85,25 @@ router.get("/", async (req, res) => {
       `,
       [resolvedTenantId, dayOfWeek]
     );
-
+    
     if (!hoursRes.rows.length || hoursRes.rows[0].is_closed) {
       return res.json({ slots: [] });
     }
-
+    
     const openTime = hoursRes.rows[0].open_time;   // "08:00:00"
-    const closeTime = hoursRes.rows[0].close_time; // "22:00:00"
-
+    const closeTime = hoursRes.rows[0].close_time; // "22:00:00" or "00:00:00"
+    
     const openHHMM = String(openTime).slice(0, 5);
     const closeHHMM = String(closeTime).slice(0, 5);
+    
+    let openMin = timeToMinutes(openHHMM);
+    let closeMin = timeToMinutes(closeHHMM);
+    
+    // ✅ Restore legacy behavior: if close <= open, it means "wrap to next day" (e.g. 10:00 → 00:00)
+    if (closeMin <= openMin) {
+      closeMin += 24 * 60; // 1440
+    }
 
-    const openMin = timeToMinutes(openHHMM);
-    const closeMin = timeToMinutes(closeHHMM);
 
     // Load bookings for that day (simple day filter; matches your current style)
     const params = [resolvedTenantId, date];
@@ -119,7 +140,7 @@ router.get("/", async (req, res) => {
       return { startMin, endMin };
     });
 
-    const step = 15; // 15-minute grid
+    const step = Number(svc.slot_interval_minutes || duration);
     const slots = [];
 
     for (let t = openMin; t + duration <= closeMin; t += step) {
@@ -127,7 +148,7 @@ router.get("/", async (req, res) => {
       const candidateEnd = t + duration;
 
       const isBlocked = busy.some((x) => overlaps(candidateStart, candidateEnd, x.startMin, x.endMin));
-      if (!isBlocked) slots.push(toHHMM(candidateStart));
+      if (!isBlocked) slots.push(toHHMM(candidateStart % (24 * 60)));
     }
 
     return res.json({ slots });
