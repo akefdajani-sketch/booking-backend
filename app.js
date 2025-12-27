@@ -1,8 +1,9 @@
 // src/app.js
 const express = require("express");
+const cors = require("cors");
 
-// If you already have cors/bodyparser configs, keep them and move them here:
-const { corsMiddleware } = require("./middleware/cors");
+const { corsMiddleware, corsOptions } = require("./middleware/cors");
+const { uploadDir } = require("./middleware/upload");
 
 // Routers
 const tenantsRouter = require("./routes/tenants");
@@ -17,11 +18,33 @@ const membershipsRouter = require("./routes/memberships");
 
 const app = express();
 
-// --- Global middleware (copy from index.js) ---
-app.use(corsMiddleware);
-app.use(express.json({ limit: "2mb" })); // match your current limits if different
+/**
+ * --- Global middleware (match your current index.js behavior) ---
+ */
 
-// --- Route mounting ---
+// CORS (including OPTIONS preflight)
+app.use(corsMiddleware);
+app.options("*", cors(corsOptions));
+
+// Body parsing
+app.use(express.json({ limit: "2mb" }));
+app.use(express.urlencoded({ extended: true }));
+
+// Static uploads (keep same URL path as before)
+app.use(
+  "/uploads",
+  express.static(uploadDir, {
+    fallthrough: false,
+    setHeaders: (res) => {
+      res.setHeader("X-Content-Type-Options", "nosniff");
+      res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+    },
+  })
+);
+
+/**
+ * --- Routes ---
+ */
 app.use("/api/tenants", tenantsRouter);
 app.use("/api/tenant-hours", tenantHoursRouter);
 app.use("/api/services", servicesRouter);
@@ -32,7 +55,24 @@ app.use("/api/bookings", bookingsRouter);
 app.use("/api/availability", availabilityRouter);
 app.use("/api/memberships", membershipsRouter);
 
-// Optional: your health check
+/**
+ * --- Health check ---
+ */
 app.get("/health", (req, res) => res.json({ ok: true }));
+
+/**
+ * --- 404 handler for API routes (optional but helpful) ---
+ */
+app.use("/api", (req, res) => {
+  res.status(404).json({ error: "Not found" });
+});
+
+/**
+ * --- Global error handler (keeps crashes out of prod) ---
+ */
+app.use((err, req, res, next) => {
+  console.error("Unhandled error:", err);
+  res.status(500).json({ error: "Internal server error" });
+});
 
 module.exports = app;
