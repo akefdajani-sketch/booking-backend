@@ -1,9 +1,9 @@
 // routes/tenantHours.js
 const express = require("express");
 const router = express.Router();
+const { pool } = require("../db");
 const db = pool;
 
-const { pool } = require("../db");
 const requireAdmin = require("../middleware/requireAdmin");
 const { getTenantIdFromSlug } = require("../utils/tenants");
 
