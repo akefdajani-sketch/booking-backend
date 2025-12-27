@@ -2,6 +2,7 @@
 const { Pool } = require("pg");
 
 const isProd = process.env.NODE_ENV === "production";
+
 const useSSL = process.env.DATABASE_SSL
   ? process.env.DATABASE_SSL === "true"
   : isProd;
@@ -11,7 +12,7 @@ const pool = new Pool({
   ssl: useSSL ? { rejectUnauthorized: false } : false,
 });
 
-// ✅ Backward compatible: db.query + db.connect still work
+// ✅ backward compatible exports
 module.exports = {
   pool,
   query: (...args) => pool.query(...args),
