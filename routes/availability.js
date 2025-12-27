@@ -140,7 +140,6 @@ router.get("/", async (req, res) => {
       return { startMin, endMin };
     });
 
-    const step = Number(svc.slot_interval_minutes || duration);
     const slots = [];
 
     for (let t = openMin; t + duration <= closeMin; t += step) {
