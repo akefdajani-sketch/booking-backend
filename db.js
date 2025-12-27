@@ -6,4 +6,16 @@ const pool = new Pool({
   ssl: process.env.DATABASE_SSL === "true" ? { rejectUnauthorized: false } : false,
 });
 
-module.exports = { pool };
+// Convenience helpers so routes can do: db.query(...) and db.connect()
+function query(text, params) {
+  return pool.query(text, params);
+}
+function connect() {
+  return pool.connect();
+}
+
+module.exports = {
+  pool,
+  query,
+  connect,
+};
