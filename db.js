@@ -1,21 +1,17 @@
-// src/db.js
+// db.js
 const { Pool } = require("pg");
+
+const isProd = process.env.NODE_ENV === "production";
+
+// Default to SSL in prod unless explicitly disabled
+const useSSL =
+  process.env.DATABASE_SSL
+    ? process.env.DATABASE_SSL === "true"
+    : isProd;
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: process.env.DATABASE_SSL === "true" ? { rejectUnauthorized: false } : false,
+  ssl: useSSL ? { rejectUnauthorized: false } : false,
 });
 
-// Convenience helpers so routes can do: db.query(...) and db.connect()
-function query(text, params) {
-  return pool.query(text, params);
-}
-function connect() {
-  return pool.connect();
-}
-
-module.exports = {
-  pool,
-  query,
-  connect,
-};
+module.exports = { pool };
