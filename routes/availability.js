@@ -2,6 +2,7 @@
 const express = require("express");
 const router = express.Router();
 const { pool } = require("../db");
+const db = pool; // ✅ keeps db.query(...) working
 const { getTenantIdFromSlug } = require("../utils/tenants");
 
 // Helpers
