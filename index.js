@@ -1,5 +1,6 @@
 // index.js — BookFlow backend (multi-tenant booking API)
-require("./src/server");
+console.log("BOOT: running root index.js -> server.js");
+require("./server");
 
 const express = require("express");
 const cors = require("cors");
