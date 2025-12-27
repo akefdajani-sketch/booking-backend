@@ -128,20 +128,20 @@ async function loadJoinedBookingById(bookingId) {
       r.name AS resource_name,
 
       b.customer_id,
-      c.name AS customer_name,
-      c.phone AS customer_phone,
-      c.email AS customer_email,
+      b.customer_name,
+      b.customer_phone,
+      b.customer_email,
 
       b.start_time,
       b.duration_minutes,
       b.status,
-      b.created_at
+      b.created_at,
+      b.booking_code
     FROM bookings b
     JOIN tenants t ON t.id = b.tenant_id
     LEFT JOIN services s ON s.id = b.service_id
     LEFT JOIN staff st ON st.id = b.staff_id
     LEFT JOIN resources r ON r.id = b.resource_id
-    LEFT JOIN customers c ON c.id = b.customer_id
     WHERE b.id = $1
     LIMIT 1
   `;
