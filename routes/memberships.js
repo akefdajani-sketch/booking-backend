@@ -1,0 +1,181 @@
+// routes/memberships.js
+const express = require("express");
+const router = express.Router();
+const db = require("../db");
+const requireGoogleAuth = require("../middleware/requireGoogleAuth");
+const { getTenantIdFromSlug } = require("../utils/tenants");
+
+// GET /api/memberships/plans?tenantSlug=&tenantId=
+router.get("/plans", async (req, res) => {
+  try {
+    const { tenantSlug, tenantId } = req.query;
+    let resolvedTenantId = tenantId ? Number(tenantId) : null;
+
+    if (!resolvedTenantId && tenantSlug) {
+      resolvedTenantId = await getTenantIdFromSlug(String(tenantSlug));
+    }
+    if (!resolvedTenantId) return res.status(400).json({ error: "Unknown tenant." });
+
+    const result = await db.query(
+      `
+      SELECT
+        id,
+        tenant_id,
+        name,
+        validity_days,
+        minutes_total,
+        uses_total,
+        price_jd,
+        is_active,
+        created_at
+      FROM membership_plans
+      WHERE tenant_id = $1 AND is_active = TRUE
+      ORDER BY price_jd ASC, name ASC
+      `,
+      [resolvedTenantId]
+    );
+
+    return res.json({ plans: result.rows });
+  } catch (err) {
+    console.error("Error loading membership plans:", err);
+    return res.status(500).json({ error: "Failed to load membership plans" });
+  }
+});
+
+// GET /api/memberships/customer?customerId=
+router.get("/customer", async (req, res) => {
+  try {
+    const customerId = Number(req.query.customerId);
+    if (!customerId) return res.status(400).json({ error: "customerId is required" });
+
+    const result = await db.query(
+      `
+      SELECT
+        cm.*,
+        mp.name AS plan_name,
+        mp.validity_days,
+        mp.minutes_total,
+        mp.uses_total,
+        mp.price_jd
+      FROM customer_memberships cm
+      JOIN membership_plans mp ON mp.id = cm.plan_id
+      WHERE cm.customer_id = $1
+      ORDER BY cm.created_at DESC
+      `,
+      [customerId]
+    );
+
+    return res.json({ customerMemberships: result.rows });
+  } catch (err) {
+    console.error("Error loading customer memberships:", err);
+    return res.status(500).json({ error: "Failed to load customer memberships" });
+  }
+});
+
+// POST /api/memberships/subscribe
+// Body: { customerId, planId }
+// ✅ Includes failsafe: block if current membership is active AND has remaining balance
+router.post("/subscribe", requireGoogleAuth, async (req, res) => {
+  const client = await db.connect();
+  try {
+    const { customerId, planId } = req.body || {};
+    const cid = Number(customerId);
+    const pid = Number(planId);
+
+    if (!cid || !pid) {
+      return res.status(400).json({ error: "customerId and planId are required" });
+    }
+
+    await client.query("BEGIN");
+
+    // Lock current memberships for this customer
+    const currentRes = await client.query(
+      `
+      SELECT *
+      FROM customer_memberships
+      WHERE customer_id = $1
+      ORDER BY created_at DESC
+      FOR UPDATE
+      `,
+      [cid]
+    );
+
+    // Current = most recent active + not ended (best-effort)
+    const now = new Date();
+    const current = currentRes.rows.find((m) => {
+      const statusOk = String(m.status || "").toLowerCase() === "active";
+      const endOk = !m.end_at || new Date(m.end_at).getTime() >= now.getTime();
+      return statusOk && endOk;
+    });
+
+    if (current) {
+      const mins = Number(current.minutes_remaining || 0);
+      const uses = Number(current.uses_remaining || 0);
+
+      // ❌ FAILSAFE: block renew if still active AND has balance
+      if (mins > 0 || uses > 0) {
+        await client.query("ROLLBACK");
+        return res.status(409).json({
+          error:
+            "You already have an active plan with remaining balance. You can renew once it expires or your balance runs out.",
+        });
+      }
+    }
+
+    // Load plan
+    const planRes = await client.query(
+      `SELECT * FROM membership_plans WHERE id = $1 AND is_active = TRUE LIMIT 1`,
+      [pid]
+    );
+    if (!planRes.rows.length) {
+      await client.query("ROLLBACK");
+      return res.status(400).json({ error: "Invalid planId" });
+    }
+
+    const plan = planRes.rows[0];
+    const validityDays = Number(plan.validity_days || 0);
+    const minutesTotal = Number(plan.minutes_total || 0);
+    const usesTotal = Number(plan.uses_total || 0);
+
+    // Expire any active memberships (best practice)
+    await client.query(
+      `
+      UPDATE customer_memberships
+      SET status = 'expired', end_at = NOW()
+      WHERE customer_id = $1 AND status = 'active'
+      `,
+      [cid]
+    );
+
+    // Create new membership
+    const startAt = new Date();
+    const endAt =
+      validityDays > 0
+        ? new Date(startAt.getTime() + validityDays * 24 * 60 * 60 * 1000)
+        : null;
+
+    const insertRes = await client.query(
+      `
+      INSERT INTO customer_memberships
+        (customer_id, plan_id, status, start_at, end_at, minutes_remaining, uses_remaining, created_at)
+      VALUES
+        ($1, $2, 'active', $3, $4, $5, $6, NOW())
+      RETURNING *
+      `,
+      [cid, pid, startAt.toISOString(), endAt ? endAt.toISOString() : null, minutesTotal, usesTotal]
+    );
+
+    await client.query("COMMIT");
+    return res.json({ membership: insertRes.rows[0] });
+  } catch (err) {
+    try {
+      await client.query("ROLLBACK");
+    } catch {}
+    console.error("Error subscribing membership:", err);
+    return res.status(500).json({ error: "Failed to subscribe membership" });
+  } finally {
+    client.release();
+  }
+});
+
+module.exports = router;
