@@ -55,7 +55,6 @@ router.get("/", async (req, res) => {
         s.requires_resource,
         s.image_url,
         s.is_active,
-        s.created_at
       FROM services s
       JOIN tenants t ON s.tenant_id = t.id
       ${where}
@@ -112,7 +111,7 @@ router.post("/", requireAdmin, async (req, res) => {
       VALUES
         ($1, $2, $3, $4, $5, $6)
       RETURNING
-        id, tenant_id, name, duration_minutes, price_jd, requires_staff, requires_resource, image_url, is_active, created_at
+        id, tenant_id, name, duration_minutes, price_jd, requires_staff, requires_resource, image_url, is_active
       `,
       [
         resolvedTenantId,
