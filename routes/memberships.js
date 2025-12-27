@@ -1,7 +1,7 @@
 // routes/memberships.js
 const express = require("express");
 const router = express.Router();
-const db = require("../db");
+const { pool } = require("../db");
 const requireGoogleAuth = require("../middleware/requireGoogleAuth");
 const { getTenantIdFromSlug } = require("../utils/tenants");
 
@@ -76,7 +76,7 @@ router.get("/customer", async (req, res) => {
 // Body: { customerId, planId }
 // ✅ Includes failsafe: block if current membership is active AND has remaining balance
 router.post("/subscribe", requireGoogleAuth, async (req, res) => {
-  const client = await db.connect();
+    const client = await pool.connect();
   try {
     const { customerId, planId } = req.body || {};
     const cid = Number(customerId);
