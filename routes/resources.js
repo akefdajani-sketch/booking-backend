@@ -81,7 +81,7 @@ router.post("/", requireAdmin, async (req, res) => {
 
     const insert = await db.query(
       `
-      INSERT INTO resources (tenant_id, name, kind, is_active)
+      INSERT INTO resources (tenant_id, name, type, is_active)
       VALUES ($1, $2, $3, TRUE)
       RETURNING id, tenant_id, name, type AS kind, is_active, created_at
       `,
