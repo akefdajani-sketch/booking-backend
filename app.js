@@ -54,6 +54,8 @@ app.use("/api/customers", customersRouter);
 app.use("/api/bookings", bookingsRouter);
 app.use("/api/availability", availabilityRouter);
 app.use("/api/memberships", membershipsRouter);
+app.use("/api/membership-plans", membershipsRouter); // alias for frontend compatibility
+
 
 /**
  * --- Health check ---
