@@ -105,51 +105,35 @@ router.get("/", async (req, res) => {
     }
 
 
-    // Load bookings for that day (simple day filter; matches your current style)
-    const params = [resolvedTenantId, date];
-    let where = `
-      b.tenant_id = $1
-      AND b.start_time::date = $2::date
-      AND b.status = ANY(ARRAY['pending','confirmed'])
-    `;
-
-    if (staff_id) {
-      params.push(staff_id);
-      where += ` AND b.staff_id = $${params.length}`;
-    }
-    if (resource_id) {
-      params.push(resource_id);
-      where += ` AND b.resource_id = $${params.length}`;
-    }
-
-    const bookingsRes = await db.query(
-      `
-      SELECT start_time, duration_minutes
-      FROM bookings b
-      WHERE ${where}
-      ORDER BY start_time ASC
-      `,
-      params
-    );
-
-    // Convert bookings into minutes-from-midnight for overlap test
+        // Convert bookings into minutes-from-midnight for overlap test
     const busy = bookingsRes.rows.map((b) => {
       const start = new Date(b.start_time);
       const startMin = start.getHours() * 60 + start.getMinutes();
       const endMin = startMin + Number(b.duration_minutes || 0);
       return { startMin, endMin };
     });
-
+    
+    // Generate slots (capacity-aware)
     const slots = [];
-
-    for (let t = openMin; t + duration <= closeMin; t += step) {
+    
+    // Safety: ensure step is valid
+    const stepMin = Number.isFinite(step) && step > 0 ? step : duration;
+    
+    for (let t = openMin; t + duration <= closeMin; t += stepMin) {
       const candidateStart = t;
       const candidateEnd = t + duration;
-
-      const isBlocked = busy.some((x) => overlaps(candidateStart, candidateEnd, x.startMin, x.endMin));
-      if (!isBlocked) slots.push(toHHMM(candidateStart % (24 * 60)));
+    
+      // Count overlaps (instead of boolean block)
+      const overlapsCount = busy.reduce((acc, x) => {
+        return acc + (overlaps(candidateStart, candidateEnd, x.startMin, x.endMin) ? 1 : 0);
+      }, 0);
+    
+      // Block only if overlaps hit capacity
+      if (overlapsCount < maxParallel) {
+        slots.push(toHHMM(candidateStart % (24 * 60)));
+      }
     }
-
+    
     return res.json({ slots });
   } catch (err) {
     console.error("Error calculating availability:", err);
