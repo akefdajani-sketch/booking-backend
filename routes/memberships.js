@@ -8,16 +8,20 @@ const requireGoogleAuth = require("../middleware/requireGoogleAuth");
 const { getTenantIdFromSlug } = require("../utils/tenants");
 
 // GET /api/memberships/plans?tenantSlug=&tenantId=
+// Public: shows active plans for a tenant
 router.get("/plans", async (req, res) => {
   try {
     const { tenantSlug, tenantId } = req.query;
-    let resolvedTenantId = tenantId ? Number(tenantId) : null;
 
+    let resolvedTenantId = tenantId ? Number(tenantId) : null;
     if (!resolvedTenantId && tenantSlug) {
       resolvedTenantId = await getTenantIdFromSlug(String(tenantSlug));
     }
-    if (!resolvedTenantId) return res.status(400).json({ error: "Unknown tenant." });
+    if (!resolvedTenantId) {
+      return res.status(400).json({ error: "Unknown tenant." });
+    }
 
+    // ✅ Fix: treat NULL is_active as TRUE (legacy / older rows)
     const result = await db.query(
       `
       SELECT
@@ -31,8 +35,11 @@ router.get("/plans", async (req, res) => {
         is_active,
         created_at
       FROM membership_plans
-      WHERE tenant_id = $1 AND is_active = TRUE
-      ORDER BY price_jd ASC, name ASC
+      WHERE tenant_id = $1
+        AND COALESCE(is_active, TRUE) = TRUE
+      ORDER BY
+        price_jd NULLS LAST,
+        name ASC
       `,
       [resolvedTenantId]
     );
@@ -45,6 +52,7 @@ router.get("/plans", async (req, res) => {
 });
 
 // GET /api/memberships/customer?customerId=
+// Returns memberships for a customer (latest first)
 router.get("/customer", async (req, res) => {
   try {
     const customerId = Number(req.query.customerId);
@@ -78,7 +86,7 @@ router.get("/customer", async (req, res) => {
 // Body: { customerId, planId }
 // ✅ Includes failsafe: block if current membership is active AND has remaining balance
 router.post("/subscribe", requireGoogleAuth, async (req, res) => {
-    const client = await pool.connect();
+  const client = await pool.connect();
   try {
     const { customerId, planId } = req.body || {};
     const cid = Number(customerId);
@@ -89,6 +97,17 @@ router.post("/subscribe", requireGoogleAuth, async (req, res) => {
     }
 
     await client.query("BEGIN");
+
+    // Load customer (used to tenant-check)
+    const custRes = await client.query(
+      `SELECT id, tenant_id FROM customers WHERE id = $1 LIMIT 1`,
+      [cid]
+    );
+    if (!custRes.rows.length) {
+      await client.query("ROLLBACK");
+      return res.status(400).json({ error: "Invalid customerId" });
+    }
+    const customerTenantId = Number(custRes.rows[0].tenant_id);
 
     // Lock current memberships for this customer
     const currentRes = await client.query(
@@ -102,7 +121,6 @@ router.post("/subscribe", requireGoogleAuth, async (req, res) => {
       [cid]
     );
 
-    // Current = most recent active + not ended (best-effort)
     const now = new Date();
     const current = currentRes.rows.find((m) => {
       const statusOk = String(m.status || "").toLowerCase() === "active";
@@ -124,17 +142,31 @@ router.post("/subscribe", requireGoogleAuth, async (req, res) => {
       }
     }
 
-    // Load plan
+    // Load plan (must be active-ish) and must belong to same tenant as customer
     const planRes = await client.query(
-      `SELECT * FROM membership_plans WHERE id = $1 AND is_active = TRUE LIMIT 1`,
+      `
+      SELECT *
+      FROM membership_plans
+      WHERE id = $1
+        AND COALESCE(is_active, TRUE) = TRUE
+      LIMIT 1
+      `,
       [pid]
     );
+
     if (!planRes.rows.length) {
       await client.query("ROLLBACK");
       return res.status(400).json({ error: "Invalid planId" });
     }
 
     const plan = planRes.rows[0];
+    const planTenantId = Number(plan.tenant_id);
+
+    if (customerTenantId && planTenantId && customerTenantId !== planTenantId) {
+      await client.query("ROLLBACK");
+      return res.status(400).json({ error: "Plan does not belong to this tenant." });
+    }
+
     const validityDays = Number(plan.validity_days || 0);
     const minutesTotal = Number(plan.minutes_total || 0);
     const usesTotal = Number(plan.uses_total || 0);
@@ -164,7 +196,14 @@ router.post("/subscribe", requireGoogleAuth, async (req, res) => {
         ($1, $2, 'active', $3, $4, $5, $6, NOW())
       RETURNING *
       `,
-      [cid, pid, startAt.toISOString(), endAt ? endAt.toISOString() : null, minutesTotal, usesTotal]
+      [
+        cid,
+        pid,
+        startAt.toISOString(),
+        endAt ? endAt.toISOString() : null,
+        minutesTotal,
+        usesTotal,
+      ]
     );
 
     await client.query("COMMIT");
