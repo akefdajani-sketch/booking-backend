@@ -153,34 +153,51 @@ router.get("/", async (req, res) => {
       return { startMin, endMin };
     });
 
-    // ---- Generate slots (capacity-aware) --------------------------------------
-    const stepMin = Number.isFinite(step) && step > 0 ? step : duration;
+// ---- Generate slots (capacity-aware) --------------------------------------
+const stepMin = Number.isFinite(step) && step > 0 ? step : duration;
 
-    const times = [];
-    for (let t = openMin; t + duration <= closeMin; t += stepMin) {
-      const candidateStart = t;
-      const candidateEnd = t + duration;
+// Optional: label formatter (safe + simple)
+function labelFromHHMM(hhmm) {
+  // If you don’t care about AM/PM labels, you can just: return hhmm;
+  const [hStr, mStr] = hhmm.split(":");
+  const h = Number(hStr);
+  const m = Number(mStr);
+  const period = h >= 12 ? "PM" : "AM";
+  const h12 = ((h + 11) % 12) + 1;
+  return `${h12}:${String(m).padStart(2, "0")} ${period}`;
+}
 
-      const overlapsCount = busy.reduce((acc, x) => {
-        return acc + (overlaps(candidateStart, candidateEnd, x.startMin, x.endMin) ? 1 : 0);
-      }, 0);
+const times = [];
 
-      if (overlapsCount < maxParallel) {
-        times.push(toHHMM(candidateStart % (24 * 60)));
-      }
-    }
+for (let t = openMin; t + duration <= closeMin; t += stepMin) {
+  const candidateStart = t;
+  const candidateEnd = t + duration;
 
-    // ✅ Return BOTH shapes:
-    // - slots: objects for the frontend UI (slot.time + enabled flags)
-    // - times: string list for debug / backward compatibility
-    const slots = times.map((time) => ({
-      time,
-      isAvailable: true,
-      available: true,
-      isRestricted: false,
-    }));
+  // Count overlaps (capacity-aware)
+  const overlapsCount = busy.reduce((acc, x) => {
+    return acc + (overlaps(candidateStart, candidateEnd, x.startMin, x.endMin) ? 1 : 0);
+  }, 0);
 
-    return res.json({ slots, times });
+  if (overlapsCount < maxParallel) {
+    // Keep in-day HH:MM even if we wrapped past midnight
+    times.push(toHHMM(candidateStart % (24 * 60)));
+  }
+}
+
+// ✅ Return the legacy/expected shape (like old index.js)
+const slots = times.map((time) => ({
+  time,                 // frontend uses slot.time for selection
+  label: labelFromHHMM(time), // optional, but matches old structure
+  available: true,      // frontend commonly checks this to allow clicks
+}));
+
+return res.json({
+  slots,                // ✅ objects
+  times,                // ✅ strings (debug/back-compat)
+  durationMinutes: duration,      // ✅ keep this (old route returned it)
+  slotIntervalMinutes: stepMin,   // ✅ helpful for contiguous selection logic
+});
+
   } catch (err) {
     console.error("Error calculating availability:", err);
     return res.status(500).json({ error: "Failed to calculate availability" });
