@@ -2,7 +2,7 @@
 const express = require("express");
 const router = express.Router();
 const { pool } = require("../db");
-const db = pool; // ✅ keeps db.query(...) working
+const db = pool; // keeps db.query(...) working
 const { getTenantIdFromSlug } = require("../utils/tenants");
 
 // Helpers
@@ -10,34 +10,28 @@ function pad(n) {
   return String(n).padStart(2, "0");
 }
 function toHHMM(totalMinutes) {
-  // totalMinutes may be > 1440 (wrap case). Convert to display HH:MM in 0..23 range.
-  const m = ((totalMinutes % 1440) + 1440) % 1440;
-  const h = Math.floor(m / 60);
-  const mm = m % 60;
-  return `${pad(h)}:${pad(mm)}`;
+  const h = Math.floor(totalMinutes / 60);
+  const m = totalMinutes % 60;
+  return `${pad(h)}:${pad(m)}`;
 }
 function timeToMinutes(t) {
-  // "HH:MM" -> minutes
+  // "HH:MM" or "HH:MM:SS" -> minutes
   const [h, m] = String(t).split(":").map((x) => Number(x));
   return h * 60 + m;
 }
 function overlaps(aStart, aEnd, bStart, bEnd) {
   return aStart < bEnd && aEnd > bStart;
 }
-function isoDatePlusDays(yyyyMmDd, days) {
-  const d = new Date(`${yyyyMmDd}T00:00:00.000Z`);
-  d.setUTCDate(d.getUTCDate() + days);
-  return d.toISOString().slice(0, 10);
-}
 
-// GET /api/availability?tenantSlug=&tenantId=&date=YYYY-MM-DD&serviceId=&staffId=&resourceId=
 router.get("/", async (req, res) => {
   try {
     const { tenantSlug, tenantId, date, serviceId, staffId, resourceId } =
       req.query;
 
     if (!date)
-      return res.status(400).json({ error: "date is required (YYYY-MM-DD)" });
+      return res
+        .status(400)
+        .json({ error: "date is required (YYYY-MM-DD)" });
     if (!serviceId)
       return res.status(400).json({ error: "serviceId is required" });
 
@@ -70,7 +64,6 @@ router.get("/", async (req, res) => {
 
     const svc = svcRes.rows[0];
 
-    // duration + slot step + capacity (with safe fallbacks)
     const duration = Number(svc.duration_minutes || 60);
     const step = Number(svc.slot_interval_minutes || duration);
     const maxParallel = Number(svc.max_parallel_bookings || 1);
@@ -78,13 +71,12 @@ router.get("/", async (req, res) => {
     const staff_id = staffId ? Number(staffId) : null;
     const resource_id = resourceId ? Number(resourceId) : null;
 
-    // If required but missing, return empty slots
-    if (svc.requires_staff && !staff_id) return res.json({ slots: [] });
-    if (svc.requires_resource && !resource_id) return res.json({ slots: [] });
+    if (svc.requires_staff && !staff_id) return res.json({ slots: [], times: [] });
+    if (svc.requires_resource && !resource_id) return res.json({ slots: [], times: [] });
 
     // Determine day_of_week from provided date (0=Sunday..6=Saturday)
-    const d = new Date(`${date}T00:00:00`);
-    const dayOfWeek = d.getDay();
+    const baseLocal = new Date(`${date}T00:00:00`);
+    const dayOfWeek = baseLocal.getDay();
 
     // ---- Tenant hours ----------------------------------------------------------
     const hoursRes = await db.query(
@@ -98,11 +90,11 @@ router.get("/", async (req, res) => {
     );
 
     if (!hoursRes.rows.length || hoursRes.rows[0].is_closed) {
-      return res.json({ slots: [] });
+      return res.json({ slots: [], times: [] });
     }
 
-    const openTime = hoursRes.rows[0].open_time; // "08:00:00"
-    const closeTime = hoursRes.rows[0].close_time; // "22:00:00" or "00:00:00"
+    const openTime = hoursRes.rows[0].open_time;   // "10:00:00"
+    const closeTime = hoursRes.rows[0].close_time; // "00:00:00" or "22:00:00"
 
     const openHHMM = String(openTime).slice(0, 5);
     const closeHHMM = String(closeTime).slice(0, 5);
@@ -110,95 +102,79 @@ router.get("/", async (req, res) => {
     let openMin = timeToMinutes(openHHMM);
     let closeMin = timeToMinutes(closeHHMM);
 
-    // ✅ Legacy wrap: if close <= open, it means "wrap to next day"
-    const wrapsPastMidnight = closeMin <= openMin;
-    if (wrapsPastMidnight) {
+    // If close <= open, treat as "wrap to next day" (10:00 -> 00:00)
+    if (closeMin <= openMin) {
       closeMin += 24 * 60; // 1440
     }
 
-    // ---- Load bookings (THIS WAS MISSING) -------------------------------------
-    // We query from date 00:00 to date end; if wrap, include the next day too.
-    const dateStartISO = `${date}T00:00:00.000Z`;
-    const endDate = wrapsPastMidnight ? isoDatePlusDays(date, 1) : date;
-    const dateEndISO = `${endDate}T23:59:59.999Z`;
+    // ---- Bookings window (include next-day early bookings if wrap) -------------
+    // We'll query from base date 00:00 up to base + 1 day + extra wrap minutes
+    const extraWrapMinutes = closeMin > 24 * 60 ? closeMin - 24 * 60 : 0;
 
-    const params = [];
-    const where = [];
+    const rangeStart = new Date(`${date}T00:00:00`);
+    const rangeEnd = new Date(rangeStart);
+    rangeEnd.setDate(rangeEnd.getDate() + 1);
+    if (extraWrapMinutes > 0) {
+      rangeEnd.setMinutes(rangeEnd.getMinutes() + extraWrapMinutes);
+    }
 
-    params.push(resolvedTenantId);
-    where.push(`b.tenant_id = $${params.length}`);
-
-    params.push(Number(serviceId));
-    where.push(`b.service_id = $${params.length}`);
+    const params = [resolvedTenantId, rangeStart.toISOString(), rangeEnd.toISOString()];
+    let where = `
+      b.tenant_id = $1
+      AND b.start_time >= $2::timestamptz
+      AND b.start_time <  $3::timestamptz
+      AND b.status = ANY(ARRAY['pending','confirmed'])
+    `;
 
     if (staff_id) {
       params.push(staff_id);
-      where.push(`b.staff_id = $${params.length}`);
+      where += ` AND b.staff_id = $${params.length}`;
     }
     if (resource_id) {
       params.push(resource_id);
-      where.push(`b.resource_id = $${params.length}`);
+      where += ` AND b.resource_id = $${params.length}`;
     }
-
-    // ignore cancelled
-    where.push(`(b.status IS NULL OR b.status <> 'cancelled')`);
-
-    params.push(dateStartISO);
-    const startIdx = params.length;
-
-    params.push(dateEndISO);
-    const endIdx = params.length;
-
-    // duration fallback param
-    params.push(duration);
-    const durIdx = params.length;
 
     const bookingsRes = await db.query(
       `
-      SELECT
-        b.start_time,
-        COALESCE(b.duration_minutes, $${durIdx}) AS duration_minutes
+      SELECT start_time, duration_minutes
       FROM bookings b
-      WHERE ${where.join(" AND ")}
-        AND b.start_time >= $${startIdx}
-        AND b.start_time <= $${endIdx}
-      ORDER BY b.start_time ASC
+      WHERE ${where}
+      ORDER BY start_time ASC
       `,
       params
     );
 
-    // Convert bookings into minutes-from-selected-date-midnight for overlap test
-    // (so bookings on the next day become > 1440 minutes — correct for wrap logic)
-    const baseMs = new Date(`${date}T00:00:00.000Z`).getTime();
-
+    // Convert bookings into minutes-from-base for overlap test (wrap-safe)
     const busy = bookingsRes.rows.map((b) => {
-      const startMs = new Date(b.start_time).getTime();
-      const startMin = Math.round((startMs - baseMs) / 60000); // can be > 1440
+      const start = new Date(b.start_time);
+      const startMin = Math.round((start.getTime() - baseLocal.getTime()) / 60000);
       const endMin = startMin + Number(b.duration_minutes || 0);
       return { startMin, endMin };
     });
 
     // ---- Generate slots (capacity-aware) --------------------------------------
-    const slots = [];
-
-    // Safety: ensure step is valid
     const stepMin = Number.isFinite(step) && step > 0 ? step : duration;
 
+    const times = [];
     for (let t = openMin; t + duration <= closeMin; t += stepMin) {
       const candidateStart = t;
       const candidateEnd = t + duration;
 
-      // Count overlaps (capacity)
       const overlapsCount = busy.reduce((acc, x) => {
         return acc + (overlaps(candidateStart, candidateEnd, x.startMin, x.endMin) ? 1 : 0);
       }, 0);
 
       if (overlapsCount < maxParallel) {
-        slots.push(toHHMM(candidateStart));
+        times.push(toHHMM(candidateStart % (24 * 60)));
       }
     }
 
-    return res.json({ slots });
+    // IMPORTANT: return objects so frontend pills can render slot.time
+    return res.json({
+      slots: times.map((time) => ({ time })),
+      times, // debug/compat
+    });
   } catch (err) {
     console.error("Error calculating availability:", err);
     return res.status(500).json({ error: "Failed to calculate availability" });
