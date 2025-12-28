@@ -170,11 +170,17 @@ router.get("/", async (req, res) => {
       }
     }
 
-    // IMPORTANT: return objects so frontend pills can render slot.time
-    return res.json({
-      slots: times.map((time) => ({ time })),
-      times, // debug/compat
-    });
+    // ✅ Return BOTH shapes:
+    // - slots: objects for the frontend UI (slot.time + enabled flags)
+    // - times: string list for debug / backward compatibility
+    const slots = times.map((time) => ({
+      time,
+      isAvailable: true,
+      available: true,
+      isRestricted: false,
+    }));
+
+    return res.json({ slots, times });
   } catch (err) {
     console.error("Error calculating availability:", err);
     return res.status(500).json({ error: "Failed to calculate availability" });
