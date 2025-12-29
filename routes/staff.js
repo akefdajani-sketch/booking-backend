@@ -7,6 +7,7 @@ const db = pool;
 const requireAdmin = require("../middleware/requireAdmin");
 const requireGoogleAuth = require("../middleware/requireGoogleAuth");
 const { upload, uploadErrorHandler } = require("../middleware/upload");
+const { uploadFileToR2, safeName } = require("../utils/r2");
 
 // GET /api/staff?tenantSlug=&tenantId=&includeInactive=
 router.get("/", async (req, res) => {
@@ -125,36 +126,29 @@ router.delete("/:id", requireAdmin, async (req, res) => {
 });
 
 // POST /api/staff/:id/image  (Google auth + upload)
-router.post(
-  "/:id/image",
-  requireGoogleAuth,
-  upload.single("file"),
-  uploadErrorHandler,
-  async (req, res) => {
-    try {
-      const id = Number(req.params.id);
-      if (!id) return res.status(400).json({ error: "Invalid staff id." });
-      if (!req.file) return res.status(400).json({ error: "No file uploaded." });
+router.post("/:id/image", requireGoogleAuth, upload.single("file"), async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!req.file) return res.status(400).json({ error: "No file uploaded" });
 
-      const imageUrl = `/uploads/${req.file.filename}`;
+    const key = `staff/${id}/${Date.now()}-${safeName(req.file.originalname)}`;
 
-      const upd = await db.query(
-        `
-        UPDATE staff
-        SET photo_url = $1
-        WHERE id = $2
-        RETURNING id, tenant_id, name, role, photo_url, avatar_url, is_active
-        `,
-        [imageUrl, id]
-      );
+    const { url } = await uploadFileToR2({
+      filePath: req.file.path,
+      contentType: req.file.mimetype,
+      key,
+    });
 
-      if (!upd.rows.length) return res.status(404).json({ error: "Staff not found." });
-      return res.json({ ok: true, imageUrl, staff: upd.rows[0] });
-    } catch (err) {
-      console.error("Staff image upload error:", err);
-      return res.status(500).json({ error: "Failed to upload image." });
-    }
+    const result = await pool.query(
+      "UPDATE staff SET image_url=$1 WHERE id=$2 RETURNING *",
+      [url, id]
+    );
+
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error("Staff image upload error:", err);
+    res.status(500).json({ error: "Upload failed" });
   }
-);
+});
 
 module.exports = router;
