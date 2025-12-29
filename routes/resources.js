@@ -4,6 +4,10 @@ const router = express.Router();
 const { pool } = require("../db");
 const db = pool;
 
+const requireGoogleAuth = require("../middleware/requireGoogleAuth");
+const upload = require("../middleware/upload");
+const { uploadFileToR2, safeName } = require("../utils/r2");
+
 const requireAdmin = require("../middleware/requireAdmin");
 
 // GET /api/resources?tenantSlug=&tenantId=&includeInactive=
@@ -116,6 +120,32 @@ router.delete("/:id", requireAdmin, async (req, res) => {
   } catch (err) {
     console.error("Error deleting resource:", err);
     return res.status(500).json({ error: "Failed to delete resource" });
+  }
+});
+
+// POST /api/services/:id/image
+router.post("/:id/image", requireGoogleAuth, upload.single("file"), async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!req.file) return res.status(400).json({ error: "No file uploaded" });
+
+    const key = `resources/${id}/${Date.now()}-${safeName(req.file.originalname)}`;
+
+    const { url } = await uploadFileToR2({
+      filePath: req.file.path,
+      contentType: req.file.mimetype,
+      key,
+    });
+
+    const result = await pool.query(
+      "UPDATE resources SET image_url=$1 WHERE id=$2 RETURNING *",
+      [url, id]
+    );
+
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error("Resource image upload error:", err);
+    res.status(500).json({ error: "Upload failed" });
   }
 });
 
