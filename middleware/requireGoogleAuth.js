@@ -1,66 +1,79 @@
 // middleware/requireGoogleAuth.js
 const { OAuth2Client } = require("google-auth-library");
 
-const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
+const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 
-function parseBearerToken(authHeader) {
-  const auth = authHeader || "";
-  const match = auth.match(/^Bearer\s+(.+)$/i);
-  return match ? match[1] : null;
+function extractBearer(req) {
+  const h = req.headers.authorization || req.headers.Authorization;
+  if (!h) return null;
+  const parts = String(h).split(" ");
+  if (parts.length !== 2) return null;
+  if (parts[0].toLowerCase() !== "bearer") return null;
+  return parts[1];
 }
 
 module.exports = async function requireGoogleAuth(req, res, next) {
   try {
-    const idToken = parseBearerToken(req.headers.authorization);
+    const idToken =
+      extractBearer(req) ||
+      req.body?.googleIdToken ||
+      req.query?.googleIdToken;
+
     if (!idToken) {
-      return res.status(401).json({ error: "Missing Bearer token" });
+      return res.status(401).json({
+        error: "Missing Google token.",
+        code: "GOOGLE_TOKEN_MISSING",
+      });
     }
 
-    const ticket = await googleClient.verifyIdToken({
+    const ticket = await client.verifyIdToken({
       idToken,
       audience: process.env.GOOGLE_CLIENT_ID,
     });
 
     const payload = ticket.getPayload();
-    if (!payload || !payload.email) {
-      return res.status(401).json({ error: "Invalid Google token payload" });
+    if (!payload?.email) {
+      return res.status(401).json({
+        error: "Invalid Google token (no email).",
+        code: "GOOGLE_TOKEN_INVALID",
+      });
     }
 
-    req.user = {
+    // Optional: basic exp guard (verifyIdToken already checks, but keep explicit)
+    const nowSec = Math.floor(Date.now() / 1000);
+    if (payload.exp && nowSec >= payload.exp) {
+      return res.status(401).json({
+        error: "Google token expired. Please sign in again.",
+        code: "GOOGLE_TOKEN_EXPIRED",
+        exp: payload.exp,
+        now: nowSec,
+      });
+    }
+
+    req.googleUser = {
       email: payload.email,
-      sub: payload.sub,
-      name: payload.name,
-      picture: payload.picture,
+      email_verified: !!payload.email_verified,
+      name: payload.name || null,
+      picture: payload.picture || null,
+      sub: payload.sub || null,
     };
 
     return next();
   } catch (err) {
-    // google-auth-library can throw a generic error message like:
-    // "Token used too late, <now> > <exp>: {...payload...}"
-    const msg = String(err?.message || "");
+    const msg = String(err?.message || err);
 
-    // Detect expiry clearly
-    if (msg.toLowerCase().includes("token used too late")) {
-      console.warn("Auth error: Google token expired");
+    // Most common failure in your logs
+    if (msg.toLowerCase().includes("used too late") || msg.toLowerCase().includes("expired")) {
       return res.status(401).json({
         error: "Google token expired. Please sign in again.",
         code: "GOOGLE_TOKEN_EXPIRED",
       });
     }
 
-    // Other common cases
-    if (msg.toLowerCase().includes("wrong number of segments")) {
-      return res.status(401).json({
-        error: "Malformed Bearer token",
-        code: "GOOGLE_TOKEN_MALFORMED",
-      });
-    }
-
-    // Fallback
-    console.warn("Auth error:", msg);
+    console.error("Auth error:", msg);
     return res.status(401).json({
-      error: "Invalid Google token",
-      code: "GOOGLE_TOKEN_INVALID",
+      error: "Google auth failed.",
+      code: "GOOGLE_AUTH_FAILED",
     });
   }
 };
