@@ -10,180 +10,135 @@ const { upload, uploadErrorHandler } = require("../middleware/upload");
 const { uploadFileToR2, safeName } = require("../utils/r2");
 
 // ---------------------------------------------------------------------------
-// Services
-// ---------------------------------------------------------------------------
-
 // GET /api/services?tenantSlug=&tenantId=&includeInactive=
-// Returns services with tenant name/slug and basic fields
+// ---------------------------------------------------------------------------
 router.get("/", async (req, res) => {
   try {
     const { tenantSlug, tenantId, includeInactive } = req.query;
 
-    let where = "";
     const params = [];
-    let idx = 1;
+    let where = "";
 
     if (tenantId) {
       params.push(Number(tenantId));
-      where = `WHERE s.tenant_id = $${idx}`;
-      idx++;
+      where += ` WHERE s.tenant_id = $${params.length}`;
     } else if (tenantSlug) {
-      params.push(tenantSlug);
-      where = `WHERE t.slug = $${idx}`;
-      idx++;
+      params.push(String(tenantSlug));
+      where += ` WHERE t.slug = $${params.length}`;
     }
 
-    // default: only active unless includeInactive=1/true
-    const inc =
-      String(includeInactive || "")
-        .toLowerCase()
-        .trim() === "true" || String(includeInactive || "").trim() === "1";
-
-    if (!inc) {
-      where += where ? " AND s.is_active = TRUE" : "WHERE s.is_active = TRUE";
+    if (!includeInactive || includeInactive === "false") {
+      where += where ? " AND s.is_active = true" : " WHERE s.is_active = true";
     }
 
     const q = `
       SELECT
-        s.id,
-        s.tenant_id,
-        t.slug AS tenant_slug,
-        t.name AS tenant_name,
-        s.name,
-        s.duration_minutes,
-        s.price_jd,
-        s.requires_staff,
-        s.requires_resource,
-        s.image_url,
-        s.is_active
+        s.*,
+        t.slug AS tenant_slug
       FROM services s
-      JOIN tenants t ON s.tenant_id = t.id
+      JOIN tenants t ON t.id = s.tenant_id
       ${where}
-      ORDER BY t.name ASC, s.name ASC
+      ORDER BY s.created_at DESC
     `;
 
     const result = await db.query(q, params);
     res.json({ services: result.rows });
   } catch (err) {
-    console.error("Error loading services:", err);
-    res.status(500).json({ error: "Failed to load services" });
+    console.error("GET /api/services error:", err);
+    res.status(500).json({ error: "Failed to fetch services" });
   }
 });
 
-// POST /api/services
-// Body: { tenantSlug?, tenantId?, name, durationMinutes?, priceJd?, requiresStaff?, requiresResource? }
+// ---------------------------------------------------------------------------
+// POST /api/services (admin-only create)
+// ---------------------------------------------------------------------------
 router.post("/", requireAdmin, async (req, res) => {
   try {
     const {
-      tenantSlug,
-      tenantId,
+      tenant_id,
       name,
-      durationMinutes,
-      priceJd,
-      requiresStaff,
-      requiresResource,
-    } = req.body || {};
+      duration_minutes,
+      price,
+      requires_staff,
+      requires_resource,
+      is_active,
+    } = req.body;
 
-    if (!name || !String(name).trim()) {
-      return res.status(400).json({ error: "Service name is required." });
-    }
-
-    // Resolve tenant_id
-    let resolvedTenantId = tenantId ? Number(tenantId) : null;
-
-    if (!resolvedTenantId && tenantSlug) {
-      const tRes = await db.query(
-        `SELECT id FROM tenants WHERE slug = $1 LIMIT 1`,
-        [String(tenantSlug)]
-      );
-      resolvedTenantId = tRes.rows[0]?.id || null;
-    }
-
-    if (!resolvedTenantId) {
-      return res.status(400).json({
-        error: "Missing tenantId or tenantSlug to create a service.",
-      });
-    }
-
-    const insert = await db.query(
-      `
-      INSERT INTO services
-        (tenant_id, name, duration_minutes, price_jd, requires_staff, requires_resource)
-      VALUES
-        ($1, $2, $3, $4, $5, $6)
-      RETURNING
-        id, tenant_id, name, duration_minutes, price_jd, requires_staff, requires_resource, image_url, is_active
-      `,
-      [
-        resolvedTenantId,
-        String(name).trim(),
-        Number(durationMinutes || 60),
-        priceJd == null ? null : Number(priceJd),
-        Boolean(requiresStaff),
-        Boolean(requiresResource),
-      ]
-    );
-
-    res.json({ service: insert.rows[0] });
-  } catch (err) {
-    console.error("Error creating service:", err);
-    res.status(500).json({ error: "Failed to create service" });
-  }
-});
-
-// DELETE /api/services/:id
-router.delete("/:id", requireAdmin, async (req, res) => {
-  try {
-    const id = Number(req.params.id);
-    if (!id) return res.status(400).json({ error: "Invalid service id." });
-
-    // soft-delete style (set inactive) if your schema uses is_active
-    // If your index.js was doing hard-delete, swap to DELETE FROM.
     const result = await db.query(
       `
-      UPDATE services
-      SET is_active = FALSE
-      WHERE id = $1
-      RETURNING id
+      INSERT INTO services
+        (tenant_id, name, duration_minutes, price, requires_staff, requires_resource, is_active)
+      VALUES
+        ($1, $2, $3, $4, $5, $6, $7)
+      RETURNING *
       `,
-      [id]
-    );
-
-    if (!result.rows.length) {
-      return res.status(404).json({ error: "Service not found." });
-    }
-
-    res.json({ ok: true, id });
-  } catch (err) {
-    console.error("Error deleting service:", err);
-    res.status(500).json({ error: "Failed to delete service" });
-  }
-});
-
-// POST /api/services/:id/image
-router.post("/:id/image", requireGoogleAuth, upload.single("file"), async (req, res) => {
-  try {
-    const id = Number(req.params.id);
-    if (!req.file) return res.status(400).json({ error: "No file uploaded" });
-
-    const key = `services/${id}/${Date.now()}-${safeName(req.file.originalname)}`;
-
-    const { url } = await uploadFileToR2({
-      filePath: req.file.path,
-      contentType: req.file.mimetype,
-      key,
-    });
-
-    const result = await pool.query(
-      "UPDATE services SET image_url=$1 WHERE id=$2 RETURNING *",
-      [url, id]
+      [
+        tenant_id,
+        name,
+        duration_minutes ?? 60,
+        price ?? 0,
+        !!requires_staff,
+        !!requires_resource,
+        is_active ?? true,
+      ]
     );
 
     res.json(result.rows[0]);
   } catch (err) {
-    console.error("Service image upload error:", err);
-    res.status(500).json({ error: "Upload failed" });
+    console.error("POST /api/services error:", err);
+    res.status(500).json({ error: "Failed to create service" });
   }
 });
+
+// ---------------------------------------------------------------------------
+// DELETE /api/services/:id (admin-only delete)
+// ---------------------------------------------------------------------------
+router.delete("/:id", requireAdmin, async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    await db.query(`DELETE FROM services WHERE id=$1`, [id]);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("DELETE /api/services/:id error:", err);
+    res.status(500).json({ error: "Failed to delete service" });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/services/:id/image (Google auth + upload)
+// field name must be: "file"
+// ---------------------------------------------------------------------------
+router.post(
+  "/:id/image",
+  requireGoogleAuth,
+  upload.single("file"),
+  uploadErrorHandler,
+  async (req, res) => {
+    try {
+      const id = Number(req.params.id);
+      if (!req.file) return res.status(400).json({ error: "No file uploaded" });
+
+      const key = `services/${id}/image/${Date.now()}-${safeName(
+        req.file.originalname
+      )}`;
+
+      const { url } = await uploadFileToR2({
+        filePath: req.file.path,
+        contentType: req.file.mimetype,
+        key,
+      });
+
+      const result = await db.query(
+        "UPDATE services SET image_url=$1 WHERE id=$2 RETURNING *",
+        [url, id]
+      );
+
+      res.json(result.rows[0]);
+    } catch (err) {
+      console.error("Service image upload error:", err);
+      res.status(500).json({ error: "Upload failed" });
+    }
+  }
+);
 
 module.exports = router;
