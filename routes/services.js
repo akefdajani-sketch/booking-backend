@@ -7,6 +7,7 @@ const db = pool;
 const requireAdmin = require("../middleware/requireAdmin");
 const requireGoogleAuth = require("../middleware/requireGoogleAuth");
 const { upload, uploadErrorHandler } = require("../middleware/upload");
+const { uploadFileToR2, safeName } = require("../utils/r2");
 
 // ---------------------------------------------------------------------------
 // Services
@@ -160,47 +161,29 @@ router.delete("/:id", requireAdmin, async (req, res) => {
 });
 
 // POST /api/services/:id/image
-router.post(
-  "/:id/image",
-  requireGoogleAuth,
-  upload.single("file"),
-  uploadErrorHandler,
-  async (req, res) => {
-    try {
-      const id = Number(req.params.id);
-      if (!id) {
-        return res.status(400).json({ error: "Invalid service id." });
-      }
+router.post("/:id/image", requireGoogleAuth, upload.single("file"), async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!req.file) return res.status(400).json({ error: "No file uploaded" });
 
-      if (!req.file) {
-        return res.status(400).json({ error: "No file uploaded." });
-      }
+    const key = `services/${id}/${Date.now()}-${safeName(req.file.originalname)}`;
 
-      // The file is stored by multer diskStorage. Build a public URL path.
-      // Your app.js serves /uploads as static.
-      const imageUrl = `/uploads/${req.file.filename}`;
+    const { url } = await uploadFileToR2({
+      filePath: req.file.path,
+      contentType: req.file.mimetype,
+      key,
+    });
 
-      // Update service image
-      const sRes = await db.query(
-        `
-        UPDATE services
-        SET image_url = $1
-        WHERE id = $2
-        RETURNING id, tenant_id, name, duration_minutes, price_jd, requires_staff, requires_resource, image_url, is_active
-        `,
-        [imageUrl, id]
-      );
+    const result = await pool.query(
+      "UPDATE services SET image_url=$1 WHERE id=$2 RETURNING *",
+      [url, id]
+    );
 
-      if (!sRes.rows.length) {
-        return res.status(404).json({ error: "Service not found." });
-      }
-
-      return res.json({ ok: true, imageUrl, service: sRes.rows[0] });
-    } catch (err) {
-      console.error("Service image upload error:", err);
-      return res.status(500).json({ error: "Failed to upload image." });
-    }
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error("Service image upload error:", err);
+    res.status(500).json({ error: "Upload failed" });
   }
-);
+});
 
 module.exports = router;
