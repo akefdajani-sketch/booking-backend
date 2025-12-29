@@ -4,149 +4,124 @@ const router = express.Router();
 const { pool } = require("../db");
 const db = pool;
 
+const requireAdmin = require("../middleware/requireAdmin");
 const requireGoogleAuth = require("../middleware/requireGoogleAuth");
-const upload = require("../middleware/upload");
+const { upload, uploadErrorHandler } = require("../middleware/upload");
 const { uploadFileToR2, safeName } = require("../utils/r2");
 
-const requireAdmin = require("../middleware/requireAdmin");
-
+// ---------------------------------------------------------------------------
 // GET /api/resources?tenantSlug=&tenantId=&includeInactive=
+// ---------------------------------------------------------------------------
 router.get("/", async (req, res) => {
   try {
     const { tenantSlug, tenantId, includeInactive } = req.query;
 
     const params = [];
     let where = "";
-    let idx = 1;
 
     if (tenantId) {
       params.push(Number(tenantId));
-      where = `WHERE r.tenant_id = $${idx}`;
-      idx++;
+      where += ` WHERE r.tenant_id = $${params.length}`;
     } else if (tenantSlug) {
       params.push(String(tenantSlug));
-      where = `WHERE t.slug = $${idx}`;
-      idx++;
+      where += ` WHERE t.slug = $${params.length}`;
     }
 
-    const inc =
-      String(includeInactive || "").toLowerCase().trim() === "true" ||
-      String(includeInactive || "").trim() === "1";
-
-    if (!inc) {
-      where += where ? " AND r.is_active = TRUE" : "WHERE r.is_active = TRUE";
+    if (!includeInactive || includeInactive === "false") {
+      where += where ? " AND r.is_active = true" : " WHERE r.is_active = true";
     }
 
     const q = `
       SELECT
-        r.id,
-        r.tenant_id,
-        t.slug AS tenant_slug,
-        t.name AS tenant_name,
-        r.name,
-        r.type AS kind,
-        r.is_active,
-        r.created_at
+        r.*,
+        t.slug AS tenant_slug
       FROM resources r
       JOIN tenants t ON t.id = r.tenant_id
       ${where}
-      ORDER BY t.name ASC, r.name ASC
+      ORDER BY r.created_at DESC
     `;
 
     const result = await db.query(q, params);
-    return res.json({ resources: result.rows });
+    res.json({ resources: result.rows });
   } catch (err) {
-    console.error("Error loading resources:", err);
-    return res.status(500).json({ error: "Failed to load resources" });
+    console.error("GET /api/resources error:", err);
+    res.status(500).json({ error: "Failed to fetch resources" });
   }
 });
 
-// POST /api/resources (admin)
-// Body: { tenantSlug? | tenantId, name, kind? }
+// ---------------------------------------------------------------------------
+// POST /api/resources (admin-only create)
+// ---------------------------------------------------------------------------
 router.post("/", requireAdmin, async (req, res) => {
   try {
-    const { tenantSlug, tenantId, name, kind } = req.body || {};
-    if (!name || !String(name).trim()) {
-      return res.status(400).json({ error: "Resource name is required." });
-    }
-
-    let resolvedTenantId = tenantId ? Number(tenantId) : null;
-
-    if (!resolvedTenantId && tenantSlug) {
-      const tRes = await db.query(`SELECT id FROM tenants WHERE slug = $1 LIMIT 1`, [
-        String(tenantSlug),
-      ]);
-      resolvedTenantId = tRes.rows?.[0]?.id || null;
-    }
-
-    if (!resolvedTenantId) {
-      return res.status(400).json({ error: "Missing tenantId or tenantSlug." });
-    }
-
-    const insert = await db.query(
-      `
-      INSERT INTO resources (tenant_id, name, type, is_active)
-      VALUES ($1, $2, $3, TRUE)
-      RETURNING id, tenant_id, name, type AS kind, is_active, created_at
-      `,
-      [resolvedTenantId, String(name).trim(), kind ? String(kind).trim() : null]
-    );
-
-    return res.json({ resource: insert.rows[0] });
-  } catch (err) {
-    console.error("Error creating resource:", err);
-    return res.status(500).json({ error: "Failed to create resource" });
-  }
-});
-
-// DELETE /api/resources/:id (admin) soft delete
-router.delete("/:id", requireAdmin, async (req, res) => {
-  try {
-    const id = Number(req.params.id);
-    if (!id) return res.status(400).json({ error: "Invalid resource id." });
+    const { tenant_id, name, type, is_active } = req.body;
 
     const result = await db.query(
       `
-      UPDATE resources
-      SET is_active = FALSE
-      WHERE id = $1
-      RETURNING id
+      INSERT INTO resources (tenant_id, name, type, is_active)
+      VALUES ($1, $2, $3, $4)
+      RETURNING *
       `,
-      [id]
-    );
-
-    if (!result.rows.length) return res.status(404).json({ error: "Resource not found." });
-    return res.json({ ok: true, id });
-  } catch (err) {
-    console.error("Error deleting resource:", err);
-    return res.status(500).json({ error: "Failed to delete resource" });
-  }
-});
-
-// POST /api/services/:id/image
-router.post("/:id/image", requireGoogleAuth, upload.single("file"), async (req, res) => {
-  try {
-    const id = Number(req.params.id);
-    if (!req.file) return res.status(400).json({ error: "No file uploaded" });
-
-    const key = `resources/${id}/${Date.now()}-${safeName(req.file.originalname)}`;
-
-    const { url } = await uploadFileToR2({
-      filePath: req.file.path,
-      contentType: req.file.mimetype,
-      key,
-    });
-
-    const result = await pool.query(
-      "UPDATE resources SET image_url=$1 WHERE id=$2 RETURNING *",
-      [url, id]
+      [tenant_id, name, type || "", is_active ?? true]
     );
 
     res.json(result.rows[0]);
   } catch (err) {
-    console.error("Resource image upload error:", err);
-    res.status(500).json({ error: "Upload failed" });
+    console.error("POST /api/resources error:", err);
+    res.status(500).json({ error: "Failed to create resource" });
   }
 });
+
+// ---------------------------------------------------------------------------
+// DELETE /api/resources/:id (admin-only delete)
+// ---------------------------------------------------------------------------
+router.delete("/:id", requireAdmin, async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+
+    await db.query(`DELETE FROM resources WHERE id=$1`, [id]);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("DELETE /api/resources/:id error:", err);
+    res.status(500).json({ error: "Failed to delete resource" });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/resources/:id/image (Google auth + upload)
+// field name must be: "file"
+// ---------------------------------------------------------------------------
+router.post(
+  "/:id/image",
+  requireGoogleAuth,
+  upload.single("file"),
+  uploadErrorHandler,
+  async (req, res) => {
+    try {
+      const id = Number(req.params.id);
+      if (!req.file) return res.status(400).json({ error: "No file uploaded" });
+
+      const key = `resources/${id}/image/${Date.now()}-${safeName(
+        req.file.originalname
+      )}`;
+
+      const { url } = await uploadFileToR2({
+        filePath: req.file.path,
+        contentType: req.file.mimetype,
+        key,
+      });
+
+      const result = await db.query(
+        "UPDATE resources SET image_url=$1 WHERE id=$2 RETURNING *",
+        [url, id]
+      );
+
+      res.json(result.rows[0]);
+    } catch (err) {
+      console.error("Resource image upload error:", err);
+      res.status(500).json({ error: "Upload failed" });
+    }
+  }
+);
 
 module.exports = router;
