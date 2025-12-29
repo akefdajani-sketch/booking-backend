@@ -5,9 +5,12 @@ const { pool } = require("../db");
 const db = pool;
 
 const requireAdmin = require("../middleware/requireAdmin");
+const requireGoogleAuth = require("../middleware/requireGoogleAuth");
 
-// GET /api/customers?tenantSlug=&tenantId=&q=
-router.get("/", async (req, res) => {
+// ------------------------------------------------------------
+// ADMIN: GET /api/customers?tenantSlug=&tenantId=&q=
+// ------------------------------------------------------------
+router.get("/", requireAdmin, async (req, res) => {
   try {
     const { tenantSlug, tenantId, q } = req.query;
 
@@ -57,8 +60,64 @@ router.get("/", async (req, res) => {
   }
 });
 
-// POST /api/customers (admin)
+// ------------------------------------------------------------
+// PUBLIC (Google): POST /api/customers/me
+// Body: { tenantSlug, name, phone?, email? }
+// Uses Google ID token from Authorization: Bearer <id_token>
+// Upserts customer per tenant + google email
+// ------------------------------------------------------------
+router.post("/me", requireGoogleAuth, async (req, res) => {
+  try {
+    const { tenantSlug, name, phone, email } = req.body || {};
+
+    if (!tenantSlug) return res.status(400).json({ error: "Missing tenantSlug." });
+    if (!name || !String(name).trim()) return res.status(400).json({ error: "Name is required." });
+
+    // Resolve tenant
+    const tRes = await db.query(`SELECT id FROM tenants WHERE slug = $1 LIMIT 1`, [String(tenantSlug)]);
+    const tenantId = tRes.rows?.[0]?.id;
+    if (!tenantId) return res.status(400).json({ error: "Unknown tenant." });
+
+    // Trust email from Google token (req.user.email)
+    const googleEmail = req.user?.email || null;
+    if (!googleEmail) return res.status(401).json({ error: "Missing Google email." });
+
+    // If they typed an email, it must match Google email (prevents spoofing)
+    if (email && String(email).trim() && String(email).trim().toLowerCase() !== String(googleEmail).toLowerCase()) {
+      return res.status(400).json({ error: "Email must match your Google account." });
+    }
+
+    // Upsert on (tenant_id, email)
+    const upsert = await db.query(
+      `
+      INSERT INTO customers (tenant_id, name, phone, email, created_at)
+      VALUES ($1, $2, $3, $4, NOW())
+      ON CONFLICT (tenant_id, email)
+      DO UPDATE SET
+        name = EXCLUDED.name,
+        phone = EXCLUDED.phone
+      RETURNING id, tenant_id, name, phone, email, created_at
+      `,
+      [
+        Number(tenantId),
+        String(name).trim(),
+        phone ? String(phone).trim() : null,
+        String(googleEmail).trim(),
+      ]
+    );
+
+    return res.json({ customer: upsert.rows[0] });
+  } catch (err) {
+    // If your DB doesn't have the unique constraint yet, you'll see an error here.
+    console.error("Error upserting customer:", err);
+    return res.status(500).json({ error: "Failed to save customer" });
+  }
+});
+
+// ------------------------------------------------------------
+// ADMIN: POST /api/customers  (keep admin create)
 // Body: { tenantSlug? | tenantId, name, phone?, email?, notes? }
+// ------------------------------------------------------------
 router.post("/", requireAdmin, async (req, res) => {
   try {
     const { tenantSlug, tenantId, name, phone, email, notes } = req.body || {};
