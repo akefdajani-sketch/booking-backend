@@ -9,146 +9,118 @@ const requireGoogleAuth = require("../middleware/requireGoogleAuth");
 const { upload, uploadErrorHandler } = require("../middleware/upload");
 const { uploadFileToR2, safeName } = require("../utils/r2");
 
+// ---------------------------------------------------------------------------
 // GET /api/staff?tenantSlug=&tenantId=&includeInactive=
+// ---------------------------------------------------------------------------
 router.get("/", async (req, res) => {
   try {
     const { tenantSlug, tenantId, includeInactive } = req.query;
 
     const params = [];
     let where = "";
-    let idx = 1;
 
     if (tenantId) {
       params.push(Number(tenantId));
-      where = `WHERE st.tenant_id = $${idx}`;
-      idx++;
+      where += ` WHERE st.tenant_id = $${params.length}`;
     } else if (tenantSlug) {
-      // resolve by slug
       params.push(String(tenantSlug));
-      where = `WHERE t.slug = $${idx}`;
-      idx++;
+      where += ` WHERE t.slug = $${params.length}`;
     }
 
-    const inc =
-      String(includeInactive || "").toLowerCase().trim() === "true" ||
-      String(includeInactive || "").trim() === "1";
-
-    if (!inc) {
-      where += where ? " AND st.is_active = TRUE" : "WHERE st.is_active = TRUE";
+    if (!includeInactive || includeInactive === "false") {
+      where += where ? " AND st.is_active = true" : " WHERE st.is_active = true";
     }
 
     const q = `
       SELECT
-        st.id,
-        st.tenant_id,
-        t.slug AS tenant_slug,
-        t.name AS tenant_name,
-        st.name,
-        st.role,
-        st.photo_url,
-        st.avatar_url,
-        st.is_active,
-        st.created_at
+        st.*,
+        t.slug AS tenant_slug
       FROM staff st
       JOIN tenants t ON t.id = st.tenant_id
       ${where}
-      ORDER BY t.name ASC, st.name ASC
+      ORDER BY st.created_at DESC
     `;
 
     const result = await db.query(q, params);
-    return res.json({ staff: result.rows });
+    res.json({ staff: result.rows });
   } catch (err) {
-    console.error("Error loading staff:", err);
-    return res.status(500).json({ error: "Failed to load staff" });
+    console.error("GET /api/staff error:", err);
+    res.status(500).json({ error: "Failed to fetch staff" });
   }
 });
 
-// POST /api/staff  (admin)
-// Body: { tenantSlug? | tenantId, name, role? }
+// ---------------------------------------------------------------------------
+// POST /api/staff (admin-only create)
+// ---------------------------------------------------------------------------
 router.post("/", requireAdmin, async (req, res) => {
   try {
-    const { tenantSlug, tenantId, name, role } = req.body || {};
-    if (!name || !String(name).trim()) {
-      return res.status(400).json({ error: "Staff name is required." });
-    }
-
-    let resolvedTenantId = tenantId ? Number(tenantId) : null;
-
-    if (!resolvedTenantId && tenantSlug) {
-      const tRes = await db.query(`SELECT id FROM tenants WHERE slug = $1 LIMIT 1`, [
-        String(tenantSlug),
-      ]);
-      resolvedTenantId = tRes.rows?.[0]?.id || null;
-    }
-
-    if (!resolvedTenantId) {
-      return res.status(400).json({ error: "Missing tenantId or tenantSlug." });
-    }
-
-    const insert = await db.query(
-      `
-      INSERT INTO staff (tenant_id, name, role, is_active)
-      VALUES ($1, $2, $3, TRUE)
-      RETURNING id, tenant_id, name, role, photo_url, avatar_url, is_active, created_at
-      `,
-      [resolvedTenantId, String(name).trim(), role ? String(role).trim() : null]
-    );
-
-    return res.json({ staff: insert.rows[0] });
-  } catch (err) {
-    console.error("Error creating staff:", err);
-    return res.status(500).json({ error: "Failed to create staff" });
-  }
-});
-
-// DELETE /api/staff/:id (admin) - soft delete
-router.delete("/:id", requireAdmin, async (req, res) => {
-  try {
-    const id = Number(req.params.id);
-    if (!id) return res.status(400).json({ error: "Invalid staff id." });
+    const { tenant_id, name, title, is_active } = req.body;
 
     const result = await db.query(
       `
-      UPDATE staff
-      SET is_active = FALSE
-      WHERE id = $1
-      RETURNING id
+      INSERT INTO staff (tenant_id, name, title, is_active)
+      VALUES ($1, $2, $3, $4)
+      RETURNING *
       `,
-      [id]
-    );
-
-    if (!result.rows.length) return res.status(404).json({ error: "Staff not found." });
-    return res.json({ ok: true, id });
-  } catch (err) {
-    console.error("Error deleting staff:", err);
-    return res.status(500).json({ error: "Failed to delete staff" });
-  }
-});
-
-// POST /api/staff/:id/image  (Google auth + upload)
-router.post("/:id/image", requireGoogleAuth, upload.single("file"), async (req, res) => {
-  try {
-    const id = Number(req.params.id);
-    if (!req.file) return res.status(400).json({ error: "No file uploaded" });
-
-    const key = `staff/${id}/${Date.now()}-${safeName(req.file.originalname)}`;
-
-    const { url } = await uploadFileToR2({
-      filePath: req.file.path,
-      contentType: req.file.mimetype,
-      key,
-    });
-
-    const result = await pool.query(
-      "UPDATE staff SET image_url=$1 WHERE id=$2 RETURNING *",
-      [url, id]
+      [tenant_id, name, title || "", is_active ?? true]
     );
 
     res.json(result.rows[0]);
   } catch (err) {
-    console.error("Staff image upload error:", err);
-    res.status(500).json({ error: "Upload failed" });
+    console.error("POST /api/staff error:", err);
+    res.status(500).json({ error: "Failed to create staff" });
   }
 });
+
+// ---------------------------------------------------------------------------
+// DELETE /api/staff/:id (admin-only delete)
+// ---------------------------------------------------------------------------
+router.delete("/:id", requireAdmin, async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    await db.query(`DELETE FROM staff WHERE id=$1`, [id]);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("DELETE /api/staff/:id error:", err);
+    res.status(500).json({ error: "Failed to delete staff" });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/staff/:id/image (Google auth + upload)
+// field name must be: "file"
+// ---------------------------------------------------------------------------
+router.post(
+  "/:id/image",
+  requireGoogleAuth,
+  upload.single("file"),
+  uploadErrorHandler,
+  async (req, res) => {
+    try {
+      const id = Number(req.params.id);
+      if (!req.file) return res.status(400).json({ error: "No file uploaded" });
+
+      const key = `staff/${id}/image/${Date.now()}-${safeName(
+        req.file.originalname
+      )}`;
+
+      const { url } = await uploadFileToR2({
+        filePath: req.file.path,
+        contentType: req.file.mimetype,
+        key,
+      });
+
+      const result = await db.query(
+        "UPDATE staff SET image_url=$1 WHERE id=$2 RETURNING *",
+        [url, id]
+      );
+
+      res.json(result.rows[0]);
+    } catch (err) {
+      console.error("Staff image upload error:", err);
+      res.status(500).json({ error: "Upload failed" });
+    }
+  }
+);
 
 module.exports = router;
