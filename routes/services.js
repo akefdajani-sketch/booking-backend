@@ -38,7 +38,7 @@ router.get("/", async (req, res) => {
       FROM services s
       JOIN tenants t ON t.id = s.tenant_id
       ${where}
-      ORDER BY s.created_at DESC
+      ORDER BY s.id DESC
     `;
 
     const result = await db.query(q, params);
