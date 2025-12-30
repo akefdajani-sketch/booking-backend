@@ -2,18 +2,18 @@
 const express = require("express");
 const router = express.Router();
 const { pool } = require("../db");
-const { getTenantIdFromSlug } = require("../utils/tenants");
+const db = pool;
 
-// GET /api/membership-plans?tenantSlug=
-router.get("/", async (req, res) => {
+const { requireTenant } = require("../middleware/requireTenant");
+
+// GET /api/membership-plans?tenantSlug|tenantId=
+// Public read, tenant-scoped (P1)
+router.get("/", requireTenant, async (req, res) => {
   try {
-    const { tenantSlug } = req.query;
-    if (!tenantSlug) return res.json({ plans: [] });
+    const tenantId = req.tenantId;
 
-    const tenantId = await getTenantIdFromSlug(String(tenantSlug));
-    if (!tenantId) return res.status(400).json({ error: "Unknown tenantSlug." });
-
-    const q = `
+    const result = await db.query(
+      `
       SELECT
         id,
         tenant_id,
@@ -29,12 +29,13 @@ router.get("/", async (req, res) => {
         created_at,
         updated_at
       FROM membership_plans
-      WHERE tenant_id = $1 AND is_active = TRUE
-      ORDER BY id DESC
-    `;
-    const r = await pool.query(q, [tenantId]);
+      WHERE tenant_id = $1
+      ORDER BY created_at DESC
+      `,
+      [tenantId]
+    );
 
-    return res.json({ plans: r.rows });
+    return res.json({ plans: result.rows });
   } catch (err) {
     console.error("GET /api/membership-plans error:", err);
     return res.status(500).json({ error: "Failed to load membership plans." });
