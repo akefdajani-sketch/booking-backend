@@ -2,83 +2,90 @@
 const express = require("express");
 const router = express.Router();
 const { pool } = require("../db");
-const db = pool; // keeps db.query(...) working
-const { getTenantIdFromSlug } = require("../utils/tenants");
+const db = pool;
+
+const { requireTenant } = require("../middleware/requireTenant");
 
 // Helpers
-function pad(n) {
-  return String(n).padStart(2, "0");
-}
+function pad(n) { return String(n).padStart(2, "0"); }
 function toHHMM(totalMinutes) {
   const h = Math.floor(totalMinutes / 60);
   const m = totalMinutes % 60;
   return `${pad(h)}:${pad(m)}`;
 }
 function timeToMinutes(t) {
-  // "HH:MM" or "HH:MM:SS" -> minutes
   const [h, m] = String(t).split(":").map((x) => Number(x));
   return h * 60 + m;
 }
 function overlaps(aStart, aEnd, bStart, bEnd) {
   return aStart < bEnd && aEnd > bStart;
 }
+function labelFromHHMM(hhmm) {
+  const [hStr, mStr] = hhmm.split(":");
+  const h = Number(hStr);
+  const m = Number(mStr);
+  const period = h >= 12 ? "PM" : "AM";
+  const h12 = ((h + 11) % 12) + 1;
+  return `${h12}:${String(m).padStart(2, "0")} ${period}`;
+}
 
-router.get("/", async (req, res) => {
+// GET /api/availability?tenantSlug|tenantId&date&serviceId&staffId?&resourceId?
+router.get("/", requireTenant, async (req, res) => {
   try {
-    const { tenantSlug, tenantId, date, serviceId, staffId, resourceId } =
-      req.query;
+    const tenantId = req.tenantId;
+    const { date, serviceId, staffId, resourceId } = req.query;
 
-    if (!date)
-      return res
-        .status(400)
-        .json({ error: "date is required (YYYY-MM-DD)" });
-    if (!serviceId)
-      return res.status(400).json({ error: "serviceId is required" });
+    if (!date) return res.status(400).json({ error: "date is required (YYYY-MM-DD)" });
+    if (!serviceId) return res.status(400).json({ error: "serviceId is required" });
 
-    let resolvedTenantId = tenantId ? Number(tenantId) : null;
-    if (!resolvedTenantId && tenantSlug) {
-      resolvedTenantId = await getTenantIdFromSlug(String(tenantSlug));
-    }
-    if (!resolvedTenantId)
-      return res.status(400).json({ error: "Unknown tenant." });
-
-    // ---- Service config --------------------------------------------------------
+    // ✅ Service must belong to tenant (P1)
     const svcRes = await db.query(
       `
       SELECT
         id,
+        tenant_id,
         duration_minutes,
         requires_staff,
         requires_resource,
         slot_interval_minutes,
         max_parallel_bookings
       FROM services
-      WHERE id = $1
+      WHERE id = $1 AND tenant_id = $2
+      LIMIT 1
       `,
-      [Number(serviceId)]
+      [Number(serviceId), tenantId]
     );
 
     if (!svcRes.rows.length) {
-      return res.status(400).json({ error: "Unknown serviceId." });
+      return res.status(400).json({ error: "Unknown serviceId for this tenant." });
     }
 
     const svc = svcRes.rows[0];
-
     const duration = Number(svc.duration_minutes || 60);
-    const step = Number(svc.slot_interval_minutes || duration);
+    const stepMin = Number(svc.slot_interval_minutes || duration) || duration;
     const maxParallel = Number(svc.max_parallel_bookings || 1);
 
     const staff_id = staffId ? Number(staffId) : null;
     const resource_id = resourceId ? Number(resourceId) : null;
 
+    // ✅ If required, must be present
     if (svc.requires_staff && !staff_id) return res.json({ slots: [], times: [] });
     if (svc.requires_resource && !resource_id) return res.json({ slots: [], times: [] });
 
-    // Determine day_of_week from provided date (0=Sunday..6=Saturday)
+    // ✅ Validate staff/resource belong to tenant if provided (P1)
+    if (staff_id) {
+      const st = await db.query(`SELECT id FROM staff WHERE id=$1 AND tenant_id=$2 LIMIT 1`, [staff_id, tenantId]);
+      if (!st.rows.length) return res.status(400).json({ error: "staffId not valid for tenant." });
+    }
+    if (resource_id) {
+      const rr = await db.query(`SELECT id FROM resources WHERE id=$1 AND tenant_id=$2 LIMIT 1`, [resource_id, tenantId]);
+      if (!rr.rows.length) return res.status(400).json({ error: "resourceId not valid for tenant." });
+    }
+
     const baseLocal = new Date(`${date}T00:00:00`);
     const dayOfWeek = baseLocal.getDay();
 
-    // ---- Tenant hours ----------------------------------------------------------
+    // Tenant hours
     const hoursRes = await db.query(
       `
       SELECT open_time, close_time, is_closed
@@ -86,39 +93,27 @@ router.get("/", async (req, res) => {
       WHERE tenant_id = $1 AND day_of_week = $2
       LIMIT 1
       `,
-      [resolvedTenantId, dayOfWeek]
+      [tenantId, dayOfWeek]
     );
 
     if (!hoursRes.rows.length || hoursRes.rows[0].is_closed) {
       return res.json({ slots: [], times: [] });
     }
 
-    const openTime = hoursRes.rows[0].open_time;   // "10:00:00"
-    const closeTime = hoursRes.rows[0].close_time; // "00:00:00" or "22:00:00"
-
-    const openHHMM = String(openTime).slice(0, 5);
-    const closeHHMM = String(closeTime).slice(0, 5);
+    const openHHMM = String(hoursRes.rows[0].open_time).slice(0, 5);
+    const closeHHMM = String(hoursRes.rows[0].close_time).slice(0, 5);
 
     let openMin = timeToMinutes(openHHMM);
     let closeMin = timeToMinutes(closeHHMM);
+    if (closeMin <= openMin) closeMin += 24 * 60;
 
-    // If close <= open, treat as "wrap to next day" (10:00 -> 00:00)
-    if (closeMin <= openMin) {
-      closeMin += 24 * 60; // 1440
-    }
-
-    // ---- Bookings window (include next-day early bookings if wrap) -------------
-    // We'll query from base date 00:00 up to base + 1 day + extra wrap minutes
     const extraWrapMinutes = closeMin > 24 * 60 ? closeMin - 24 * 60 : 0;
-
     const rangeStart = new Date(`${date}T00:00:00`);
     const rangeEnd = new Date(rangeStart);
     rangeEnd.setDate(rangeEnd.getDate() + 1);
-    if (extraWrapMinutes > 0) {
-      rangeEnd.setMinutes(rangeEnd.getMinutes() + extraWrapMinutes);
-    }
+    if (extraWrapMinutes > 0) rangeEnd.setMinutes(rangeEnd.getMinutes() + extraWrapMinutes);
 
-    const params = [resolvedTenantId, rangeStart.toISOString(), rangeEnd.toISOString()];
+    const params = [tenantId, rangeStart.toISOString(), rangeEnd.toISOString()];
     let where = `
       b.tenant_id = $1
       AND b.start_time >= $2::timestamptz
@@ -126,14 +121,8 @@ router.get("/", async (req, res) => {
       AND b.status = ANY(ARRAY['pending','confirmed'])
     `;
 
-    if (staff_id) {
-      params.push(staff_id);
-      where += ` AND b.staff_id = $${params.length}`;
-    }
-    if (resource_id) {
-      params.push(resource_id);
-      where += ` AND b.resource_id = $${params.length}`;
-    }
+    if (staff_id) { params.push(staff_id); where += ` AND b.staff_id = $${params.length}`; }
+    if (resource_id) { params.push(resource_id); where += ` AND b.resource_id = $${params.length}`; }
 
     const bookingsRes = await db.query(
       `
@@ -145,7 +134,6 @@ router.get("/", async (req, res) => {
       params
     );
 
-    // Convert bookings into minutes-from-base for overlap test (wrap-safe)
     const busy = bookingsRes.rows.map((b) => {
       const start = new Date(b.start_time);
       const startMin = Math.round((start.getTime() - baseLocal.getTime()) / 60000);
@@ -153,51 +141,32 @@ router.get("/", async (req, res) => {
       return { startMin, endMin };
     });
 
-// ---- Generate slots (capacity-aware) --------------------------------------
-const stepMin = Number.isFinite(step) && step > 0 ? step : duration;
+    const times = [];
+    for (let t = openMin; t + duration <= closeMin; t += stepMin) {
+      const candidateStart = t;
+      const candidateEnd = t + duration;
 
-// Optional: label formatter (safe + simple)
-function labelFromHHMM(hhmm) {
-  // If you don’t care about AM/PM labels, you can just: return hhmm;
-  const [hStr, mStr] = hhmm.split(":");
-  const h = Number(hStr);
-  const m = Number(mStr);
-  const period = h >= 12 ? "PM" : "AM";
-  const h12 = ((h + 11) % 12) + 1;
-  return `${h12}:${String(m).padStart(2, "0")} ${period}`;
-}
+      const overlapsCount = busy.reduce((acc, x) => {
+        return acc + (overlaps(candidateStart, candidateEnd, x.startMin, x.endMin) ? 1 : 0);
+      }, 0);
 
-const times = [];
+      if (overlapsCount < maxParallel) {
+        times.push(toHHMM(candidateStart % (24 * 60)));
+      }
+    }
 
-for (let t = openMin; t + duration <= closeMin; t += stepMin) {
-  const candidateStart = t;
-  const candidateEnd = t + duration;
+    const slots = times.map((time) => ({
+      time,
+      label: labelFromHHMM(time),
+      available: true,
+    }));
 
-  // Count overlaps (capacity-aware)
-  const overlapsCount = busy.reduce((acc, x) => {
-    return acc + (overlaps(candidateStart, candidateEnd, x.startMin, x.endMin) ? 1 : 0);
-  }, 0);
-
-  if (overlapsCount < maxParallel) {
-    // Keep in-day HH:MM even if we wrapped past midnight
-    times.push(toHHMM(candidateStart % (24 * 60)));
-  }
-}
-
-// ✅ Return the legacy/expected shape (like old index.js)
-const slots = times.map((time) => ({
-  time,                 // frontend uses slot.time for selection
-  label: labelFromHHMM(time), // optional, but matches old structure
-  available: true,      // frontend commonly checks this to allow clicks
-}));
-
-return res.json({
-  slots,                // ✅ objects
-  times,                // ✅ strings (debug/back-compat)
-  durationMinutes: duration,      // ✅ keep this (old route returned it)
-  slotIntervalMinutes: stepMin,   // ✅ helpful for contiguous selection logic
-});
-
+    return res.json({
+      slots,
+      times,
+      durationMinutes: duration,
+      slotIntervalMinutes: stepMin,
+    });
   } catch (err) {
     console.error("Error calculating availability:", err);
     return res.status(500).json({ error: "Failed to calculate availability" });
