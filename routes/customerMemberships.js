@@ -98,15 +98,41 @@ router.post("/subscribe", requireTenant, async (req, res) => {
 
     const plan = p.rows[0];
     if (!plan.is_active) return res.status(400).json({ error: "Plan is not active." });
-
+    
+    // ✅ Idempotency / duplicate-active guard (no schema changes)
+    const idemKey = req.get("Idempotency-Key") || null;
+    
+    const existing = await db.query(
+      `
+      SELECT *
+      FROM customer_memberships
+      WHERE tenant_id = $1
+        AND customer_id = $2
+        AND plan_id = $3
+        AND status = 'active'
+        AND end_at > NOW()
+      ORDER BY created_at DESC
+      LIMIT 1
+      `,
+      [tenantId, customerId, membershipPlanId]
+    );
+    
+    if (existing.rows.length) {
+      return res.json({
+        membership: existing.rows[0],
+        alreadyActive: true,
+        idempotencyKey: idemKey,
+      });
+    }
+    
     const minutesRemaining = Number(plan.included_minutes || 0);
     const usesRemaining = Number(plan.included_uses || 0);
     const validityDays = Number(plan.validity_days || 30);
-
+    
     const startAt = new Date();
     const endAt = new Date(startAt);
     endAt.setDate(endAt.getDate() + validityDays);
-
+    
     // Insert membership (NOTE: plan_id + minutes_remaining + uses_remaining)
     const ins = await db.query(
       `
@@ -116,7 +142,15 @@ router.post("/subscribe", requireTenant, async (req, res) => {
         ($1, $2, $3, 'active', $4, $5, $6, $7)
       RETURNING *
       `,
-      [tenantId, customerId, membershipPlanId, startAt.toISOString(), endAt.toISOString(), minutesRemaining, usesRemaining]
+      [
+        tenantId,
+        customerId,
+        membershipPlanId,
+        startAt.toISOString(),
+        endAt.toISOString(),
+        minutesRemaining,
+        usesRemaining,
+      ]
     );
 
     const membership = ins.rows[0];
