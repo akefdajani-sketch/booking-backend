@@ -14,7 +14,9 @@ const resourcesRouter = require("./routes/resources");
 const customersRouter = require("./routes/customers");
 const bookingsRouter = require("./routes/bookings");
 const availabilityRouter = require("./routes/availability");
-const membershipsRouter = require("./routes/memberships");
+const membershipPlansRouter = require("./routes/membershipPlans");
+const customerMembershipsRouter = require("./routes/customerMemberships");
+
 
 const app = express();
 
@@ -53,7 +55,9 @@ app.use("/api/resources", resourcesRouter);
 app.use("/api/customers", customersRouter);
 app.use("/api/bookings", bookingsRouter);
 app.use("/api/availability", availabilityRouter);
-app.use("/api", membershipsRouter);
+app.use("/api/membership-plans", membershipPlansRouter);
+app.use("/api/customer-memberships", customerMembershipsRouter);
+
 
 
 /**
