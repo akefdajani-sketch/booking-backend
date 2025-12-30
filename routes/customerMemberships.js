@@ -7,7 +7,6 @@ const db = pool;
 const { requireTenant } = require("../middleware/requireTenant");
 
 // GET /api/customer-memberships?tenantSlug|tenantId&customerId=
-// P1: customer must belong to tenant, memberships must be tenant-scoped
 router.get("/", requireTenant, async (req, res) => {
   try {
     const tenantId = req.tenantId;
@@ -17,12 +16,12 @@ router.get("/", requireTenant, async (req, res) => {
       return res.json({ memberships: [] });
     }
 
-    // ✅ P1: customer must belong to tenant
-    const cRes = await db.query(
+    // Customer must belong to tenant
+    const c = await db.query(
       `SELECT id FROM customers WHERE id=$1 AND tenant_id=$2 LIMIT 1`,
       [customerId, tenantId]
     );
-    if (!cRes.rows.length) return res.json({ memberships: [] });
+    if (!c.rows.length) return res.json({ memberships: [] });
 
     const r = await db.query(
       `
@@ -30,27 +29,26 @@ router.get("/", requireTenant, async (req, res) => {
         cm.id,
         cm.tenant_id,
         cm.customer_id,
-        cm.membership_plan_id,
-        cm.remaining_minutes,
-        cm.remaining_uses,
-        cm.expires_at,
+        cm.plan_id,
         cm.status,
-        cm.created_at,
+        cm.start_at,
+        cm.end_at,
+        cm.minutes_remaining,
+        cm.uses_remaining,
         mp.name AS plan_name,
         mp.description AS plan_description,
         mp.price AS plan_price,
         mp.currency AS plan_currency,
-        mp.included_minutes AS plan_included_minutes,
-        mp.included_uses AS plan_included_uses,
-        mp.validity_days AS plan_validity_days,
-        mp.is_active AS plan_is_active
+        mp.included_minutes,
+        mp.included_uses,
+        mp.validity_days
       FROM customer_memberships cm
       JOIN membership_plans mp
-        ON mp.id = cm.membership_plan_id
+        ON mp.id = cm.plan_id
        AND mp.tenant_id = $1
       WHERE cm.tenant_id = $1
         AND cm.customer_id = $2
-      ORDER BY cm.created_at DESC
+      ORDER BY cm.start_at DESC NULLS LAST, cm.created_at DESC NULLS LAST
       `,
       [tenantId, customerId]
     );
@@ -62,73 +60,76 @@ router.get("/", requireTenant, async (req, res) => {
   }
 });
 
-// POST /api/customer-memberships/subscribe
-// Body: { tenantSlug|tenantId, customerId, membershipPlanId }
-// P1: tenant resolved from slug/id; customer + plan must belong to tenant
+// POST /api/customer-memberships/subscribe?tenantSlug=...
+// Body: { customerId, membershipPlanId }
 router.post("/subscribe", requireTenant, async (req, res) => {
   try {
     const tenantId = req.tenantId;
-    const { customerId, membershipPlanId } = req.body || {};
+    const customerId = Number(req.body?.customerId);
+    const membershipPlanId = Number(req.body?.membershipPlanId);
 
-    const cid = Number(customerId);
-    const planId = Number(membershipPlanId);
-
-    if (!Number.isFinite(cid) || cid <= 0 || !Number.isFinite(planId) || planId <= 0) {
-      return res.status(400).json({ error: "Invalid customerId/membershipPlanId." });
+    if (!Number.isFinite(customerId) || customerId <= 0) {
+      return res.status(400).json({ error: "Invalid customerId." });
+    }
+    if (!Number.isFinite(membershipPlanId) || membershipPlanId <= 0) {
+      return res.status(400).json({ error: "Invalid membershipPlanId." });
     }
 
-    // ✅ P1: customer must belong to tenant
-    const cRes = await db.query(
+    // Customer must belong to tenant
+    const c = await db.query(
       `SELECT id FROM customers WHERE id=$1 AND tenant_id=$2 LIMIT 1`,
-      [cid, tenantId]
+      [customerId, tenantId]
     );
-    if (!cRes.rows.length) return res.status(400).json({ error: "Unknown customer for tenant." });
+    if (!c.rows.length) {
+      return res.status(400).json({ error: "Unknown customer for tenant." });
+    }
 
-    // ✅ P1: plan must belong to tenant
-    const planRes = await db.query(
+    // Plan must belong to tenant and be active
+    const p = await db.query(
       `
-      SELECT id, included_minutes, included_uses, validity_days, is_active
+      SELECT id, name, included_minutes, included_uses, validity_days, is_active
       FROM membership_plans
       WHERE id=$1 AND tenant_id=$2
       LIMIT 1
       `,
-      [planId, tenantId]
+      [membershipPlanId, tenantId]
     );
-    if (!planRes.rows.length) return res.status(404).json({ error: "Plan not found." });
+    if (!p.rows.length) return res.status(404).json({ error: "Plan not found for tenant." });
 
-    const plan = planRes.rows[0];
+    const plan = p.rows[0];
     if (!plan.is_active) return res.status(400).json({ error: "Plan is not active." });
 
-    const remainingMinutes = Number(plan.included_minutes || 0);
-    const remainingUses = Number(plan.included_uses || 0);
+    const minutesRemaining = Number(plan.included_minutes || 0);
+    const usesRemaining = Number(plan.included_uses || 0);
     const validityDays = Number(plan.validity_days || 30);
 
-    const expiresAt = new Date();
-    expiresAt.setDate(expiresAt.getDate() + validityDays);
+    const startAt = new Date();
+    const endAt = new Date(startAt);
+    endAt.setDate(endAt.getDate() + validityDays);
 
-    // Insert membership
-    const insertRes = await db.query(
+    // Insert membership (NOTE: plan_id + minutes_remaining + uses_remaining)
+    const ins = await db.query(
       `
       INSERT INTO customer_memberships
-        (tenant_id, customer_id, membership_plan_id, remaining_minutes, remaining_uses, expires_at, status)
+        (tenant_id, customer_id, plan_id, status, start_at, end_at, minutes_remaining, uses_remaining)
       VALUES
-        ($1, $2, $3, $4, $5, $6, 'active')
+        ($1, $2, $3, 'active', $4, $5, $6, $7)
       RETURNING *
       `,
-      [tenantId, cid, planId, remainingMinutes, remainingUses, expiresAt.toISOString()]
+      [tenantId, customerId, membershipPlanId, startAt.toISOString(), endAt.toISOString(), minutesRemaining, usesRemaining]
     );
 
-    const membership = insertRes.rows[0];
+    const membership = ins.rows[0];
 
-    // Ledger purchase (append-only)
+    // Ledger entry (matches your table: customer_membership_id, minutes_delta, uses_delta)
     await db.query(
       `
       INSERT INTO membership_ledger
-        (tenant_id, customer_membership_id, type, minutes_delta, uses_delta, note)
+        (tenant_id, customer_membership_id, booking_id, type, minutes_delta, uses_delta, note)
       VALUES
-        ($1, $2, 'purchase', $3, $4, $5)
+        ($1, $2, NULL, 'grant', $3, $4, $5)
       `,
-      [tenantId, membership.id, remainingMinutes, remainingUses, "Membership purchased"]
+      [tenantId, membership.id, minutesRemaining, usesRemaining, `Initial grant for ${plan.name}`]
     );
 
     return res.json({ membership });
@@ -138,8 +139,7 @@ router.post("/subscribe", requireTenant, async (req, res) => {
   }
 });
 
-// GET /api/customer-memberships/:id/ledger?tenantSlug|tenantId
-// P1: membership + ledger must belong to tenant
+// GET /api/customer-memberships/:id/ledger?tenantSlug=...
 router.get("/:id/ledger", requireTenant, async (req, res) => {
   try {
     const tenantId = req.tenantId;
@@ -149,23 +149,23 @@ router.get("/:id/ledger", requireTenant, async (req, res) => {
       return res.status(400).json({ error: "Invalid membership id." });
     }
 
-    // ✅ P1: membership must belong to tenant
-    const mRes = await db.query(
+    // Membership must belong to tenant
+    const m = await db.query(
       `SELECT id FROM customer_memberships WHERE id=$1 AND tenant_id=$2 LIMIT 1`,
       [membershipId, tenantId]
     );
-    if (!mRes.rows.length) return res.status(404).json({ error: "Membership not found for tenant." });
+    if (!m.rows.length) return res.status(404).json({ error: "Membership not found for tenant." });
 
     const r = await db.query(
       `
       SELECT
         id,
         created_at,
+        booking_id,
         type,
         minutes_delta,
         uses_delta,
-        note,
-        booking_id
+        note
       FROM membership_ledger
       WHERE tenant_id = $1
         AND customer_membership_id = $2
