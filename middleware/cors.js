@@ -1,18 +1,31 @@
 // src/middleware/cors.js
-
 const cors = require("cors");
 
+// Put exact allowed production domains here
 const allowedOrigins = [
-  "https://booking-frontend-psi.vercel.app",
   "http://localhost:3000",
+  "https://booking-frontend-psi.vercel.app",
+  // Add your custom domain here if you have one:
+  // "https://yourdomain.com",
 ];
 
+// Allow Vercel preview URLs automatically
+function isAllowed(origin) {
+  if (!origin) return true; // Postman/curl/no-origin
+
+  if (allowedOrigins.includes(origin)) return true;
+
+  // Allow any *.vercel.app (previews + new deployments)
+  try {
+    const { hostname } = new URL(origin);
+    if (hostname.endsWith(".vercel.app")) return true;
+  } catch {}
+
+  return false;
+}
+
 const corsOptions = {
-  origin: (origin, cb) => {
-    if (!origin) return cb(null, true);
-    if (allowedOrigins.includes(origin)) return cb(null, origin);
-    return cb(null, false);
-  },
+  origin: (origin, cb) => cb(null, isAllowed(origin)),
   credentials: true,
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   allowedHeaders: ["Content-Type", "Authorization"],
