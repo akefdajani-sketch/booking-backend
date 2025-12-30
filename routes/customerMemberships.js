@@ -2,22 +2,30 @@
 const express = require("express");
 const router = express.Router();
 const { pool } = require("../db");
-const { getTenantIdFromSlug } = require("../utils/tenants");
+const db = pool;
 
-// GET /api/customer-memberships?tenantSlug=&customerId=
-router.get("/", async (req, res) => {
+const { requireTenant } = require("../middleware/requireTenant");
+
+// GET /api/customer-memberships?tenantSlug|tenantId&customerId=
+// P1: customer must belong to tenant, memberships must be tenant-scoped
+router.get("/", requireTenant, async (req, res) => {
   try {
-    const { tenantSlug, customerId } = req.query;
+    const tenantId = req.tenantId;
+    const customerId = Number(req.query.customerId);
 
-    if (!tenantSlug || !customerId) return res.json({ memberships: [] });
+    if (!Number.isFinite(customerId) || customerId <= 0) {
+      return res.json({ memberships: [] });
+    }
 
-    const tenantId = await getTenantIdFromSlug(String(tenantSlug));
-    if (!tenantId) return res.status(400).json({ error: "Unknown tenantSlug." });
+    // ✅ P1: customer must belong to tenant
+    const cRes = await db.query(
+      `SELECT id FROM customers WHERE id=$1 AND tenant_id=$2 LIMIT 1`,
+      [customerId, tenantId]
+    );
+    if (!cRes.rows.length) return res.json({ memberships: [] });
 
-    const cid = Number(customerId);
-    if (!Number.isFinite(cid)) return res.json({ memberships: [] });
-
-    const q = `
+    const r = await db.query(
+      `
       SELECT
         cm.id,
         cm.tenant_id,
@@ -34,13 +42,18 @@ router.get("/", async (req, res) => {
         mp.currency AS plan_currency,
         mp.included_minutes AS plan_included_minutes,
         mp.included_uses AS plan_included_uses,
-        mp.validity_days AS plan_validity_days
+        mp.validity_days AS plan_validity_days,
+        mp.is_active AS plan_is_active
       FROM customer_memberships cm
-      JOIN membership_plans mp ON mp.id = cm.membership_plan_id
-      WHERE cm.tenant_id = $1 AND cm.customer_id = $2
+      JOIN membership_plans mp
+        ON mp.id = cm.membership_plan_id
+       AND mp.tenant_id = $1
+      WHERE cm.tenant_id = $1
+        AND cm.customer_id = $2
       ORDER BY cm.created_at DESC
-    `;
-    const r = await pool.query(q, [tenantId, cid]);
+      `,
+      [tenantId, customerId]
+    );
 
     return res.json({ memberships: r.rows });
   } catch (err) {
@@ -50,36 +63,39 @@ router.get("/", async (req, res) => {
 });
 
 // POST /api/customer-memberships/subscribe
-router.post("/subscribe", async (req, res) => {
+// Body: { tenantSlug|tenantId, customerId, membershipPlanId }
+// P1: tenant resolved from slug/id; customer + plan must belong to tenant
+router.post("/subscribe", requireTenant, async (req, res) => {
   try {
-    const { tenantSlug, customerId, membershipPlanId } = req.body;
-
-    if (!tenantSlug || !customerId || !membershipPlanId) {
-      return res.status(400).json({ error: "Missing tenantSlug/customerId/membershipPlanId." });
-    }
-
-    const tenantId = await getTenantIdFromSlug(String(tenantSlug));
-    if (!tenantId) return res.status(400).json({ error: "Unknown tenantSlug." });
+    const tenantId = req.tenantId;
+    const { customerId, membershipPlanId } = req.body || {};
 
     const cid = Number(customerId);
     const planId = Number(membershipPlanId);
-    if (!Number.isFinite(cid) || !Number.isFinite(planId)) {
-      return res.status(400).json({ error: "Invalid ids." });
+
+    if (!Number.isFinite(cid) || cid <= 0 || !Number.isFinite(planId) || planId <= 0) {
+      return res.status(400).json({ error: "Invalid customerId/membershipPlanId." });
     }
 
-    // Load plan
-    const planRes = await pool.query(
+    // ✅ P1: customer must belong to tenant
+    const cRes = await db.query(
+      `SELECT id FROM customers WHERE id=$1 AND tenant_id=$2 LIMIT 1`,
+      [cid, tenantId]
+    );
+    if (!cRes.rows.length) return res.status(400).json({ error: "Unknown customer for tenant." });
+
+    // ✅ P1: plan must belong to tenant
+    const planRes = await db.query(
       `
-      SELECT
-        id, included_minutes, included_uses, validity_days, is_active
+      SELECT id, included_minutes, included_uses, validity_days, is_active
       FROM membership_plans
-      WHERE id = $1 AND tenant_id = $2
+      WHERE id=$1 AND tenant_id=$2
       LIMIT 1
       `,
       [planId, tenantId]
     );
-
     if (!planRes.rows.length) return res.status(404).json({ error: "Plan not found." });
+
     const plan = planRes.rows[0];
     if (!plan.is_active) return res.status(400).json({ error: "Plan is not active." });
 
@@ -90,8 +106,8 @@ router.post("/subscribe", async (req, res) => {
     const expiresAt = new Date();
     expiresAt.setDate(expiresAt.getDate() + validityDays);
 
-    // Create membership
-    const insertRes = await pool.query(
+    // Insert membership
+    const insertRes = await db.query(
       `
       INSERT INTO customer_memberships
         (tenant_id, customer_id, membership_plan_id, remaining_minutes, remaining_uses, expires_at, status)
@@ -104,8 +120,8 @@ router.post("/subscribe", async (req, res) => {
 
     const membership = insertRes.rows[0];
 
-    // Ledger: "purchase"
-    await pool.query(
+    // Ledger purchase (append-only)
+    await db.query(
       `
       INSERT INTO membership_ledger
         (tenant_id, customer_membership_id, type, minutes_delta, uses_delta, note)
@@ -122,30 +138,26 @@ router.post("/subscribe", async (req, res) => {
   }
 });
 
-// GET /api/customer-memberships/:id/ledger?tenantSlug=
-router.get("/:id/ledger", async (req, res) => {
+// GET /api/customer-memberships/:id/ledger?tenantSlug|tenantId
+// P1: membership + ledger must belong to tenant
+router.get("/:id/ledger", requireTenant, async (req, res) => {
   try {
-    const { tenantSlug } = req.query;
-    const { id } = req.params;
+    const tenantId = req.tenantId;
+    const membershipId = Number(req.params.id);
 
-    if (!tenantSlug) return res.status(400).json({ error: "tenantSlug is required." });
-
-    const membershipId = Number(id);
-    if (!Number.isFinite(membershipId)) return res.status(400).json({ error: "Invalid membership id." });
-
-    const tenantId = await getTenantIdFromSlug(String(tenantSlug));
-    if (!tenantId) return res.status(400).json({ error: "Unknown tenantSlug." });
-
-    // Ensure membership belongs to tenant
-    const mRes = await pool.query(
-      "SELECT id FROM customer_memberships WHERE id = $1 AND tenant_id = $2",
-      [membershipId, tenantId]
-    );
-    if (mRes.rows.length === 0) {
-      return res.status(404).json({ error: "Membership not found for tenant." });
+    if (!Number.isFinite(membershipId) || membershipId <= 0) {
+      return res.status(400).json({ error: "Invalid membership id." });
     }
 
-    const q = `
+    // ✅ P1: membership must belong to tenant
+    const mRes = await db.query(
+      `SELECT id FROM customer_memberships WHERE id=$1 AND tenant_id=$2 LIMIT 1`,
+      [membershipId, tenantId]
+    );
+    if (!mRes.rows.length) return res.status(404).json({ error: "Membership not found for tenant." });
+
+    const r = await db.query(
+      `
       SELECT
         id,
         created_at,
@@ -155,11 +167,13 @@ router.get("/:id/ledger", async (req, res) => {
         note,
         booking_id
       FROM membership_ledger
-      WHERE tenant_id = $1 AND customer_membership_id = $2
+      WHERE tenant_id = $1
+        AND customer_membership_id = $2
       ORDER BY created_at DESC
       LIMIT 200
-    `;
-    const r = await pool.query(q, [tenantId, membershipId]);
+      `,
+      [tenantId, membershipId]
+    );
 
     return res.json({ ledger: r.rows });
   } catch (err) {
