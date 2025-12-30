@@ -3,8 +3,13 @@ const { getTenantIdFromSlug } = require("../utils/tenants");
 
 async function requireTenant(req, res, next) {
   try {
-    const tenantSlug = req.query?.tenantSlug ? String(req.query.tenantSlug).trim() : "";
-    const tenantIdRaw = req.query?.tenantId;
+    const tenantSlug =
+      (req.query?.tenantSlug ?? req.body?.tenantSlug ?? "")
+        .toString()
+        .trim();
+
+    const tenantIdRaw =
+      (req.query?.tenantId ?? req.body?.tenantId);
 
     let tenantId = null;
 
