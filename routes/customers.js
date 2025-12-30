@@ -6,32 +6,23 @@ const db = pool;
 
 const requireAdmin = require("../middleware/requireAdmin");
 const requireGoogleAuth = require("../middleware/requireGoogleAuth");
+const { requireTenant } = require("../middleware/requireTenant");
 
 // ------------------------------------------------------------
-// ADMIN: GET /api/customers?tenantSlug=&tenantId=&q=
+// ADMIN: GET /api/customers?tenantSlug|tenantId&q=
+// P1: tenant is REQUIRED.
 // ------------------------------------------------------------
-router.get("/", async (req, res) => {
+router.get("/", requireAdmin, requireTenant, async (req, res) => {
   try {
-    const { tenantSlug, tenantId, q } = req.query;
+    const tenantId = req.tenantId;
+    const q = req.query.q ? String(req.query.q).trim() : "";
 
-    const params = [];
-    let where = "";
-    let idx = 1;
+    const params = [tenantId];
+    let where = `WHERE c.tenant_id = $1`;
 
-    if (tenantId) {
-      params.push(Number(tenantId));
-      where = `WHERE c.tenant_id = $${idx}`;
-      idx++;
-    } else if (tenantSlug) {
-      params.push(String(tenantSlug));
-      where = `WHERE t.slug = $${idx}`;
-      idx++;
-    }
-
-    if (q && String(q).trim()) {
-      params.push(`%${String(q).trim()}%`);
-      const cond = `(c.name ILIKE $${params.length} OR c.phone ILIKE $${params.length} OR c.email ILIKE $${params.length})`;
-      where += where ? ` AND ${cond}` : `WHERE ${cond}`;
+    if (q) {
+      params.push(`%${q}%`);
+      where += ` AND (c.name ILIKE $2 OR c.phone ILIKE $2 OR c.email ILIKE $2)`;
     }
 
     const query = `
@@ -63,8 +54,7 @@ router.get("/", async (req, res) => {
 // ------------------------------------------------------------
 // PUBLIC (Google): POST /api/customers/me
 // Body: { tenantSlug, name, phone?, email? }
-// Uses Google ID token from Authorization: Bearer <id_token>
-// Upserts customer per tenant + google email
+// P1: tenant resolved by slug; upsert is scoped by tenant_id.
 // ------------------------------------------------------------
 router.post("/me", requireGoogleAuth, async (req, res) => {
   try {
@@ -73,21 +63,17 @@ router.post("/me", requireGoogleAuth, async (req, res) => {
     if (!tenantSlug) return res.status(400).json({ error: "Missing tenantSlug." });
     if (!name || !String(name).trim()) return res.status(400).json({ error: "Name is required." });
 
-    // Resolve tenant
     const tRes = await db.query(`SELECT id FROM tenants WHERE slug = $1 LIMIT 1`, [String(tenantSlug)]);
     const tenantId = tRes.rows?.[0]?.id;
     if (!tenantId) return res.status(400).json({ error: "Unknown tenant." });
 
-    // Trust email from Google token (req.user.email)
     const googleEmail = req.user?.email || null;
     if (!googleEmail) return res.status(401).json({ error: "Missing Google email." });
 
-    // If they typed an email, it must match Google email (prevents spoofing)
     if (email && String(email).trim() && String(email).trim().toLowerCase() !== String(googleEmail).toLowerCase()) {
       return res.status(400).json({ error: "Email must match your Google account." });
     }
 
-    // Upsert on (tenant_id, email)
     const upsert = await db.query(
       `
       INSERT INTO customers (tenant_id, name, phone, email, created_at)
@@ -108,15 +94,15 @@ router.post("/me", requireGoogleAuth, async (req, res) => {
 
     return res.json({ customer: upsert.rows[0] });
   } catch (err) {
-    // If your DB doesn't have the unique constraint yet, you'll see an error here.
     console.error("Error upserting customer:", err);
     return res.status(500).json({ error: "Failed to save customer" });
   }
 });
 
 // ------------------------------------------------------------
-// ADMIN: POST /api/customers  (keep admin create)
+// ADMIN: POST /api/customers
 // Body: { tenantSlug? | tenantId, name, phone?, email?, notes? }
+// P1: tenant resolved and enforced.
 // ------------------------------------------------------------
 router.post("/", requireAdmin, async (req, res) => {
   try {
@@ -127,15 +113,11 @@ router.post("/", requireAdmin, async (req, res) => {
 
     let resolvedTenantId = tenantId ? Number(tenantId) : null;
     if (!resolvedTenantId && tenantSlug) {
-      const tRes = await db.query(`SELECT id FROM tenants WHERE slug = $1 LIMIT 1`, [
-        String(tenantSlug),
-      ]);
+      const tRes = await db.query(`SELECT id FROM tenants WHERE slug = $1 LIMIT 1`, [String(tenantSlug)]);
       resolvedTenantId = tRes.rows?.[0]?.id || null;
     }
 
-    if (!resolvedTenantId) {
-      return res.status(400).json({ error: "Missing tenantId or tenantSlug." });
-    }
+    if (!resolvedTenantId) return res.status(400).json({ error: "Missing tenantId or tenantSlug." });
 
     const insert = await db.query(
       `
