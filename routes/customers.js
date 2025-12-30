@@ -10,7 +10,7 @@ const requireGoogleAuth = require("../middleware/requireGoogleAuth");
 // ------------------------------------------------------------
 // ADMIN: GET /api/customers?tenantSlug=&tenantId=&q=
 // ------------------------------------------------------------
-router.get("/", requireAdmin, async (req, res) => {
+router.get("/", async (req, res) => {
   try {
     const { tenantSlug, tenantId, q } = req.query;
 
