@@ -52,6 +52,107 @@ router.get("/", requireTenant, async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
+// GET /api/bookings/:id?tenantSlug|tenantId=
+// Tenant-scoped read (used by dashboards / detail views)
+// ---------------------------------------------------------------------------
+router.get("/:id", requireTenant, async (req, res) => {
+  try {
+    const tenantId = req.tenantId;
+    const bookingId = Number(req.params.id);
+
+    if (!Number.isFinite(bookingId) || bookingId <= 0) {
+      return res.status(400).json({ error: "Invalid booking id." });
+    }
+
+    const result = await db.query(
+      `SELECT id FROM bookings WHERE id=$1 AND tenant_id=$2 LIMIT 1`,
+      [bookingId, tenantId]
+    );
+    if (!result.rows.length) {
+      return res.status(404).json({ error: "Booking not found." });
+    }
+
+    const joined = await loadJoinedBookingById(bookingId);
+    return res.json({ booking: joined });
+  } catch (err) {
+    console.error("Error loading booking:", err);
+    return res.status(500).json({ error: "Failed to load booking" });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// PATCH /api/bookings/:id/status?tenantSlug|tenantId=
+// Body: { status: "pending"|"confirmed"|"cancelled"|"completed" }
+// Tenant-scoped status change
+// ---------------------------------------------------------------------------
+router.patch("/:id/status", requireTenant, async (req, res) => {
+  try {
+    const tenantId = req.tenantId;
+    const bookingId = Number(req.params.id);
+    const { status } = req.body || {};
+
+    const allowed = new Set(["pending", "confirmed", "cancelled", "completed"]);
+    if (!allowed.has(String(status))) {
+      return res.status(400).json({ error: "Invalid status." });
+    }
+    if (!Number.isFinite(bookingId) || bookingId <= 0) {
+      return res.status(400).json({ error: "Invalid booking id." });
+    }
+
+    const upd = await db.query(
+      `UPDATE bookings
+       SET status=$1
+       WHERE id=$2 AND tenant_id=$3
+       RETURNING id`,
+      [String(status), bookingId, tenantId]
+    );
+
+    if (!upd.rows.length) {
+      return res.status(404).json({ error: "Booking not found." });
+    }
+
+    const joined = await loadJoinedBookingById(bookingId);
+    return res.json({ booking: joined });
+  } catch (err) {
+    console.error("Error updating booking status:", err);
+    return res.status(500).json({ error: "Failed to update booking status." });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// DELETE /api/bookings/:id?tenantSlug|tenantId=
+// Soft-cancel (does NOT hard delete rows)
+// ---------------------------------------------------------------------------
+router.delete("/:id", requireTenant, async (req, res) => {
+  try {
+    const tenantId = req.tenantId;
+    const bookingId = Number(req.params.id);
+
+    if (!Number.isFinite(bookingId) || bookingId <= 0) {
+      return res.status(400).json({ error: "Invalid booking id." });
+    }
+
+    const upd = await db.query(
+      `UPDATE bookings
+       SET status='cancelled'
+       WHERE id=$1 AND tenant_id=$2
+       RETURNING id`,
+      [bookingId, tenantId]
+    );
+
+    if (!upd.rows.length) {
+      return res.status(404).json({ error: "Booking not found." });
+    }
+
+    const joined = await loadJoinedBookingById(bookingId);
+    return res.json({ booking: joined });
+  } catch (err) {
+    console.error("Error cancelling booking:", err);
+    return res.status(500).json({ error: "Failed to cancel booking." });
+  }
+});
+
+// ---------------------------------------------------------------------------
 // POST /api/bookings
 // P1: tenant resolved server-side; service/staff/resource validated for tenant.
 // ---------------------------------------------------------------------------
@@ -72,27 +173,40 @@ router.post("/", async (req, res) => {
     } = req.body || {};
 
     if (!customerName || !String(customerName).trim() || !startTime) {
-      return res.status(400).json({ error: "Missing required fields (customerName, startTime)." });
+      return res
+        .status(400)
+        .json({ error: "Missing required fields (customerName, startTime)." });
     }
 
     // Resolve tenant using the same logic as requireTenant (but for body)
     let resolvedTenantId = null;
     if (tenantSlug) {
-      const tRes = await db.query(`SELECT id FROM tenants WHERE slug=$1 LIMIT 1`, [String(tenantSlug)]);
+      const tRes = await db.query(
+        `SELECT id FROM tenants WHERE slug=$1 LIMIT 1`,
+        [String(tenantSlug)]
+      );
       resolvedTenantId = tRes.rows?.[0]?.id || null;
-      if (!resolvedTenantId) return res.status(400).json({ error: "Unknown tenantSlug." });
+      if (!resolvedTenantId)
+        return res.status(400).json({ error: "Unknown tenantSlug." });
 
-      if (tenantId != null && String(tenantId).trim() !== "" && Number(tenantId) !== Number(resolvedTenantId)) {
+      if (
+        tenantId != null &&
+        String(tenantId).trim() !== "" &&
+        Number(tenantId) !== Number(resolvedTenantId)
+      ) {
         return res.status(400).json({ error: "Tenant mismatch." });
       }
     } else if (tenantId != null && String(tenantId).trim() !== "") {
       const tid = Number(tenantId);
-      if (!Number.isFinite(tid) || tid <= 0) return res.status(400).json({ error: "Invalid tenantId." });
+      if (!Number.isFinite(tid) || tid <= 0)
+        return res.status(400).json({ error: "Invalid tenantId." });
       resolvedTenantId = tid;
     }
 
     if (!resolvedTenantId) {
-      return res.status(400).json({ error: "You must provide tenantSlug or tenantId." });
+      return res
+        .status(400)
+        .json({ error: "You must provide tenantSlug or tenantId." });
     }
 
     const start = new Date(startTime);
@@ -109,13 +223,13 @@ router.post("/", async (req, res) => {
         `SELECT id, tenant_id, duration_minutes FROM services WHERE id=$1 AND tenant_id=$2 LIMIT 1`,
         [resolvedServiceId, resolvedTenantId]
       );
-      if (!sRes.rows.length) return res.status(400).json({ error: "Unknown serviceId for tenant." });
+      if (!sRes.rows.length)
+        return res.status(400).json({ error: "Unknown serviceId for tenant." });
 
       if (!duration) {
         duration = Number(sRes.rows[0].duration_minutes || 60) || 60;
       }
     } else {
-      // If no service, we still need a duration
       duration = duration || 60;
     }
 
@@ -124,12 +238,22 @@ router.post("/", async (req, res) => {
 
     // Validate staff/resource belong to tenant if provided
     if (staff_id) {
-      const st = await db.query(`SELECT id FROM staff WHERE id=$1 AND tenant_id=$2 LIMIT 1`, [staff_id, resolvedTenantId]);
-      if (!st.rows.length) return res.status(400).json({ error: "staffId not valid for tenant." });
+      const st = await db.query(
+        `SELECT id FROM staff WHERE id=$1 AND tenant_id=$2 LIMIT 1`,
+        [staff_id, resolvedTenantId]
+      );
+      if (!st.rows.length)
+        return res.status(400).json({ error: "staffId not valid for tenant." });
     }
     if (resource_id) {
-      const rr = await db.query(`SELECT id FROM resources WHERE id=$1 AND tenant_id=$2 LIMIT 1`, [resource_id, resolvedTenantId]);
-      if (!rr.rows.length) return res.status(400).json({ error: "resourceId not valid for tenant." });
+      const rr = await db.query(
+        `SELECT id FROM resources WHERE id=$1 AND tenant_id=$2 LIMIT 1`,
+        [resource_id, resolvedTenantId]
+      );
+      if (!rr.rows.length)
+        return res
+          .status(400)
+          .json({ error: "resourceId not valid for tenant." });
     }
 
     // Conflicts
@@ -148,7 +272,7 @@ router.post("/", async (req, res) => {
       });
     }
 
-    // Upsert customer within tenant (your current logic is okay; keep tenant scoping)
+    // Upsert customer within tenant
     const cleanName = String(customerName).trim();
     const cleanPhone = customerPhone ? String(customerPhone).trim() : null;
     const cleanEmail = customerEmail ? String(customerEmail).trim() : null;
@@ -157,7 +281,10 @@ router.post("/", async (req, res) => {
 
     if (customerId) {
       const cid = Number(customerId);
-      const cRes = await db.query(`SELECT id FROM customers WHERE id=$1 AND tenant_id=$2`, [cid, resolvedTenantId]);
+      const cRes = await db.query(
+        `SELECT id FROM customers WHERE id=$1 AND tenant_id=$2`,
+        [cid, resolvedTenantId]
+      );
       if (cRes.rows.length) finalCustomerId = cRes.rows[0].id;
     }
 
@@ -179,7 +306,10 @@ router.post("/", async (req, res) => {
       if (existingRes.rows.length) {
         finalCustomerId = existingRes.rows[0].id;
         if (cleanName && cleanName !== existingRes.rows[0].name) {
-          await db.query(`UPDATE customers SET name=$1, updated_at=NOW() WHERE id=$2`, [cleanName, finalCustomerId]);
+          await db.query(
+            `UPDATE customers SET name=$1, updated_at=NOW() WHERE id=$2`,
+            [cleanName, finalCustomerId]
+          );
         }
       } else {
         const insertCust = await db.query(
@@ -225,13 +355,18 @@ router.post("/", async (req, res) => {
     const ymd = new Date().toISOString().slice(0, 10).replaceAll("-", "");
     const bookingCode = `${firstLetter}-${resolvedTenantId}-${resolvedServiceId || 0}-${ymd}-${bookingId}`;
 
-    await db.query(`UPDATE bookings SET booking_code = $1 WHERE id = $2`, [bookingCode, bookingId]);
+    await db.query(`UPDATE bookings SET booking_code = $1 WHERE id = $2`, [
+      bookingCode,
+      bookingId,
+    ]);
 
     const joined = await loadJoinedBookingById(bookingId);
     return res.status(201).json({ booking: joined });
   } catch (err) {
     console.error("Error creating booking:", err);
-    return res.status(500).json({ error: "Failed to create booking.", details: String(err) });
+    return res
+      .status(500)
+      .json({ error: "Failed to create booking.", details: String(err) });
   }
 });
 
