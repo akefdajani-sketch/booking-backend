@@ -79,10 +79,16 @@ router.get("/", requireAdmin, async (req, res) => {
 router.post("/", requireAdmin, async (req, res) => {
   try {
     const body = req.body || {};
-    const { tenantSlug, tenantId } = body;
+    const tenantSlug = body.tenantSlug ?? body.slug ?? body.tenant_slug ?? null;
 
-    // Resolve tenantId
-    let resolvedTenantId = tenantId ? Number(tenantId) : null;
+    const tenantIdRaw =
+      body.tenantId ??
+      body.tenant_id ??
+      body.tenantID ??
+      null;
+    
+    let resolvedTenantId = tenantIdRaw != null ? Number(tenantIdRaw) : null;
+
     if (!resolvedTenantId && tenantSlug) {
       resolvedTenantId = await getTenantIdFromSlug(String(tenantSlug));
     }
