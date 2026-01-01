@@ -1,20 +1,21 @@
-// db.js
+// src/db.js
 const { Pool } = require("pg");
-
-const isProd = process.env.NODE_ENV === "production";
-
-const useSSL = process.env.DATABASE_SSL
-  ? process.env.DATABASE_SSL === "true"
-  : isProd;
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: useSSL ? { rejectUnauthorized: false } : false,
+  ssl: process.env.DATABASE_SSL === "true" ? { rejectUnauthorized: false } : false,
 });
 
-// ✅ backward compatible exports
+// Convenience helpers so routes can do: db.query(...) and db.connect()
+function query(text, params) {
+  return pool.query(text, params);
+}
+function connect() {
+  return pool.connect();
+}
+
 module.exports = {
   pool,
-  query: (...args) => pool.query(...args),
-  connect: (...args) => pool.connect(...args),
+  query,
+  connect,
 };
