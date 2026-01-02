@@ -91,6 +91,8 @@ router.get("/", requireAdmin, async (req, res) => {
 router.post("/", requireAdmin, async (req, res) => {
   try {
     const body = req.body || {};
+
+    // Accept tenantSlug/tenantId in multiple key styles
     const tenantSlug = body.tenantSlug ?? body.slug ?? body.tenant_slug ?? null;
 
     const tenantIdRaw =
@@ -98,94 +100,105 @@ router.post("/", requireAdmin, async (req, res) => {
       body.tenant_id ??
       body.tenantID ??
       null;
-    
+
     let resolvedTenantId = tenantIdRaw != null ? Number(tenantIdRaw) : null;
 
+    // If not provided at top-level, infer from hours[0]
+    if (!resolvedTenantId && Array.isArray(body.hours) && body.hours.length) {
+      const rowTenantId =
+        body.hours[0]?.tenant_id ??
+        body.hours[0]?.tenantId ??
+        body.hours[0]?.tenantID ??
+        null;
+
+      if (rowTenantId != null) resolvedTenantId = Number(rowTenantId);
+    }
+
+    // Or resolve from slug
     if (!resolvedTenantId && tenantSlug) {
       resolvedTenantId = await getTenantIdFromSlug(String(tenantSlug));
     }
+
     if (!resolvedTenantId) {
-      return res.status(400).json({ error: "You must provide tenantSlug or tenantId." });
+      return res
+        .status(400)
+        .json({ error: "You must provide tenantSlug or tenantId." });
     }
 
     // ---------- BULK SAVE ----------
-    if (body.hours) {
+    if (body.hours != null) {
       const hours = body.hours;
+      const saved = [];
 
       await db.query("BEGIN");
-      const saved = [];
-      
       try {
+        // (A) hours as ARRAY (your current frontend)
+        if (Array.isArray(hours)) {
+          for (const row of hours) {
+            const dayOfWeek = Number(row?.day_of_week ?? row?.dayOfWeek);
+            if (!Number.isFinite(dayOfWeek) || dayOfWeek < 0 || dayOfWeek > 6) continue;
 
-      // (A) hours as ARRAY (your current frontend)
-      if (Array.isArray(hours)) {
-        for (const row of hours) {
-          const dayOfWeek = Number(row?.day_of_week ?? row?.dayOfWeek);
-          if (!Number.isFinite(dayOfWeek) || dayOfWeek < 0 || dayOfWeek > 6) continue;
+            const isClosed = Boolean(row?.is_closed ?? row?.isClosed);
+            const openTime = isClosed ? null : (row?.open_time ?? row?.openTime ?? null);
+            const closeTime = isClosed ? null : (row?.close_time ?? row?.closeTime ?? null);
 
-          const isClosed = Boolean(row?.is_closed ?? row?.isClosed);
-          const openTime = isClosed ? null : (row?.open_time ?? row?.openTime ?? null);
-          const closeTime = isClosed ? null : (row?.close_time ?? row?.closeTime ?? null);
+            const r = await db.query(
+              `
+              INSERT INTO tenant_hours (tenant_id, day_of_week, open_time, close_time, is_closed)
+              VALUES ($1, $2, $3::time, $4::time, $5)
+              ON CONFLICT (tenant_id, day_of_week)
+              DO UPDATE SET
+                open_time  = EXCLUDED.open_time,
+                close_time = EXCLUDED.close_time,
+                is_closed  = EXCLUDED.is_closed
+              RETURNING id, tenant_id, day_of_week, open_time, close_time, is_closed
+              `,
+              [resolvedTenantId, dayOfWeek, openTime, closeTime, isClosed]
+            );
 
-          const r = await db.query(
-            `
-            INSERT INTO tenant_hours (tenant_id, day_of_week, open_time, close_time, is_closed)
-            VALUES ($1, $2, $3::time, $4::time, $5)
-            ON CONFLICT (tenant_id, day_of_week)
-            DO UPDATE SET
-              open_time  = EXCLUDED.open_time,
-              close_time = EXCLUDED.close_time,
-              is_closed  = EXCLUDED.is_closed
-            RETURNING id, tenant_id, day_of_week, open_time, close_time, is_closed
-            `,
-            [resolvedTenantId, dayOfWeek, openTime, closeTime, isClosed]
-          );
+            saved.push(r.rows[0]);
+          }
 
-          saved.push(r.rows[0]);
+          await db.query("COMMIT");
+          return res.json({ hours: saved });
         }
 
-        await db.query("COMMIT");
-        return res.json({ hours: saved });
+        // (B) hours as MAP (sun..sat)
+        if (hours && typeof hours === "object") {
+          const dayMap = { sun: 0, mon: 1, tue: 2, wed: 3, thu: 4, fri: 5, sat: 6 };
+
+          for (const [dayKey, conf] of Object.entries(hours)) {
+            const dayOfWeek = dayMap[dayKey];
+            if (typeof dayOfWeek !== "number") continue;
+
+            const isClosed = Boolean(conf?.closed);
+            const openTime = isClosed ? null : (conf?.open || null);
+            const closeTime = isClosed ? null : (conf?.close || null);
+
+            const r = await db.query(
+              `
+              INSERT INTO tenant_hours (tenant_id, day_of_week, open_time, close_time, is_closed)
+ reopening_time = EXCLUDED.open_time,
+                close_time = EXCLUDED.close_time,
+                is_closed  = EXCLUDED.is_closed
+              RETURNING id, tenant_id, day_of_week, open_time, close_time, is_closed
+              `,
+              [resolvedTenantId, dayOfWeek, openTime, closeTime, isClosed]
+            );
+
+            saved.push(r.rows[0]);
+          }
+
+          await db.query("COMMIT");
+          return res.json({ hours: saved });
+        }
+
+        await db.query("ROLLBACK");
+        return res.status(400).json({ error: "Invalid hours payload." });
       } catch (e) {
         await db.query("ROLLBACK");
         throw e;
       }
-
-      // (B) hours as MAP (sun..sat)
-      if (typeof hours === "object") {
-        const dayMap = { sun: 0, mon: 1, tue: 2, wed: 3, thu: 4, fri: 5, sat: 6 };
-
-        for (const [dayKey, conf] of Object.entries(hours)) {
-          const dayOfWeek = dayMap[dayKey];
-          if (typeof dayOfWeek !== "number") continue;
-
-          const isClosed = Boolean(conf?.closed);
-          const openTime = isClosed ? null : (conf?.open || null);
-          const closeTime = isClosed ? null : (conf?.close || null);
-
-          const r = await db.query(
-            `
-            INSERT INTO tenant_hours (tenant_id, day_of_week, open_time, close_time, is_closed)
-            VALUES ($1, $2, $3::time, $4::time, $5)
-            ON CONFLICT (tenant_id, day_of_week)
-            DO UPDATE SET
-              open_time  = EXCLUDED.open_time,
-              close_time = EXCLUDED.close_time,
-              is_closed  = EXCLUDED.is_closed
-            RETURNING id, tenant_id, day_of_week, open_time, close_time, is_closed
-            `,
-            [resolvedTenantId, dayOfWeek, openTime, closeTime, isClosed]
-          );
-
-          saved.push(r.rows[0]);
-        }
-
-        await db.query("COMMIT");
-        return res.json({ hours: saved });
-      }
-
-      await db.query("ROLLBACK");
-      return res.status(400).json({ error: "Invalid hours payload." });
     }
 
     // ---------- SINGLE DAY SAVE ----------
@@ -217,11 +230,9 @@ router.post("/", requireAdmin, async (req, res) => {
 
     return res.json({ hour: result.rows[0] });
   } catch (err) {
-    try { await db.query("ROLLBACK"); } catch (_) {}
     console.error("Error saving tenant hours:", err);
     return res.status(500).json({ error: "Failed to save tenant hours." });
   }
 });
-
 
 module.exports = router;
