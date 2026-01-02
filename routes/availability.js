@@ -1,238 +1,199 @@
 // routes/availability.js
-// Returns ALL candidate slots for a day, each with is_available/available flags.
-// Keeps `times` (available-only) for backward compatibility.
-//
-// ✅ Works for BOTH public booking (tenantSlug) and owner/manual booking (tenantId).
-
 const express = require("express");
 const router = express.Router();
-const pool = require("../db");
+const db = require("../db");
+const { getTenantIdFromSlug } = require("../utils/tenants");
 
-// Helpers
-function toMinutes(hhmm) {
-  const [h, m] = String(hhmm).split(":").map((x) => parseInt(x, 10));
-  return h * 60 + m;
-}
-function pad2(n) {
-  return String(n).padStart(2, "0");
-}
-function minutesToHHMM(total) {
-  const h = Math.floor(total / 60);
-  const m = total % 60;
-  return `${pad2(h)}:${pad2(m)}`;
+// ---------- Timezone helpers (no extra deps) ------------------------------
+
+function getTzOffsetMinutes(date, timeZone) {
+  // Returns (local_time_in_tz - utc_time) in minutes for the given instant
+  const dtf = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    hour12: false,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
+
+  const parts = dtf.formatToParts(date);
+  const map = Object.fromEntries(parts.map((p) => [p.type, p.value]));
+
+  const asUTC = Date.UTC(
+    Number(map.year),
+    Number(map.month) - 1,
+    Number(map.day),
+    Number(map.hour),
+    Number(map.minute),
+    Number(map.second)
+  );
+
+  return (asUTC - date.getTime()) / 60000;
 }
 
+function localDateTimeToUTCISO(dateStr, timeStr, timeZone) {
+  // dateStr: YYYY-MM-DD, timeStr: HH:MM
+  const [y, m, d] = dateStr.split("-").map(Number);
+  const [hh, mm] = timeStr.split(":").map(Number);
+
+  // First guess: treat local components as UTC
+  const guess = new Date(Date.UTC(y, m - 1, d, hh, mm, 0));
+
+  // Compute timezone offset at that instant and correct
+  const offsetMin = getTzOffsetMinutes(guess, timeZone);
+  const corrected = new Date(guess.getTime() - offsetMin * 60000);
+
+  return corrected.toISOString();
+}
+
+function dayOfWeekInTZ(dateStr, timeZone) {
+  // Use local noon (stable vs DST edges) to compute weekday
+  const iso = localDateTimeToUTCISO(dateStr, "12:00", timeZone);
+  const d = new Date(iso);
+
+  const dtf = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    weekday: "short",
+  });
+  const wd = dtf.format(d); // "Sun", "Mon", ...
+  const map = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+  return map[wd] ?? 0;
+}
+
+// -------------------------------------------------------------------------
+// GET /api/availability?tenantSlug=&serviceId=&date=YYYY-MM-DD&staffId=&resourceId=
+// Returns slots including unavailable ones (grey pills in UI)
+// -------------------------------------------------------------------------
 router.get("/", async (req, res) => {
   try {
-    const {
-      tenantSlug,
-      tenantId: tenantIdRaw,
-      date,
-      serviceId: serviceIdRaw,
-      staffId: staffIdRaw,
-      resourceId: resourceIdRaw,
-    } = req.query;
+    const { tenantSlug, tenantId, serviceId, date, staffId, resourceId } = req.query;
 
-    if ((!tenantSlug && !tenantIdRaw) || !date || !serviceIdRaw) {
-      return res.status(400).json({
-        error: "Missing required params: (tenantSlug OR tenantId), date, serviceId",
-      });
+    if (!date || !serviceId) {
+      return res.status(400).json({ error: "date and serviceId are required." });
     }
 
-    // Normalize ids
-    const serviceId = Number(serviceIdRaw);
-    const staffId = staffIdRaw != null && staffIdRaw !== "" ? Number(staffIdRaw) : null;
-    const resourceId =
-      resourceIdRaw != null && resourceIdRaw !== "" ? Number(resourceIdRaw) : null;
-
-    // 1) Resolve tenantId (supports either tenantId or tenantSlug)
-    let tenantId = tenantIdRaw != null && tenantIdRaw !== "" ? Number(tenantIdRaw) : null;
-
-    if (!tenantId) {
-      const tenantResult = await pool.query(
-        "SELECT id, slug FROM tenants WHERE slug = $1",
-        [tenantSlug]
-      );
-      if (tenantResult.rows.length === 0) {
-        return res.status(404).json({ error: "Tenant not found" });
-      }
-      tenantId = Number(tenantResult.rows[0].id);
+    // Resolve tenantId
+    let resolvedTenantId = tenantId ? Number(tenantId) : null;
+    if (!resolvedTenantId && tenantSlug) {
+      resolvedTenantId = await getTenantIdFromSlug(String(tenantSlug));
+    }
+    if (!resolvedTenantId) {
+      return res.status(400).json({ error: "tenantSlug or tenantId is required." });
     }
 
-    if (!Number.isFinite(tenantId) || !Number.isFinite(serviceId)) {
-      return res.status(400).json({ error: "Invalid tenantId/serviceId" });
-    }
+    const serviceIdNum = Number(serviceId);
+    const staffIdNum = staffId ? Number(staffId) : null;
+    const resourceIdNum = resourceId ? Number(resourceId) : null;
 
-    // 2) Get service details
-    const serviceResult = await pool.query(
-      `SELECT * FROM services WHERE id = $1 AND tenant_id = $2`,
-      [serviceId, tenantId]
+    // Tenant timezone (fallback to UTC if missing)
+    const tzRow = await db.query(`SELECT timezone FROM tenants WHERE id = $1`, [
+      resolvedTenantId,
+    ]);
+    const timeZone = tzRow.rows?.[0]?.timezone || "UTC";
+
+    // Service duration
+    const svc = await db.query(
+      `SELECT id, duration_minutes FROM services WHERE tenant_id = $1 AND id = $2 LIMIT 1`,
+      [resolvedTenantId, serviceIdNum]
     );
-    if (serviceResult.rows.length === 0) {
-      return res.status(404).json({ error: "Service not found" });
+    const durationMinutes = Number(svc.rows?.[0]?.duration_minutes || 0);
+    if (!durationMinutes || durationMinutes < 1) {
+      return res.status(400).json({ error: "Service has invalid duration." });
     }
 
-    const service = serviceResult.rows[0];
+    // Day-of-week in TENANT timezone (not UTC)
+    const dow = dayOfWeekInTZ(String(date), timeZone);
 
-    // Support both schema variants: services.minutes or services.duration_minutes
-    const serviceMinutes = Number((service && (service.minutes ?? service.duration_minutes ?? service.duration)) ?? 0) || 0;
-    const slotInterval = Number((service && (service.slot_interval_minutes ?? service.slotIntervalMinutes)) ?? serviceMinutes) || serviceMinutes || 60;
-
-    const durationMin = serviceMinutes || 60;
-    const stepMin = slotInterval || durationMin;
-    const maxParallel = Number(service.max_parallel_bookings) || 1;
-
-    const reqStaff = !!service.requires_staff;
-    const reqResource = !!service.requires_resource;
-
-    // If the service requires staff/resource but none selected yet, return "no slots" (same UX as public flow)
-    if (reqStaff && !staffId) {
-      return res.json({
-        tenantId,
-        tenantSlug: tenantSlug ?? null,
-        date,
-        times: [],
-        slots: [],
-        meta: {
-          duration_minutes: durationMin,
-          slot_interval_minutes: stepMin,
-          max_parallel_bookings: maxParallel,
-          requires_staff: reqStaff,
-          requires_resource: reqResource,
-          reason: "staff_required",
-        },
-      });
-    }
-    if (reqResource && !resourceId) {
-      return res.json({
-        tenantId,
-        tenantSlug: tenantSlug ?? null,
-        date,
-        times: [],
-        slots: [],
-        meta: {
-          duration_minutes: durationMin,
-          slot_interval_minutes: stepMin,
-          max_parallel_bookings: maxParallel,
-          requires_staff: reqStaff,
-          requires_resource: reqResource,
-          reason: "resource_required",
-        },
-      });
-    }
-
-    // 3) Tenant working hours for day of week
-    // Force UTC-safe parsing of YYYY-MM-DD
-    const dayOfWeek = new Date(`${date}T00:00:00Z`).getUTCDay();
-
-    const hoursResult = await pool.query(
+    // Working hours for that day
+    const hoursRes = await db.query(
       `
       SELECT open_time, close_time, is_closed
       FROM tenant_hours
       WHERE tenant_id = $1 AND day_of_week = $2
       LIMIT 1
       `,
-      [tenantId, dayOfWeek]
+      [resolvedTenantId, dow]
     );
 
-    if (hoursResult.rows.length === 0 || hoursResult.rows[0].is_closed) {
-      return res.json({
-        tenantId,
-        tenantSlug: tenantSlug ?? null,
-        date,
-        times: [],
-        slots: [],
+    // ✅ Safe fallback so you never get "zero pills" just because hours are missing
+    const DEFAULT_OPEN = "08:00";
+    const DEFAULT_CLOSE = "22:00";
+
+    let openHHMM = DEFAULT_OPEN;
+    let closeHHMM = DEFAULT_CLOSE;
+
+    const hourRow = hoursRes.rows?.[0] || null;
+
+    if (hourRow?.is_closed) {
+      return res.json({ slots: [] });
+    }
+
+    if (hourRow?.open_time && hourRow?.close_time) {
+      // open_time may be "08:00:00" → keep HH:MM
+      openHHMM = String(hourRow.open_time).slice(0, 5);
+      closeHHMM = String(hourRow.close_time).slice(0, 5);
+    }
+
+    // Build slots in 15-min increments
+    const step = 15;
+
+    const toMinutes = (hhmm) => {
+      const [h, m] = hhmm.split(":").map(Number);
+      return h * 60 + m;
+    };
+
+    const fromMinutes = (mins) => {
+      const h = String(Math.floor(mins / 60)).padStart(2, "0");
+      const m = String(mins % 60).padStart(2, "0");
+      return `${h}:${m}`;
+    };
+
+    const openMin = toMinutes(openHHMM);
+    const closeMin = toMinutes(closeHHMM);
+
+    const slots = [];
+    for (let cursor = openMin; cursor <= closeMin - durationMinutes; cursor += step) {
+      const startHHMM = fromMinutes(cursor);
+      const endHHMM = fromMinutes(cursor + durationMinutes);
+
+      // ✅ Convert slot start/end from tenant-local → UTC ISO to compare with stored bookings
+      const slotStartISO = localDateTimeToUTCISO(String(date), startHHMM, timeZone);
+      const slotEndISO = localDateTimeToUTCISO(String(date), endHHMM, timeZone);
+
+      // ✅ IMPORTANT: Do NOT filter overlaps by service_id
+      // Overlaps should block by resource/staff regardless of service
+      const overlap = await db.query(
+        `
+        SELECT 1
+        FROM bookings b
+        WHERE b.tenant_id = $1
+          AND COALESCE(b.status,'') NOT IN ('cancelled','canceled')
+          AND b.start_time < $2
+          AND (b.start_time + (b.duration_minutes || ' minutes')::interval) > $3
+          AND ($4::int IS NULL OR b.staff_id = $4)
+          AND ($5::int IS NULL OR b.resource_id = $5)
+        LIMIT 1
+        `,
+        [resolvedTenantId, slotEndISO, slotStartISO, staffIdNum, resourceIdNum]
+      );
+
+      const available = overlap.rowCount === 0;
+
+      slots.push({
+        time: startHHMM,
+        label: startHHMM,
+        available,
+        is_available: available, // keep backwards compat if any old code reads this
       });
     }
 
-    const openTime = hoursResult.rows[0].open_time; // "HH:MM:SS" or "HH:MM"
-    const closeTime = hoursResult.rows[0].close_time;
-
-    const openHHMM = String(openTime).slice(0, 5);
-    const closeHHMM = String(closeTime).slice(0, 5);
-
-    // 4) Build all candidate slots
-    const allSlots = [];
-    const availableTimes = [];
-
-    let cursor = toMinutes(openHHMM);
-    const closeMin = toMinutes(closeHHMM);
-
-    while (cursor + durationMin <= closeMin) {
-      const startHHMM = minutesToHHMM(cursor);
-      const endHHMM = minutesToHHMM(cursor + durationMin);
-
-      const candidateStart = `${date} ${startHHMM}:00`;
-      const candidateEnd = `${date} ${endHHMM}:00`;
-
-      const params = [tenantId, candidateEnd, candidateStart];
-      let whereExtra = "";
-
-      if (reqStaff && staffId) {
-        params.push(staffId);
-        whereExtra += ` AND staff_id = $${params.length}`;
-      }
-      if (reqResource && resourceId) {
-        params.push(resourceId);
-        whereExtra += ` AND resource_id = $${params.length}`;
-      }
-
-      // Overlap: existing.start < candidateEnd AND existing.end > candidateStart
-      const overlapResult = await pool.query(
-        `
-        SELECT COUNT(*)::int AS count
-        FROM bookings
-        WHERE tenant_id = $1
-          AND start_time < $2
-          AND (start_time + (duration_minutes || ' minutes')::interval) > $3
-          AND status NOT IN ('cancelled')
-          ${whereExtra}
-        `,
-        params
-      );
-
-      const overlapsCount = overlapResult.rows[0]?.count ?? 0;
-      const isAvailable = overlapsCount < maxParallel;
-
-      const slotObj = {
-        time: startHHMM,
-        label: startHHMM,
-        is_available: isAvailable,
-        available: isAvailable,
-        // helpful for UI + debugging
-        overlaps: overlapsCount,
-        capacity: maxParallel,
-      };
-
-      allSlots.push(slotObj);
-      if (isAvailable) availableTimes.push(startHHMM);
-
-      cursor += stepMin;
-    }
-
-    return res.json({
-      tenantId,
-      tenantSlug: tenantSlug ?? null,
-      date,
-      times: availableTimes, // backward compatible (available-only)
-      slots: allSlots, // preferred (includes unavailable)
-      meta: {
-        duration_minutes: durationMin,
-        slot_interval_minutes: stepMin,
-        max_parallel_bookings: maxParallel,
-        requires_staff: reqStaff,
-        requires_resource: reqResource,
-        staffId: staffId ?? null,
-        resourceId: resourceId ?? null,
-      },
-    });
+    return res.json({ slots });
   } catch (err) {
     console.error("GET /api/availability error:", err);
-    // Include message for debugging (remove later if you want)
-    return res.status(500).json({
-      error: "Failed to get availability",
-      message: err?.message ?? String(err),
-    });
+    return res.status(500).json({ error: "Failed to load availability." });
   }
 });
 
