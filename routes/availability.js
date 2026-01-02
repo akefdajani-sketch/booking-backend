@@ -65,17 +65,7 @@ router.get("/", async (req, res) => {
 
     // 2) Get service details
     const serviceResult = await pool.query(
-      `
-      SELECT
-        id,
-        minutes,
-        requires_staff,
-        requires_resource,
-        COALESCE(slot_interval_minutes, minutes) AS slot_interval_minutes,
-        COALESCE(max_parallel_bookings, 1) AS max_parallel_bookings
-      FROM services
-      WHERE id = $1 AND tenant_id = $2
-      `,
+      `SELECT * FROM services WHERE id = $1 AND tenant_id = $2`,
       [serviceId, tenantId]
     );
     if (serviceResult.rows.length === 0) {
@@ -83,8 +73,13 @@ router.get("/", async (req, res) => {
     }
 
     const service = serviceResult.rows[0];
-    const durationMin = Number(service.minutes) || 60;
-    const stepMin = Number(service.slot_interval_minutes) || durationMin;
+
+    // Support both schema variants: services.minutes or services.duration_minutes
+    const serviceMinutes = Number((service && (service.minutes ?? service.duration_minutes ?? service.duration)) ?? 0) || 0;
+    const slotInterval = Number((service && (service.slot_interval_minutes ?? service.slotIntervalMinutes)) ?? serviceMinutes) || serviceMinutes || 60;
+
+    const durationMin = serviceMinutes || 60;
+    const stepMin = slotInterval || durationMin;
     const maxParallel = Number(service.max_parallel_bookings) || 1;
 
     const reqStaff = !!service.requires_staff;
@@ -128,18 +123,7 @@ router.get("/", async (req, res) => {
 
     // 3) Tenant working hours for day of week
     // Force UTC-safe parsing of YYYY-MM-DD
-    // Determine weekday for the requested local date (robust across timezone & DB conventions)
-    // We pick midday UTC to avoid edge cases where 00:00Z might shift the calendar day in some timezones.
-    const day0 = new Date(`${date}T12:00:00Z`).getUTCDay(); // 0=Sun..6=Sat
-    // Support common DB conventions:
-    //  - 0..6 (Sun..Sat)  [JS]
-    //  - 1..7 (Mon..Sun)
-    //  - 1..7 (Sun..Sat)
-    const dayCandidates = Array.from(new Set([
-      day0,
-      day0 === 0 ? 7 : day0,        // Mon=1..Sun=7
-      day0 + 1,                     // Sun=1..Sat=7
-    ])).filter((d) => Number.isInteger(d) && d >= 0 && d <= 7);
+    const dayOfWeek = new Date(`${date}T00:00:00Z`).getUTCDay();
 
     const hoursResult = await pool.query(
       `
@@ -148,7 +132,7 @@ router.get("/", async (req, res) => {
       WHERE tenant_id = $1 AND day_of_week = $2
       LIMIT 1
       `,
-      [tenantId, dayCandidates]
+      [tenantId, dayOfWeek]
     );
 
     if (hoursResult.rows.length === 0 || hoursResult.rows[0].is_closed) {
