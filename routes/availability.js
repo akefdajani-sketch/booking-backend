@@ -142,28 +142,44 @@ router.get("/", requireTenant, async (req, res) => {
     });
 
     const times = [];
-    for (let t = openMin; t + duration <= closeMin; t += stepMin) {
-      const candidateStart = t;
-      const candidateEnd = t + duration;
-
-      const overlapsCount = busy.reduce((acc, x) => {
-        return acc + (overlaps(candidateStart, candidateEnd, x.startMin, x.endMin) ? 1 : 0);
-      }, 0);
-
-      if (overlapsCount < maxParallel) {
-        times.push(toHHMM(candidateStart % (24 * 60)));
-      }
+    let cursor = openDT;
+    while (cursor.plus({ minutes: durationMinutes }) <= closeDT) {
+      times.push(cursor.toISOTime({ suppressSeconds: true, suppressMilliseconds: true }));
+      cursor = cursor.plus({ minutes: intervalMinutes });
     }
 
-    const slots = times.map((time) => ({
-      time,
-      label: labelFromHHMM(time),
-      available: true,
-    }));
+    // Build all candidate slots (do NOT drop booked ones).
+    // We mark each slot as available/unavailable based on maxParallelBookings.
+    const slots = times.map((time) => {
+      const start = DateTime.fromISO(`${date}T${time}`, { zone });
+      const end = start.plus({ minutes: durationMinutes });
+
+      const overlapsCount = existingBookings.filter((b) => {
+        const bStart = DateTime.fromISO(b.start_time, { zone });
+        const bEnd = bStart.plus({ minutes: b.duration_minutes });
+        return start < bEnd && end > bStart; // overlap
+      }).length;
+
+      const available = overlapsCount < maxParallelBookings;
+
+      return {
+        time,
+        available,
+        remaining: Math.max(0, maxParallelBookings - overlapsCount),
+        label: available
+          ? maxParallelBookings > 1
+            ? `${maxParallelBookings - overlapsCount} left`
+            : "Available"
+          : "Booked",
+      };
+    });
+
+    // Backwards-compat: keep "times" as only the available times list
+    const availableTimes = slots.filter((s) => s.available).map((s) => s.time);
 
     return res.json({
       slots,
-      times,
+      times: availableTimes,
       durationMinutes: duration,
       slotIntervalMinutes: stepMin,
     });
