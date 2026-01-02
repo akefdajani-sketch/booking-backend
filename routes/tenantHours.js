@@ -18,6 +18,18 @@ router.get("/", requireAdmin, async (req, res) => {
     const { tenantSlug, tenantId } = req.query;
     let resolvedTenantId = tenantId ? Number(tenantId) : null;
 
+    // If frontend didn't send tenantId at top-level, infer from hours rows (common case)
+  if (!resolvedTenantId && Array.isArray(body.hours) && body.hours.length) {
+    const rowTenantId =
+      body.hours[0]?.tenant_id ??
+      body.hours[0]?.tenantId ??
+      body.hours[0]?.tenantID ??
+      null;
+
+    if (rowTenantId != null) resolvedTenantId = Number(rowTenantId);
+    }
+
+    
     if (!resolvedTenantId && tenantSlug) {
       resolvedTenantId = await getTenantIdFromSlug(String(tenantSlug));
     }
@@ -102,6 +114,8 @@ router.post("/", requireAdmin, async (req, res) => {
 
       await db.query("BEGIN");
       const saved = [];
+      
+      try {
 
       // (A) hours as ARRAY (your current frontend)
       if (Array.isArray(hours)) {
@@ -132,6 +146,9 @@ router.post("/", requireAdmin, async (req, res) => {
 
         await db.query("COMMIT");
         return res.json({ hours: saved });
+      } catch (e) {
+        await db.query("ROLLBACK");
+        throw e;
       }
 
       // (B) hours as MAP (sun..sat)
