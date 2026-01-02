@@ -3,6 +3,9 @@
 // Keeps `times` (available-only) for backward compatibility.
 //
 // ✅ Works for BOTH public booking (tenantSlug) and owner/manual booking (tenantId).
+//
+// NOTE: Your DB schema uses `services.duration_minutes` (NOT `services.minutes`).
+// This file fixes the "column minutes does not exist" crash.
 
 const express = require("express");
 const router = express.Router();
@@ -49,10 +52,9 @@ router.get("/", async (req, res) => {
     let tenantId = tenantIdRaw != null && tenantIdRaw !== "" ? Number(tenantIdRaw) : null;
 
     if (!tenantId) {
-      const tenantResult = await pool.query(
-        "SELECT id, slug FROM tenants WHERE slug = $1",
-        [tenantSlug]
-      );
+      const tenantResult = await pool.query("SELECT id FROM tenants WHERE slug = $1", [
+        tenantSlug,
+      ]);
       if (tenantResult.rows.length === 0) {
         return res.status(404).json({ error: "Tenant not found" });
       }
@@ -63,34 +65,36 @@ router.get("/", async (req, res) => {
       return res.status(400).json({ error: "Invalid tenantId/serviceId" });
     }
 
-    // 2) Get service details
+    // 2) Get service details (✅ duration_minutes is the real column)
     const serviceResult = await pool.query(
       `
       SELECT
         id,
-        minutes,
+        duration_minutes,
         requires_staff,
         requires_resource,
-        COALESCE(slot_interval_minutes, minutes) AS slot_interval_minutes,
+        COALESCE(slot_interval_minutes, duration_minutes) AS slot_interval_minutes,
         COALESCE(max_parallel_bookings, 1) AS max_parallel_bookings
       FROM services
       WHERE id = $1 AND tenant_id = $2
       `,
       [serviceId, tenantId]
     );
+
     if (serviceResult.rows.length === 0) {
       return res.status(404).json({ error: "Service not found" });
     }
 
     const service = serviceResult.rows[0];
-    const durationMin = Number(service.minutes) || 60;
+    const durationMin = Number(service.duration_minutes) || 60;
     const stepMin = Number(service.slot_interval_minutes) || durationMin;
     const maxParallel = Number(service.max_parallel_bookings) || 1;
 
     const reqStaff = !!service.requires_staff;
     const reqResource = !!service.requires_resource;
 
-    // If the service requires staff/resource but none selected yet, return "no slots" (same UX as public flow)
+    // If the service requires staff/resource but none selected yet, return "no slots"
+    // (same UX as public flow: user must pick staff/resource first)
     if (reqStaff && !staffId) {
       return res.json({
         tenantId,
@@ -126,8 +130,7 @@ router.get("/", async (req, res) => {
       });
     }
 
-    // 3) Tenant working hours for day of week
-    // Force UTC-safe parsing of YYYY-MM-DD
+    // 3) Tenant working hours for day of week (UTC-safe parsing of YYYY-MM-DD)
     const dayOfWeek = new Date(`${date}T00:00:00Z`).getUTCDay();
 
     const hoursResult = await pool.query(
@@ -156,7 +159,7 @@ router.get("/", async (req, res) => {
     const openHHMM = String(openTime).slice(0, 5);
     const closeHHMM = String(closeTime).slice(0, 5);
 
-    // 4) Build all candidate slots
+    // 4) Build all candidate slots (and mark availability)
     const allSlots = [];
     const availableTimes = [];
 
@@ -182,7 +185,9 @@ router.get("/", async (req, res) => {
         whereExtra += ` AND resource_id = $${params.length}`;
       }
 
-      // Overlap: existing.start < candidateEnd AND existing.end > candidateStart
+      // Overlap rule:
+      // existing.start < candidateEnd AND existing.end > candidateStart
+      // existing.end is computed from duration_minutes
       const overlapResult = await pool.query(
         `
         SELECT COUNT(*)::int AS count
@@ -204,7 +209,6 @@ router.get("/", async (req, res) => {
         label: startHHMM,
         is_available: isAvailable,
         available: isAvailable,
-        // helpful for UI + debugging
         overlaps: overlapsCount,
         capacity: maxParallel,
       };
@@ -233,7 +237,6 @@ router.get("/", async (req, res) => {
     });
   } catch (err) {
     console.error("GET /api/availability error:", err);
-    // Include message for debugging (remove later if you want)
     return res.status(500).json({
       error: "Failed to get availability",
       message: err?.message ?? String(err),
