@@ -15,26 +15,22 @@ const { getTenantIdFromSlug } = require("../utils/tenants");
 // NOTE: your index.js had this incorrectly as POST. This router fixes it to GET.
 router.get("/", requireAdmin, async (req, res) => {
   try {
-    const { tenantId, tenantSlug, slug } = req.query;
+    const { tenantSlug, tenantId } = req.query;
 
     let resolvedTenantId = tenantId ? Number(tenantId) : null;
 
-    // Support ?slug=birdie-golf or ?tenantSlug=birdie-golf
-    if (!resolvedTenantId && (tenantSlug || slug)) {
-      resolvedTenantId = await getTenantIdFromSlug(String(tenantSlug || slug));
+    if (!resolvedTenantId && tenantSlug) {
+      resolvedTenantId = await getTenantIdFromSlug(String(tenantSlug));
     }
 
     if (!resolvedTenantId) {
-      return res
-        .status(400)
-        .json({ error: "You must provide tenantId or slug." });
+      return res.status(400).json({ error: "You must provide tenantSlug or tenantId." });
     }
 
     const result = await db.query(
       `
       SELECT
         id,
-        tenant_id,
         day_of_week,
         open_time,
         close_time,
