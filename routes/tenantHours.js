@@ -19,6 +19,23 @@ router.get("/", requireAdmin, async (req, res) => {
 
     let resolvedTenantId = tenantId ? Number(tenantId) : null;
 
+    // 🔧 Fallback: infer tenantId from hours rows (frontend sends it here)
+    if (
+      !resolvedTenantId &&
+      Array.isArray(body.hours) &&
+      body.hours.length
+    ) {
+      const rowTenantId =
+        body.hours[0]?.tenant_id ??
+        body.hours[0]?.tenantId ??
+        body.hours[0]?.tenantID ??
+        null;
+    
+      if (rowTenantId != null) {
+        resolvedTenantId = Number(rowTenantId);
+      }
+    }
+
     if (!resolvedTenantId && tenantSlug) {
       resolvedTenantId = await getTenantIdFromSlug(String(tenantSlug));
     }
