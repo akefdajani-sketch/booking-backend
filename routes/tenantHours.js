@@ -13,35 +13,21 @@ const { getTenantIdFromSlug } = require("../utils/tenants");
 
 // GET /api/tenant-hours?tenantSlug=&tenantId=
 // NOTE: your index.js had this incorrectly as POST. This router fixes it to GET.
+// GET /api/tenant-hours?tenantSlug=&tenantId=
 router.get("/", requireAdmin, async (req, res) => {
   try {
     const { tenantSlug, tenantId } = req.query;
 
     let resolvedTenantId = tenantId ? Number(tenantId) : null;
 
-    // 🔧 Fallback: infer tenantId from hours rows (frontend sends it here)
-    if (
-      !resolvedTenantId &&
-      Array.isArray(body.hours) &&
-      body.hours.length
-    ) {
-      const rowTenantId =
-        body.hours[0]?.tenant_id ??
-        body.hours[0]?.tenantId ??
-        body.hours[0]?.tenantID ??
-        null;
-    
-      if (rowTenantId != null) {
-        resolvedTenantId = Number(rowTenantId);
-      }
-    }
-
     if (!resolvedTenantId && tenantSlug) {
       resolvedTenantId = await getTenantIdFromSlug(String(tenantSlug));
     }
 
     if (!resolvedTenantId) {
-      return res.status(400).json({ error: "You must provide tenantSlug or tenantId." });
+      return res
+        .status(400)
+        .json({ error: "You must provide tenantSlug or tenantId." });
     }
 
     const result = await db.query(
@@ -168,34 +154,38 @@ router.post("/", requireAdmin, async (req, res) => {
         }
 
         // (B) hours as MAP (sun..sat)
-        if (hours && typeof hours === "object") {
+        if (hours && typeof hours === "object" && !Array.isArray(hours)) {
           const dayMap = { sun: 0, mon: 1, tue: 2, wed: 3, thu: 4, fri: 5, sat: 6 };
-
+        
           for (const [dayKey, conf] of Object.entries(hours)) {
             const dayOfWeek = dayMap[dayKey];
             if (typeof dayOfWeek !== "number") continue;
-
+        
             const isClosed = Boolean(conf?.closed);
             const openTime = isClosed ? null : (conf?.open || null);
             const closeTime = isClosed ? null : (conf?.close || null);
-
+        
             const r = await db.query(
               `
               INSERT INTO tenant_hours (tenant_id, day_of_week, open_time, close_time, is_closed)
- reopening_time = EXCLUDED.open_time,
+              VALUES ($1, $2, $3::time, $4::time, $5)
+              ON CONFLICT (tenant_id, day_of_week)
+              DO UPDATE SET
+                open_time  = EXCLUDED.open_time,
                 close_time = EXCLUDED.close_time,
                 is_closed  = EXCLUDED.is_closed
               RETURNING id, tenant_id, day_of_week, open_time, close_time, is_closed
               `,
               [resolvedTenantId, dayOfWeek, openTime, closeTime, isClosed]
             );
-
+        
             saved.push(r.rows[0]);
           }
-
+        
           await db.query("COMMIT");
           return res.json({ hours: saved });
         }
+
 
         await db.query("ROLLBACK");
         return res.status(400).json({ error: "Invalid hours payload." });
