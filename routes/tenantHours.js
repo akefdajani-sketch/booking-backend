@@ -15,35 +15,26 @@ const { getTenantIdFromSlug } = require("../utils/tenants");
 // NOTE: your index.js had this incorrectly as POST. This router fixes it to GET.
 router.get("/", requireAdmin, async (req, res) => {
   try {
-    const { tenantSlug, tenantId } = req.query;
+    const { tenantId, tenantSlug, slug } = req.query;
+
     let resolvedTenantId = tenantId ? Number(tenantId) : null;
 
-    // If frontend didn't send tenantId at top-level, infer from hours rows (common case)
-  if (!resolvedTenantId && Array.isArray(body.hours) && body.hours.length) {
-    const rowTenantId =
-      body.hours[0]?.tenant_id ??
-      body.hours[0]?.tenantId ??
-      body.hours[0]?.tenantID ??
-      null;
-
-    if (rowTenantId != null) resolvedTenantId = Number(rowTenantId);
-    }
-
-    
-    if (!resolvedTenantId && tenantSlug) {
-      resolvedTenantId = await getTenantIdFromSlug(String(tenantSlug));
+    // Support ?slug=birdie-golf or ?tenantSlug=birdie-golf
+    if (!resolvedTenantId && (tenantSlug || slug)) {
+      resolvedTenantId = await getTenantIdFromSlug(String(tenantSlug || slug));
     }
 
     if (!resolvedTenantId) {
       return res
         .status(400)
-        .json({ error: "You must provide tenantSlug or tenantId." });
+        .json({ error: "You must provide tenantId or slug." });
     }
 
     const result = await db.query(
       `
       SELECT
         id,
+        tenant_id,
         day_of_week,
         open_time,
         close_time,
