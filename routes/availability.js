@@ -3,9 +3,6 @@
 // Keeps `times` (available-only) for backward compatibility.
 //
 // ✅ Works for BOTH public booking (tenantSlug) and owner/manual booking (tenantId).
-//
-// NOTE: Your DB schema uses `services.duration_minutes` (NOT `services.minutes`).
-// This file fixes the "column minutes does not exist" crash.
 
 const express = require("express");
 const router = express.Router();
@@ -52,9 +49,10 @@ router.get("/", async (req, res) => {
     let tenantId = tenantIdRaw != null && tenantIdRaw !== "" ? Number(tenantIdRaw) : null;
 
     if (!tenantId) {
-      const tenantResult = await pool.query("SELECT id FROM tenants WHERE slug = $1", [
-        tenantSlug,
-      ]);
+      const tenantResult = await pool.query(
+        "SELECT id, slug FROM tenants WHERE slug = $1",
+        [tenantSlug]
+      );
       if (tenantResult.rows.length === 0) {
         return res.status(404).json({ error: "Tenant not found" });
       }
@@ -65,36 +63,34 @@ router.get("/", async (req, res) => {
       return res.status(400).json({ error: "Invalid tenantId/serviceId" });
     }
 
-    // 2) Get service details (✅ duration_minutes is the real column)
+    // 2) Get service details
     const serviceResult = await pool.query(
       `
       SELECT
         id,
-        duration_minutes,
+        minutes,
         requires_staff,
         requires_resource,
-        COALESCE(slot_interval_minutes, duration_minutes) AS slot_interval_minutes,
+        COALESCE(slot_interval_minutes, minutes) AS slot_interval_minutes,
         COALESCE(max_parallel_bookings, 1) AS max_parallel_bookings
       FROM services
       WHERE id = $1 AND tenant_id = $2
       `,
       [serviceId, tenantId]
     );
-
     if (serviceResult.rows.length === 0) {
       return res.status(404).json({ error: "Service not found" });
     }
 
     const service = serviceResult.rows[0];
-    const durationMin = Number(service.duration_minutes) || 60;
+    const durationMin = Number(service.minutes) || 60;
     const stepMin = Number(service.slot_interval_minutes) || durationMin;
     const maxParallel = Number(service.max_parallel_bookings) || 1;
 
     const reqStaff = !!service.requires_staff;
     const reqResource = !!service.requires_resource;
 
-    // If the service requires staff/resource but none selected yet, return "no slots"
-    // (same UX as public flow: user must pick staff/resource first)
+    // If the service requires staff/resource but none selected yet, return "no slots" (same UX as public flow)
     if (reqStaff && !staffId) {
       return res.json({
         tenantId,
@@ -130,8 +126,20 @@ router.get("/", async (req, res) => {
       });
     }
 
-    // 3) Tenant working hours for day of week (UTC-safe parsing of YYYY-MM-DD)
-    const dayOfWeek = new Date(`${date}T00:00:00Z`).getUTCDay();
+    // 3) Tenant working hours for day of week
+    // Force UTC-safe parsing of YYYY-MM-DD
+    // Determine weekday for the requested local date (robust across timezone & DB conventions)
+    // We pick midday UTC to avoid edge cases where 00:00Z might shift the calendar day in some timezones.
+    const day0 = new Date(`${date}T12:00:00Z`).getUTCDay(); // 0=Sun..6=Sat
+    // Support common DB conventions:
+    //  - 0..6 (Sun..Sat)  [JS]
+    //  - 1..7 (Mon..Sun)
+    //  - 1..7 (Sun..Sat)
+    const dayCandidates = Array.from(new Set([
+      day0,
+      day0 === 0 ? 7 : day0,        // Mon=1..Sun=7
+      day0 + 1,                     // Sun=1..Sat=7
+    ])).filter((d) => Number.isInteger(d) && d >= 0 && d <= 7);
 
     const hoursResult = await pool.query(
       `
@@ -140,7 +148,7 @@ router.get("/", async (req, res) => {
       WHERE tenant_id = $1 AND day_of_week = $2
       LIMIT 1
       `,
-      [tenantId, dayOfWeek]
+      [tenantId, dayCandidates]
     );
 
     if (hoursResult.rows.length === 0 || hoursResult.rows[0].is_closed) {
@@ -159,7 +167,7 @@ router.get("/", async (req, res) => {
     const openHHMM = String(openTime).slice(0, 5);
     const closeHHMM = String(closeTime).slice(0, 5);
 
-    // 4) Build all candidate slots (and mark availability)
+    // 4) Build all candidate slots
     const allSlots = [];
     const availableTimes = [];
 
@@ -185,9 +193,7 @@ router.get("/", async (req, res) => {
         whereExtra += ` AND resource_id = $${params.length}`;
       }
 
-      // Overlap rule:
-      // existing.start < candidateEnd AND existing.end > candidateStart
-      // existing.end is computed from duration_minutes
+      // Overlap: existing.start < candidateEnd AND existing.end > candidateStart
       const overlapResult = await pool.query(
         `
         SELECT COUNT(*)::int AS count
@@ -209,6 +215,7 @@ router.get("/", async (req, res) => {
         label: startHHMM,
         is_available: isAvailable,
         available: isAvailable,
+        // helpful for UI + debugging
         overlaps: overlapsCount,
         capacity: maxParallel,
       };
@@ -237,6 +244,7 @@ router.get("/", async (req, res) => {
     });
   } catch (err) {
     console.error("GET /api/availability error:", err);
+    // Include message for debugging (remove later if you want)
     return res.status(500).json({
       error: "Failed to get availability",
       message: err?.message ?? String(err),
