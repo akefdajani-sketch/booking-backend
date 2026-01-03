@@ -3,28 +3,21 @@ const express = require("express");
 const router = express.Router();
 const pool = require("../db");
 
-// --- helpers ---
+// ---------------- helpers ----------------
 function pad2(n) {
   return String(n).padStart(2, "0");
 }
 
-function toISODate(d) {
-  return `${d.getUTCFullYear()}-${pad2(d.getUTCMonth() + 1)}-${pad2(d.getUTCDate())}`;
-}
-
 function parseYMD(dateStr) {
-  // expects YYYY-MM-DD
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dateStr || "");
   if (!m) return null;
   const y = Number(m[1]);
   const mo = Number(m[2]);
   const da = Number(m[3]);
-  // create a UTC date at midnight
   return new Date(Date.UTC(y, mo - 1, da, 0, 0, 0, 0));
 }
 
 function minutesSinceMidnight(timeStr) {
-  // expects HH:MM or HH:MM:SS
   if (!timeStr) return null;
   const m = /^(\d{2}):(\d{2})(?::(\d{2}))?$/.exec(timeStr);
   if (!m) return null;
@@ -42,7 +35,22 @@ function overlaps(aStart, aEnd, bStart, bEnd) {
   return aStart < bEnd && bStart < aEnd;
 }
 
-// --- route ---
+function toTimeLabelUTC(d) {
+  // "10:15 AM"
+  const hh = d.getUTCHours();
+  const mm = d.getUTCMinutes();
+  const ampm = hh >= 12 ? "PM" : "AM";
+  const h12 = ((hh + 11) % 12) + 1;
+  return `${h12}:${pad2(mm)} ${ampm}`;
+}
+
+// ---------------- route ----------------
+//
+// GET /api/availability?tenantSlug=&date=YYYY-MM-DD&serviceId=&staffId=&resourceId=
+//
+// Returns ALL pills (interval segments) with availability flags.
+// Service defines interval/min/max.
+//
 router.get("/", async (req, res) => {
   try {
     const tenantSlug = String(req.query.tenantSlug || req.query.slug || "").trim();
@@ -62,65 +70,70 @@ router.get("/", async (req, res) => {
     const day = parseYMD(dateStr);
     if (!day) return res.status(400).json({ error: "date must be YYYY-MM-DD" });
 
-    // 1) tenant id
-    const t = await pool.query(
-      `SELECT id FROM tenants WHERE slug = $1 LIMIT 1`,
-      [tenantSlug]
-    );
+    // 1) Resolve tenant
+    const t = await pool.query(`SELECT id FROM tenants WHERE slug = $1 LIMIT 1`, [tenantSlug]);
     if (!t.rows.length) return res.status(404).json({ error: "Tenant not found" });
     const tenantId = t.rows[0].id;
 
-    // 2) service rules (duration + requires flags) - SELECT * to avoid missing-column crashes
-    let durationMinutes = 60;
-    let requiresResource = false;
-    let requiresStaff = false;
+    // 2) Load service rules
+    if (!serviceId) return res.status(400).json({ error: "serviceId is required" });
 
-    if (serviceId) {
-      const s = await pool.query(
-        `SELECT * FROM services WHERE id = $1 AND tenant_id = $2 LIMIT 1`,
-        [serviceId, tenantId]
-      );
-      if (!s.rows.length) return res.status(404).json({ error: "Service not found" });
+    const sRes = await pool.query(
+      `
+      SELECT
+        id,
+        tenant_id,
+        duration_minutes,
+        slot_interval_minutes,
+        max_consecutive_slots,
+        max_parallel_bookings,
+        requires_staff,
+        requires_resource
+      FROM services
+      WHERE id = $1 AND tenant_id = $2
+      LIMIT 1
+      `,
+      [serviceId, tenantId]
+    );
 
-      const row = s.rows[0];
+    if (!sRes.rows.length) return res.status(404).json({ error: "Service not found" });
 
-      // support multiple legacy column names safely:
-      const dm =
-        row.duration_minutes ??
-        row.duration ??
-        row.minutes ??
-        row.slot_minutes ??
-        null;
+    const s = sRes.rows[0];
 
-      if (dm != null && Number(dm) > 0) durationMinutes = Number(dm);
+    const durationMinutes = Number(s.duration_minutes || 60) || 60; // service minimum duration
+    const intervalMinutes = Number(s.slot_interval_minutes || 60) || 60; // pill size
+    const maxConsecutiveSlots = Number(s.max_consecutive_slots || 0) || Math.max(1, Math.ceil(durationMinutes / intervalMinutes));
+    const maxParallelBookings = Number(s.max_parallel_bookings || 1) || 1;
 
-      requiresResource = Boolean(row.requires_resource ?? row.requiresResource ?? false);
-      requiresStaff = Boolean(row.requires_staff ?? row.requiresStaff ?? false);
-    }
+    const requiresStaff = Boolean(s.requires_staff);
+    const requiresResource = Boolean(s.requires_resource);
 
     // enforce requirements (if service says so)
-    if (requiresResource && !resourceId) return res.json({ slots: [] });
-    if (requiresStaff && !staffId) return res.json({ slots: [] });
+    if (requiresResource && !resourceId) return res.json({ slots: [], rules: { intervalMinutes, minSlots: 0, maxConsecutiveSlots } });
+    if (requiresStaff && !staffId) return res.json({ slots: [], rules: { intervalMinutes, minSlots: 0, maxConsecutiveSlots } });
 
-    // 3) tenant hours for day_of_week (0=Sun ... 6=Sat)
+    const minSlots = Math.max(1, Math.ceil(durationMinutes / intervalMinutes));
+
+    // 3) Working hours
     const dow = day.getUTCDay();
     const th = await pool.query(
-      `SELECT open_time, close_time, is_closed
-       FROM tenant_hours
-       WHERE tenant_id = $1 AND day_of_week = $2
-       LIMIT 1`,
+      `
+      SELECT open_time, close_time, is_closed
+      FROM tenant_hours
+      WHERE tenant_id = $1 AND day_of_week = $2
+      LIMIT 1
+      `,
       [tenantId, dow]
     );
 
-    if (!th.rows.length) return res.json({ slots: [] });
+    if (!th.rows.length) return res.json({ slots: [], rules: { intervalMinutes, minSlots, maxConsecutiveSlots } });
 
     const { open_time, close_time, is_closed } = th.rows[0];
-    if (is_closed) return res.json({ slots: [] });
+    if (is_closed) return res.json({ slots: [], rules: { intervalMinutes, minSlots, maxConsecutiveSlots } });
 
     const openMin = minutesSinceMidnight(open_time);
     const closeMin = minutesSinceMidnight(close_time);
-
-    if (openMin == null || closeMin == null) return res.json({ slots: [] });
+    if (openMin == null || closeMin == null) return res.json({ slots: [], rules: { intervalMinutes, minSlots, maxConsecutiveSlots } });
 
     // if close <= open => crosses midnight
     const crossesMidnight = closeMin <= openMin;
@@ -130,39 +143,38 @@ router.get("/", async (req, res) => {
       ? addMinutesUTC(addMinutesUTC(day, 24 * 60), closeMin)
       : addMinutesUTC(day, closeMin);
 
-    // 4) fetch bookings that could overlap this window (single query)
-    // filter by resource/staff if provided (priority: resource, else staff, else tenant-wide)
-    const whereParts = [`tenant_id = $1`];
-    const params = [tenantId];
+    // 4) Fetch blocking bookings overlapping [openDT, closeDT)
+    // We will apply scope: tenant + (resource OR staff if provided) + blocking statuses.
+    const blockingStatuses = ["pending", "confirmed"];
 
-    // status filtering (if your table has status; if not, this won’t break)
-    // We'll do it safely by not referencing missing columns in SQL.
-    // So: no "status != 'cancelled'" in SQL.
+    const whereParts = [`b.tenant_id = $1`, `b.status = ANY($2)`];
+    const params = [tenantId, blockingStatuses];
 
+    // Optional scope narrowing (matches your UI behavior)
     if (resourceId) {
       params.push(resourceId);
-      whereParts.push(`resource_id = $${params.length}`);
+      whereParts.push(`b.resource_id = $${params.length}`);
     } else if (staffId) {
       params.push(staffId);
-      whereParts.push(`staff_id = $${params.length}`);
+      whereParts.push(`b.staff_id = $${params.length}`);
     }
 
-    // bounding window
+    // Bound window
     params.push(openDT.toISOString());
-    whereParts.push(`start_time < $${params.length}::timestamptz`);
+    whereParts.push(`b.start_time < $${params.length}::timestamptz`);
     params.push(closeDT.toISOString());
-    whereParts.push(`(start_time + (duration_minutes || ' minutes')::interval) > $${params.length}::timestamptz`);
+    whereParts.push(`(b.start_time + (b.duration_minutes::int || ' minutes')::interval) > $${params.length}::timestamptz`);
 
-    // NOTE: This assumes bookings.duration_minutes exists (your UI/backend already uses it).
-    // If your bookings table uses a different column name, tell me and I’ll adjust.
     const bq = await pool.query(
-      `SELECT start_time, duration_minutes
-       FROM bookings
-       WHERE ${whereParts.join(" AND ")}`,
+      `
+      SELECT b.start_time, b.duration_minutes
+      FROM bookings b
+      WHERE ${whereParts.join(" AND ")}
+      `,
       params
     );
 
-    const bookings = bq.rows
+    const bookings = (bq.rows || [])
       .map((r) => {
         const st = new Date(r.start_time);
         const dur = Number(r.duration_minutes || 0);
@@ -171,26 +183,38 @@ router.get("/", async (req, res) => {
       })
       .filter((x) => !Number.isNaN(x.st.getTime()) && !Number.isNaN(x.en.getTime()));
 
-    // 5) generate slots (15-min steps)
-    const STEP_MIN = 15;
+    // Capacity:
+    // - If resource selected, assume that single resource capacity = 1 (parallel handled by resources list).
+    // - Otherwise allow service-level parallel capacity.
+    const capacity = resourceId ? 1 : maxParallelBookings;
+
+    // 5) Generate pills: every interval between open and close
+    // Pills represent segments [t, t+interval)
     const slots = [];
+    for (let cur = new Date(openDT); cur.getTime() + intervalMinutes * 60 * 1000 <= closeDT.getTime(); cur = addMinutesUTC(cur, intervalMinutes)) {
+      const segEnd = addMinutesUTC(cur, intervalMinutes);
 
-    for (let cur = new Date(openDT); cur.getTime() + durationMinutes * 60 * 1000 <= closeDT.getTime(); cur = addMinutesUTC(cur, STEP_MIN)) {
-      const end = addMinutesUTC(cur, durationMinutes);
-
-      const isTaken = bookings.some((b) => overlaps(cur, end, b.st, b.en));
-
-      const hh = pad2(cur.getUTCHours());
-      const mm = pad2(cur.getUTCMinutes());
+      const overlapCount = bookings.reduce((acc, b) => (overlaps(cur, segEnd, b.st, b.en) ? acc + 1 : acc), 0);
+      const available = overlapCount < capacity;
 
       slots.push({
-        time: `${hh}:${mm}`,          // what your UI renders
-        available: !isTaken,          // for grey-out behavior
-        start_time: cur.toISOString() // optional (useful later)
+        time: `${pad2(cur.getUTCHours())}:${pad2(cur.getUTCMinutes())}`, // "HH:MM"
+        label: toTimeLabelUTC(cur),
+        available,
+        reason: available ? null : "capacity_full",
+        start_time: cur.toISOString(),
       });
     }
 
-    return res.json({ slots });
+    return res.json({
+      slots,
+      rules: {
+        intervalMinutes,
+        minSlots,
+        maxConsecutiveSlots,
+        maxParallelBookings,
+      },
+    });
   } catch (err) {
     console.error("GET /api/availability error:", err);
     return res.status(500).json({ error: "Failed to load availability." });
