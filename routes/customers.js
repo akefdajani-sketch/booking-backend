@@ -67,7 +67,7 @@ router.post("/me", requireGoogleAuth, async (req, res) => {
     const tenantId = tRes.rows?.[0]?.id;
     if (!tenantId) return res.status(400).json({ error: "Unknown tenant." });
 
-    const googleEmail = req.user?.email || null;
+    const googleEmail = req.googleUser?.email || null;
     if (!googleEmail) return res.status(401).json({ error: "Missing Google email." });
 
     if (email && String(email).trim() && String(email).trim().toLowerCase() !== String(googleEmail).toLowerCase()) {
