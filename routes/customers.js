@@ -9,6 +9,44 @@ const requireGoogleAuth = require("../middleware/requireGoogleAuth");
 const { requireTenant } = require("../middleware/requireTenant");
 
 // ------------------------------------------------------------
+// ADMIN: GET /api/customers/search?tenantSlug|tenantId&q=&limit=
+// Lightweight search endpoint for autocomplete.
+// ------------------------------------------------------------
+router.get("/search", requireAdmin, requireTenant, async (req, res) => {
+  try {
+    const tenantId = req.tenantId;
+    const q = req.query.q ? String(req.query.q).trim() : "";
+    const limitRaw = req.query.limit ? Number(req.query.limit) : 10;
+    const limit = Math.max(1, Math.min(25, Number.isFinite(limitRaw) ? limitRaw : 10));
+
+    if (!q) return res.json({ customers: [] });
+
+    const like = `%${q}%`;
+
+    const result = await db.query(
+      `
+      SELECT id, tenant_id, name, phone, email
+      FROM customers
+      WHERE tenant_id = $1
+        AND (
+          name ILIKE $2 OR
+          phone ILIKE $2 OR
+          email ILIKE $2
+        )
+      ORDER BY name ASC
+      LIMIT $3
+      `,
+      [tenantId, like, limit]
+    );
+
+    return res.json({ customers: result.rows });
+  } catch (err) {
+    console.error("Error searching customers:", err);
+    return res.status(500).json({ error: "Failed to search customers" });
+  }
+});
+
+// ------------------------------------------------------------
 // ADMIN: GET /api/customers?tenantSlug|tenantId&q=
 // P1: tenant is REQUIRED.
 // ------------------------------------------------------------
