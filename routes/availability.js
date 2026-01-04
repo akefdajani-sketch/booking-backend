@@ -22,16 +22,48 @@ function minutesToHHMM(total) {
   return `${pad2(h)}:${pad2(m)}`;
 }
 
+// Accept YYYY-MM-DD (preferred). If a locale date slips through (MM/DD/YYYY),
+// normalize it to YYYY-MM-DD so day-of-week + DB queries work reliably.
+function normalizeDateInput(raw) {
+  const s = String(raw || "").trim();
+  if (!s) return "";
+
+  // Already ISO date
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+
+  // Common US locale: MM/DD/YYYY
+  const mdy = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  if (mdy) {
+    const mm = pad2(Number(mdy[1]));
+    const dd = pad2(Number(mdy[2]));
+    const yyyy = mdy[3];
+    return `${yyyy}-${mm}-${dd}`;
+  }
+
+  // Last resort: try Date parse and format
+  const d = new Date(s);
+  if (!Number.isNaN(d.getTime())) {
+    return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+  }
+
+  return s; // let downstream handle/return empty
+}
+
+const DEFAULT_OPEN = "08:00";
+const DEFAULT_CLOSE = "22:00";
+
 router.get("/", async (req, res) => {
   try {
     const {
       tenantSlug,
       tenantId: tenantIdRaw,
-      date,
+      date: dateRaw,
       serviceId: serviceIdRaw,
       staffId: staffIdRaw,
       resourceId: resourceIdRaw,
     } = req.query;
+
+    const date = normalizeDateInput(dateRaw);
 
     if ((!tenantSlug && !tenantIdRaw) || !date || !serviceIdRaw) {
       return res.status(400).json({
@@ -123,7 +155,14 @@ router.get("/", async (req, res) => {
 
     // 3) Tenant working hours for day of week
     // Force UTC-safe parsing of YYYY-MM-DD
-    const dayOfWeek = new Date(`${date}T00:00:00Z`).getUTCDay();
+    const dowDate = new Date(`${date}T00:00:00Z`);
+    const dayOfWeek = dowDate.getUTCDay();
+    if (!Number.isFinite(dayOfWeek)) {
+      return res.status(400).json({
+        error: "Invalid date format. Use YYYY-MM-DD.",
+        meta: { dateReceived: String(dateRaw || "") },
+      });
+    }
 
     const hoursResult = await pool.query(
       `
@@ -135,21 +174,56 @@ router.get("/", async (req, res) => {
       [tenantId, dayOfWeek]
     );
 
-    if (hoursResult.rows.length === 0 || hoursResult.rows[0].is_closed) {
+    // If no tenant_hours row exists yet, use safe defaults so the UI can still function.
+    // This prevents "no slots" for new tenants before Setup is completed.
+    let usedDefaultHours = false;
+
+    if (hoursResult.rows.length === 0) {
+      usedDefaultHours = true;
+    } else if (hoursResult.rows[0].is_closed) {
       return res.json({
         tenantId,
         tenantSlug: tenantSlug ?? null,
         date,
         times: [],
         slots: [],
+        meta: {
+          duration_minutes: durationMin,
+          slot_interval_minutes: stepMin,
+          max_parallel_bookings: maxParallel,
+          requires_staff: reqStaff,
+          requires_resource: reqResource,
+          reason: "tenant_closed",
+        },
       });
     }
 
-    const openTime = hoursResult.rows[0].open_time; // "HH:MM:SS" or "HH:MM"
-    const closeTime = hoursResult.rows[0].close_time;
+    const openTime = hoursResult.rows.length ? hoursResult.rows[0].open_time : null; // "HH:MM:SS" or "HH:MM"
+    const closeTime = hoursResult.rows.length ? hoursResult.rows[0].close_time : null;
 
-    const openHHMM = String(openTime).slice(0, 5);
-    const closeHHMM = String(closeTime).slice(0, 5);
+    const openHHMM = String(openTime || DEFAULT_OPEN).slice(0, 5);
+    const closeHHMM = String(closeTime || DEFAULT_CLOSE).slice(0, 5);
+
+    // Guard against bad data (null times but is_closed=false)
+    if (!/^\d{2}:\d{2}$/.test(openHHMM) || !/^\d{2}:\d{2}$/.test(closeHHMM)) {
+      return res.json({
+        tenantId,
+        tenantSlug: tenantSlug ?? null,
+        date,
+        times: [],
+        slots: [],
+        meta: {
+          duration_minutes: durationMin,
+          slot_interval_minutes: stepMin,
+          max_parallel_bookings: maxParallel,
+          requires_staff: reqStaff,
+          requires_resource: reqResource,
+          reason: "invalid_working_hours",
+          open_time: openTime,
+          close_time: closeTime,
+        },
+      });
+    }
 
     // 4) Build all candidate slots
     const allSlots = [];
@@ -224,6 +298,8 @@ router.get("/", async (req, res) => {
         requires_resource: reqResource,
         staffId: staffId ?? null,
         resourceId: resourceId ?? null,
+        used_default_hours: usedDefaultHours,
+        day_of_week: dayOfWeek,
       },
     });
   } catch (err) {
