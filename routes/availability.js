@@ -1,223 +1,238 @@
 // routes/availability.js
+// Returns ALL candidate slots for a day, each with is_available/available flags.
+// Keeps `times` (available-only) for backward compatibility.
+//
+// ✅ Works for BOTH public booking (tenantSlug) and owner/manual booking (tenantId).
+
 const express = require("express");
 const router = express.Router();
 const pool = require("../db");
 
-// ---------------- helpers ----------------
+// Helpers
+function toMinutes(hhmm) {
+  const [h, m] = String(hhmm).split(":").map((x) => parseInt(x, 10));
+  return h * 60 + m;
+}
 function pad2(n) {
   return String(n).padStart(2, "0");
 }
-
-function parseYMD(dateStr) {
-  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dateStr || "");
-  if (!m) return null;
-  const y = Number(m[1]);
-  const mo = Number(m[2]);
-  const da = Number(m[3]);
-  return new Date(Date.UTC(y, mo - 1, da, 0, 0, 0, 0));
+function minutesToHHMM(total) {
+  const h = Math.floor(total / 60);
+  const m = total % 60;
+  return `${pad2(h)}:${pad2(m)}`;
 }
 
-function minutesSinceMidnight(timeStr) {
-  if (!timeStr) return null;
-  const m = /^(\d{2}):(\d{2})(?::(\d{2}))?$/.exec(timeStr);
-  if (!m) return null;
-  const hh = Number(m[1]);
-  const mm = Number(m[2]);
-  return hh * 60 + mm;
-}
-
-function addMinutesUTC(d, min) {
-  return new Date(d.getTime() + min * 60 * 1000);
-}
-
-function overlaps(aStart, aEnd, bStart, bEnd) {
-  // [start, end)
-  return aStart < bEnd && bStart < aEnd;
-}
-
-function toTimeLabelUTC(d) {
-  // "10:15 AM"
-  const hh = d.getUTCHours();
-  const mm = d.getUTCMinutes();
-  const ampm = hh >= 12 ? "PM" : "AM";
-  const h12 = ((hh + 11) % 12) + 1;
-  return `${h12}:${pad2(mm)} ${ampm}`;
-}
-
-// ---------------- route ----------------
-//
-// GET /api/availability?tenantSlug=&date=YYYY-MM-DD&serviceId=&staffId=&resourceId=
-//
-// Returns ALL pills (interval segments) with availability flags.
-// Service defines interval/min/max.
-//
 router.get("/", async (req, res) => {
   try {
-    const tenantSlug = String(req.query.tenantSlug || req.query.slug || "").trim();
-    const dateStr = String(req.query.date || "").trim();
+    const {
+      tenantSlug,
+      tenantId: tenantIdRaw,
+      date,
+      serviceId: serviceIdRaw,
+      staffId: staffIdRaw,
+      resourceId: resourceIdRaw,
+    } = req.query;
 
-    const serviceIdRaw = req.query.serviceId ?? req.query.service_id;
-    const staffIdRaw = req.query.staffId ?? req.query.staff_id;
-    const resourceIdRaw = req.query.resourceId ?? req.query.resource_id;
+    if ((!tenantSlug && !tenantIdRaw) || !date || !serviceIdRaw) {
+      return res.status(400).json({
+        error: "Missing required params: (tenantSlug OR tenantId), date, serviceId",
+      });
+    }
 
-    const serviceId = serviceIdRaw != null && serviceIdRaw !== "" ? Number(serviceIdRaw) : null;
+    // Normalize ids
+    const serviceId = Number(serviceIdRaw);
     const staffId = staffIdRaw != null && staffIdRaw !== "" ? Number(staffIdRaw) : null;
-    const resourceId = resourceIdRaw != null && resourceIdRaw !== "" ? Number(resourceIdRaw) : null;
+    const resourceId =
+      resourceIdRaw != null && resourceIdRaw !== "" ? Number(resourceIdRaw) : null;
 
-    if (!tenantSlug) return res.status(400).json({ error: "tenantSlug is required" });
-    if (!dateStr) return res.status(400).json({ error: "date (YYYY-MM-DD) is required" });
+    // 1) Resolve tenantId (supports either tenantId or tenantSlug)
+    let tenantId = tenantIdRaw != null && tenantIdRaw !== "" ? Number(tenantIdRaw) : null;
 
-    const day = parseYMD(dateStr);
-    if (!day) return res.status(400).json({ error: "date must be YYYY-MM-DD" });
+    if (!tenantId) {
+      const tenantResult = await pool.query(
+        "SELECT id, slug FROM tenants WHERE slug = $1",
+        [tenantSlug]
+      );
+      if (tenantResult.rows.length === 0) {
+        return res.status(404).json({ error: "Tenant not found" });
+      }
+      tenantId = Number(tenantResult.rows[0].id);
+    }
 
-    // 1) Resolve tenant
-    const t = await pool.query(`SELECT id FROM tenants WHERE slug = $1 LIMIT 1`, [tenantSlug]);
-    if (!t.rows.length) return res.status(404).json({ error: "Tenant not found" });
-    const tenantId = t.rows[0].id;
+    if (!Number.isFinite(tenantId) || !Number.isFinite(serviceId)) {
+      return res.status(400).json({ error: "Invalid tenantId/serviceId" });
+    }
 
-    // 2) Load service rules
-    if (!serviceId) return res.status(400).json({ error: "serviceId is required" });
-
-    const sRes = await pool.query(
-      `
-      SELECT
-        id,
-        tenant_id,
-        duration_minutes,
-        slot_interval_minutes,
-        max_consecutive_slots,
-        max_parallel_bookings,
-        requires_staff,
-        requires_resource
-      FROM services
-      WHERE id = $1 AND tenant_id = $2
-      LIMIT 1
-      `,
+    // 2) Get service details
+    const serviceResult = await pool.query(
+      `SELECT * FROM services WHERE id = $1 AND tenant_id = $2`,
       [serviceId, tenantId]
     );
+    if (serviceResult.rows.length === 0) {
+      return res.status(404).json({ error: "Service not found" });
+    }
 
-    if (!sRes.rows.length) return res.status(404).json({ error: "Service not found" });
+    const service = serviceResult.rows[0];
 
-    const s = sRes.rows[0];
+    // Support both schema variants: services.minutes or services.duration_minutes
+    const serviceMinutes = Number((service && (service.minutes ?? service.duration_minutes ?? service.duration)) ?? 0) || 0;
+    const slotInterval = Number((service && (service.slot_interval_minutes ?? service.slotIntervalMinutes)) ?? serviceMinutes) || serviceMinutes || 60;
 
-    const durationMinutes = Number(s.duration_minutes || 60) || 60; // service minimum duration
-    const intervalMinutes = Number(s.slot_interval_minutes || 60) || 60; // pill size
-    const maxConsecutiveSlots = Number(s.max_consecutive_slots || 0) || Math.max(1, Math.ceil(durationMinutes / intervalMinutes));
-    const maxParallelBookings = Number(s.max_parallel_bookings || 1) || 1;
+    const durationMin = serviceMinutes || 60;
+    const stepMin = slotInterval || durationMin;
+    const maxParallel = Number(service.max_parallel_bookings) || 1;
 
-    const requiresStaff = Boolean(s.requires_staff);
-    const requiresResource = Boolean(s.requires_resource);
+    const reqStaff = !!service.requires_staff;
+    const reqResource = !!service.requires_resource;
 
-    // enforce requirements (if service says so)
-    if (requiresResource && !resourceId) return res.json({ slots: [], rules: { intervalMinutes, minSlots: 0, maxConsecutiveSlots } });
-    if (requiresStaff && !staffId) return res.json({ slots: [], rules: { intervalMinutes, minSlots: 0, maxConsecutiveSlots } });
+    // If the service requires staff/resource but none selected yet, return "no slots" (same UX as public flow)
+    if (reqStaff && !staffId) {
+      return res.json({
+        tenantId,
+        tenantSlug: tenantSlug ?? null,
+        date,
+        times: [],
+        slots: [],
+        meta: {
+          duration_minutes: durationMin,
+          slot_interval_minutes: stepMin,
+          max_parallel_bookings: maxParallel,
+          requires_staff: reqStaff,
+          requires_resource: reqResource,
+          reason: "staff_required",
+        },
+      });
+    }
+    if (reqResource && !resourceId) {
+      return res.json({
+        tenantId,
+        tenantSlug: tenantSlug ?? null,
+        date,
+        times: [],
+        slots: [],
+        meta: {
+          duration_minutes: durationMin,
+          slot_interval_minutes: stepMin,
+          max_parallel_bookings: maxParallel,
+          requires_staff: reqStaff,
+          requires_resource: reqResource,
+          reason: "resource_required",
+        },
+      });
+    }
 
-    const minSlots = Math.max(1, Math.ceil(durationMinutes / intervalMinutes));
+    // 3) Tenant working hours for day of week
+    // Force UTC-safe parsing of YYYY-MM-DD
+    const dayOfWeek = new Date(`${date}T00:00:00Z`).getUTCDay();
 
-    // 3) Working hours
-    const dow = day.getUTCDay();
-    const th = await pool.query(
+    const hoursResult = await pool.query(
       `
       SELECT open_time, close_time, is_closed
       FROM tenant_hours
       WHERE tenant_id = $1 AND day_of_week = $2
       LIMIT 1
       `,
-      [tenantId, dow]
+      [tenantId, dayOfWeek]
     );
 
-    if (!th.rows.length) return res.json({ slots: [], rules: { intervalMinutes, minSlots, maxConsecutiveSlots } });
-
-    const { open_time, close_time, is_closed } = th.rows[0];
-    if (is_closed) return res.json({ slots: [], rules: { intervalMinutes, minSlots, maxConsecutiveSlots } });
-
-    const openMin = minutesSinceMidnight(open_time);
-    const closeMin = minutesSinceMidnight(close_time);
-    if (openMin == null || closeMin == null) return res.json({ slots: [], rules: { intervalMinutes, minSlots, maxConsecutiveSlots } });
-
-    // if close <= open => crosses midnight
-    const crossesMidnight = closeMin <= openMin;
-
-    const openDT = addMinutesUTC(day, openMin);
-    const closeDT = crossesMidnight
-      ? addMinutesUTC(addMinutesUTC(day, 24 * 60), closeMin)
-      : addMinutesUTC(day, closeMin);
-
-    // 4) Fetch blocking bookings overlapping [openDT, closeDT)
-    // We will apply scope: tenant + (resource OR staff if provided) + blocking statuses.
-    const blockingStatuses = ["pending", "confirmed"];
-
-    const whereParts = [`b.tenant_id = $1`, `b.status = ANY($2)`];
-    const params = [tenantId, blockingStatuses];
-
-    // Optional scope narrowing (matches your UI behavior)
-    if (resourceId) {
-      params.push(resourceId);
-      whereParts.push(`b.resource_id = $${params.length}`);
-    } else if (staffId) {
-      params.push(staffId);
-      whereParts.push(`b.staff_id = $${params.length}`);
-    }
-
-    // Bound window
-    params.push(openDT.toISOString());
-    whereParts.push(`b.start_time < $${params.length}::timestamptz`);
-    params.push(closeDT.toISOString());
-    whereParts.push(`(b.start_time + (b.duration_minutes::int || ' minutes')::interval) > $${params.length}::timestamptz`);
-
-    const bq = await pool.query(
-      `
-      SELECT b.start_time, b.duration_minutes
-      FROM bookings b
-      WHERE ${whereParts.join(" AND ")}
-      `,
-      params
-    );
-
-    const bookings = (bq.rows || [])
-      .map((r) => {
-        const st = new Date(r.start_time);
-        const dur = Number(r.duration_minutes || 0);
-        const en = addMinutesUTC(st, dur);
-        return { st, en };
-      })
-      .filter((x) => !Number.isNaN(x.st.getTime()) && !Number.isNaN(x.en.getTime()));
-
-    // Capacity:
-    // - If resource selected, assume that single resource capacity = 1 (parallel handled by resources list).
-    // - Otherwise allow service-level parallel capacity.
-    const capacity = resourceId ? 1 : maxParallelBookings;
-
-    // 5) Generate pills: every interval between open and close
-    // Pills represent segments [t, t+interval)
-    const slots = [];
-    for (let cur = new Date(openDT); cur.getTime() + intervalMinutes * 60 * 1000 <= closeDT.getTime(); cur = addMinutesUTC(cur, intervalMinutes)) {
-      const segEnd = addMinutesUTC(cur, intervalMinutes);
-
-      const overlapCount = bookings.reduce((acc, b) => (overlaps(cur, segEnd, b.st, b.en) ? acc + 1 : acc), 0);
-      const available = overlapCount < capacity;
-
-      slots.push({
-        time: `${pad2(cur.getUTCHours())}:${pad2(cur.getUTCMinutes())}`, // "HH:MM"
-        label: toTimeLabelUTC(cur),
-        available,
-        reason: available ? null : "capacity_full",
-        start_time: cur.toISOString(),
+    if (hoursResult.rows.length === 0 || hoursResult.rows[0].is_closed) {
+      return res.json({
+        tenantId,
+        tenantSlug: tenantSlug ?? null,
+        date,
+        times: [],
+        slots: [],
       });
     }
 
+    const openTime = hoursResult.rows[0].open_time; // "HH:MM:SS" or "HH:MM"
+    const closeTime = hoursResult.rows[0].close_time;
+
+    const openHHMM = String(openTime).slice(0, 5);
+    const closeHHMM = String(closeTime).slice(0, 5);
+
+    // 4) Build all candidate slots
+    const allSlots = [];
+    const availableTimes = [];
+
+    let cursor = toMinutes(openHHMM);
+    const closeMin = toMinutes(closeHHMM);
+
+    while (cursor + durationMin <= closeMin) {
+      const startHHMM = minutesToHHMM(cursor);
+      const endHHMM = minutesToHHMM(cursor + durationMin);
+
+      const candidateStart = `${date} ${startHHMM}:00`;
+      const candidateEnd = `${date} ${endHHMM}:00`;
+
+      const params = [tenantId, candidateEnd, candidateStart];
+      let whereExtra = "";
+
+      if (reqStaff && staffId) {
+        params.push(staffId);
+        whereExtra += ` AND staff_id = $${params.length}`;
+      }
+      if (reqResource && resourceId) {
+        params.push(resourceId);
+        whereExtra += ` AND resource_id = $${params.length}`;
+      }
+
+      // Overlap: existing.start < candidateEnd AND existing.end > candidateStart
+      const overlapResult = await pool.query(
+        `
+        SELECT COUNT(*)::int AS count
+        FROM bookings
+        WHERE tenant_id = $1
+          AND start_time < $2
+          AND (start_time + (duration_minutes || ' minutes')::interval) > $3
+          AND status NOT IN ('cancelled')
+          ${whereExtra}
+        `,
+        params
+      );
+
+      const overlapsCount = overlapResult.rows[0]?.count ?? 0;
+      const isAvailable = overlapsCount < maxParallel;
+
+      const slotObj = {
+        time: startHHMM,
+        label: startHHMM,
+        is_available: isAvailable,
+        available: isAvailable,
+        // helpful for UI + debugging
+        overlaps: overlapsCount,
+        capacity: maxParallel,
+      };
+
+      allSlots.push(slotObj);
+      if (isAvailable) availableTimes.push(startHHMM);
+
+      cursor += stepMin;
+    }
+
     return res.json({
-      slots,
-      rules: {
-        intervalMinutes,
-        minSlots,
-        maxConsecutiveSlots,
-        maxParallelBookings,
+      tenantId,
+      tenantSlug: tenantSlug ?? null,
+      date,
+      times: availableTimes, // backward compatible (available-only)
+      slots: allSlots, // preferred (includes unavailable)
+      meta: {
+        duration_minutes: durationMin,
+        slot_interval_minutes: stepMin,
+        max_parallel_bookings: maxParallel,
+        requires_staff: reqStaff,
+        requires_resource: reqResource,
+        staffId: staffId ?? null,
+        resourceId: resourceId ?? null,
       },
     });
   } catch (err) {
     console.error("GET /api/availability error:", err);
-    return res.status(500).json({ error: "Failed to load availability." });
+    // Include message for debugging (remove later if you want)
+    return res.status(500).json({
+      error: "Failed to get availability",
+      message: err?.message ?? String(err),
+    });
   }
 });
 
