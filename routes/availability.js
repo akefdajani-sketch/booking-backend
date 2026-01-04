@@ -49,6 +49,14 @@ function normalizeDateInput(raw) {
   return s; // let downstream handle/return empty
 }
 
+// Add days to an ISO date (YYYY-MM-DD) and return ISO date.
+function addDaysISO(isoDate, days) {
+  const d = new Date(`${isoDate}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + Number(days || 0));
+  return `${d.getUTCFullYear()}-${pad2(d.getUTCMonth() + 1)}-${pad2(d.getUTCDate())}`;
+}
+
+
 const DEFAULT_OPEN = "08:00";
 const DEFAULT_CLOSE = "22:00";
 
@@ -229,17 +237,30 @@ router.get("/", async (req, res) => {
     const allSlots = [];
     const availableTimes = [];
 
-    let cursor = toMinutes(openHHMM);
-    const closeMin = toMinutes(closeHHMM);
+    
+const openMin = toMinutes(openHHMM);
+let closeMin = toMinutes(closeHHMM);
 
-    while (cursor + durationMin <= closeMin) {
-      const startHHMM = minutesToHHMM(cursor);
-      const endHHMM = minutesToHHMM(cursor + durationMin);
+// Support overnight hours (e.g., 18:00 → 02:00 next day)
+const isOvernight = closeMin <= openMin;
+if (isOvernight) closeMin += 24 * 60;
 
-      const candidateStart = `${date} ${startHHMM}:00`;
-      const candidateEnd = `${date} ${endHHMM}:00`;
+let cursor = openMin;
 
-      const params = [tenantId, candidateEnd, candidateStart];
+while (cursor + durationMin <= closeMin) {
+  const startOffsetDays = Math.floor(cursor / (24 * 60));
+  const endCursor = cursor + durationMin;
+  const endOffsetDays = Math.floor(endCursor / (24 * 60));
+
+  const startHHMM = minutesToHHMM(cursor % (24 * 60));
+  const endHHMM = minutesToHHMM(endCursor % (24 * 60));
+
+  const startDateISO = addDaysISO(date, startOffsetDays);
+  const endDateISO = addDaysISO(date, endOffsetDays);
+
+  const candidateStart = `${startDateISO} ${startHHMM}:00`;
+  const candidateEnd = `${endDateISO} ${endHHMM}:00`;
+const params = [tenantId, candidateEnd, candidateStart];
       let whereExtra = "";
 
       if (reqStaff && staffId) {
@@ -300,6 +321,9 @@ router.get("/", async (req, res) => {
         resourceId: resourceId ?? null,
         used_default_hours: usedDefaultHours,
         day_of_week: dayOfWeek,
+          open_time: openHHMM,
+          close_time: closeHHMM,
+          is_overnight: isOvernight,
       },
     });
   } catch (err) {
