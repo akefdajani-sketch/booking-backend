@@ -55,6 +55,10 @@ router.get("/", requireAdmin, requireTenant, async (req, res) => {
     const tenantId = req.tenantId;
     const q = req.query.q ? String(req.query.q).trim() : "";
 
+    // Optional limit (cap at 200)
+    const limitRaw = req.query.limit ? Number(req.query.limit) : 200;
+    const limit = Math.max(1, Math.min(200, Number.isFinite(limitRaw) ? limitRaw : 200));
+
     const params = [tenantId];
     let where = `WHERE c.tenant_id = $1`;
 
@@ -62,6 +66,9 @@ router.get("/", requireAdmin, requireTenant, async (req, res) => {
       params.push(`%${q}%`);
       where += ` AND (c.name ILIKE $2 OR c.phone ILIKE $2 OR c.email ILIKE $2)`;
     }
+
+    // For autocomplete/search UX: order by name when q is provided, otherwise newest first
+    const orderBy = q ? `ORDER BY c.name ASC` : `ORDER BY c.created_at DESC`;
 
     const query = `
       SELECT
@@ -77,11 +84,11 @@ router.get("/", requireAdmin, requireTenant, async (req, res) => {
       FROM customers c
       JOIN tenants t ON t.id = c.tenant_id
       ${where}
-      ORDER BY c.created_at DESC
-      LIMIT 200
+      ${orderBy}
+      LIMIT $${params.length + 1}
     `;
 
-    const result = await db.query(query, params);
+    const result = await db.query(query, [...params, limit]);
     return res.json({ customers: result.rows });
   } catch (err) {
     console.error("Error loading customers:", err);
