@@ -1,6 +1,6 @@
 // utils/bookings.js
-const db = require("../db");
-
+const { pool } = require("../db");
+const db = pool;
 /**
  * Returns true if two time ranges overlap.
  * We rely on SQL overlap checks instead of doing it in JS.
@@ -107,9 +107,14 @@ async function checkConflicts({
  * @param {number} bookingId
  * @returns {Promise<object|null>}
  */
-async function loadJoinedBookingById(bookingId) {
+async function loadJoinedBookingById(bookingId, tenantId) {
   const id = Number(bookingId);
   if (!id) throw new Error("loadJoinedBookingById: bookingId is required");
+
+  const tId = tenantId != null && tenantId !== "" ? Number(tenantId) : null;
+  if (tId != null && (!Number.isFinite(tId) || tId <= 0)) {
+    throw new Error("loadJoinedBookingById: invalid tenantId");
+  }
 
   const q = `
     SELECT
@@ -139,14 +144,15 @@ async function loadJoinedBookingById(bookingId) {
       b.booking_code
     FROM bookings b
     JOIN tenants t ON t.id = b.tenant_id
-    LEFT JOIN services s ON s.id = b.service_id
-    LEFT JOIN staff st ON st.id = b.staff_id
-    LEFT JOIN resources r ON r.id = b.resource_id
+    LEFT JOIN services s ON s.tenant_id = b.tenant_id AND s.id = b.service_id
+    LEFT JOIN staff st ON st.tenant_id = b.tenant_id AND st.id = b.staff_id
+    LEFT JOIN resources r ON r.tenant_id = b.tenant_id AND r.id = b.resource_id
     WHERE b.id = $1
+      AND ($2::int IS NULL OR b.tenant_id = $2::int)
     LIMIT 1
   `;
 
-  const result = await db.query(q, [id]);
+  const result = await db.query(q, [id, tId]);
   return result.rows?.[0] || null;
 }
 
