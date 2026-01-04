@@ -8,14 +8,139 @@ const { requireTenant } = require("../middleware/requireTenant");
 const { checkConflicts, loadJoinedBookingById } = require("../utils/bookings");
 
 // ---------------------------------------------------------------------------
-// GET /api/bookings?tenantSlug|tenantId=
-// P1: tenant is REQUIRED (no "return all bookings").
+// GET /api/bookings?tenantSlug|tenantId=...
+//
+// SaaS-ready list endpoint:
+// - Defaults to upcoming bookings (start_time >= now) ordered ASC
+// - Supports scope: upcoming | past | range (or legacy: view=upcoming|past|all)
+// - Supports filters: from, to, status, serviceId, staffId, resourceId, customerId
+// - Supports search: query (matches booking_code + customer fields)
+// - Uses keyset (cursor) pagination: cursorStartTime + cursorId
+//
+// Response: { bookings: [...], nextCursor: { start_time, id } | null }
 // ---------------------------------------------------------------------------
 router.get("/", requireTenant, async (req, res) => {
   try {
     const tenantId = req.tenantId;
 
-    const q = `
+    // ---- parse params ----
+    const scopeRaw =
+      (req.query.scope ? String(req.query.scope) : "") ||
+      (req.query.view ? String(req.query.view) : "");
+    const scope = (scopeRaw || "upcoming").toLowerCase(); // upcoming|past|range|all
+
+    const status = req.query.status ? String(req.query.status).trim() : null;
+
+    const serviceId = req.query.serviceId ? Number(req.query.serviceId) : null;
+    const staffId = req.query.staffId ? Number(req.query.staffId) : null;
+    const resourceId = req.query.resourceId ? Number(req.query.resourceId) : null;
+    const customerId = req.query.customerId ? Number(req.query.customerId) : null;
+
+    const query = req.query.query ? String(req.query.query).trim() : "";
+
+    const limitRaw = req.query.limit ? Number(req.query.limit) : 50;
+    const limit = Math.max(1, Math.min(200, Number.isFinite(limitRaw) ? limitRaw : 50));
+
+    const cursorStartTime = req.query.cursorStartTime
+      ? new Date(String(req.query.cursorStartTime))
+      : null;
+    const cursorId = req.query.cursorId ? Number(req.query.cursorId) : null;
+
+    if (cursorStartTime && Number.isNaN(cursorStartTime.getTime())) {
+      return res.status(400).json({ error: "Invalid cursorStartTime." });
+    }
+    if (cursorId != null && (!Number.isFinite(cursorId) || cursorId <= 0)) {
+      return res.status(400).json({ error: "Invalid cursorId." });
+    }
+
+    // from/to
+    const fromTs = req.query.from ? new Date(String(req.query.from)) : null;
+    const toTs = req.query.to ? new Date(String(req.query.to)) : null;
+
+    if (fromTs && Number.isNaN(fromTs.getTime())) return res.status(400).json({ error: "Invalid from." });
+    if (toTs && Number.isNaN(toTs.getTime())) return res.status(400).json({ error: "Invalid to." });
+
+    // ---- build WHERE ----
+    const params = [tenantId];
+    const where = ["b.tenant_id = $1"];
+
+    // scope defaults
+    if (scope === "upcoming") {
+      where.push(`b.start_time >= NOW()`);
+    } else if (scope === "past") {
+      where.push(`b.start_time < NOW()`);
+    } else if (scope === "range") {
+      // rely on from/to
+    } else if (scope === "all") {
+      // no implicit time filter
+    } else {
+      // treat unknown scope as upcoming
+      where.push(`b.start_time >= NOW()`);
+    }
+
+    if (fromTs) {
+      params.push(fromTs.toISOString());
+      where.push(`b.start_time >= $${params.length}`);
+    }
+    if (toTs) {
+      params.push(toTs.toISOString());
+      where.push(`b.start_time < $${params.length}`);
+    }
+
+    if (status && status !== "all") {
+      params.push(status);
+      where.push(`b.status = $${params.length}`);
+    }
+
+    if (Number.isFinite(serviceId) && serviceId > 0) {
+      params.push(serviceId);
+      where.push(`b.service_id = $${params.length}`);
+    }
+    if (Number.isFinite(staffId) && staffId > 0) {
+      params.push(staffId);
+      where.push(`b.staff_id = $${params.length}`);
+    }
+    if (Number.isFinite(resourceId) && resourceId > 0) {
+      params.push(resourceId);
+      where.push(`b.resource_id = $${params.length}`);
+    }
+    if (Number.isFinite(customerId) && customerId > 0) {
+      params.push(customerId);
+      where.push(`b.customer_id = $${params.length}`);
+    }
+
+    // Search (booking_code + customer fields). Uses LEFT JOIN customers.
+    if (query) {
+      params.push(`%${query}%`);
+      const p = `$${params.length}`;
+      where.push(
+        `(
+          b.booking_code ILIKE ${p}
+          OR b.customer_name ILIKE ${p}
+          OR b.customer_phone ILIKE ${p}
+          OR b.customer_email ILIKE ${p}
+          OR c.name ILIKE ${p}
+          OR c.phone ILIKE ${p}
+          OR c.email ILIKE ${p}
+        )`
+      );
+    }
+
+    // ---- order + keyset cursor ----
+    const isPast = scope === "past";
+    const orderDir = isPast ? "DESC" : "ASC";
+    const comparator = isPast ? "<" : ">";
+
+    if (cursorStartTime && cursorId) {
+      params.push(cursorStartTime.toISOString());
+      const pStart = `$${params.length}`;
+      params.push(cursorId);
+      const pId = `$${params.length}`;
+      where.push(`(b.start_time, b.id) ${comparator} (${pStart}, ${pId})`);
+    }
+
+    // ---- query ----
+    const sql = `
       SELECT
         b.id,
         b.tenant_id,
@@ -29,22 +154,39 @@ router.get("/", requireTenant, async (req, res) => {
         r.name          AS resource_name,
         b.start_time,
         b.duration_minutes,
-        b.customer_name,
-        b.customer_phone,
-        b.customer_email,
+
+        b.customer_id,
+        COALESCE(c.name, b.customer_name)   AS customer_name,
+        COALESCE(c.phone, b.customer_phone) AS customer_phone,
+        COALESCE(c.email, b.customer_email) AS customer_email,
+
         b.status,
-        b.booking_code
+        b.booking_code,
+        b.created_at
       FROM bookings b
       JOIN tenants t ON b.tenant_id = t.id
-      LEFT JOIN services  s  ON b.service_id  = s.id
-      LEFT JOIN staff     st ON b.staff_id    = st.id
-      LEFT JOIN resources r  ON b.resource_id = r.id
-      WHERE b.tenant_id = $1
-      ORDER BY b.start_time DESC
+      LEFT JOIN customers c
+        ON c.tenant_id = b.tenant_id AND c.id = b.customer_id
+      LEFT JOIN services s
+        ON s.tenant_id = b.tenant_id AND s.id = b.service_id
+      LEFT JOIN staff st
+        ON st.tenant_id = b.tenant_id AND st.id = b.staff_id
+      LEFT JOIN resources r
+        ON r.tenant_id = b.tenant_id AND r.id = b.resource_id
+      WHERE ${where.join(" AND ")}
+      ORDER BY b.start_time ${orderDir}, b.id ${orderDir}
+      LIMIT $${params.length + 1}
     `;
 
-    const result = await db.query(q, [tenantId]);
-    return res.json({ bookings: result.rows });
+    const result = await db.query(sql, [...params, limit]);
+
+    const rows = result.rows || [];
+    const last = rows.length ? rows[rows.length - 1] : null;
+
+    return res.json({
+      bookings: rows,
+      nextCursor: last ? { start_time: last.start_time, id: last.id } : null,
+    });
   } catch (err) {
     console.error("Error loading bookings:", err);
     return res.status(500).json({ error: "Failed to load bookings" });
