@@ -5,6 +5,7 @@
 // 1) Prevents "Invalid URL" when R2_ENDPOINT accidentally contains placeholders like
 //    "https://<accountid>.r2.cloudflarestorage.com" (angle brackets break URL parsing).
 // 2) Gives clearer errors and always attempts temp-file cleanup.
+// 3) Provides safeName() used by upload routes to generate clean object keys.
 
 const fs = require("fs/promises");
 
@@ -20,6 +21,21 @@ function sanitizeEndpoint(raw) {
   const cleaned = String(raw).replace(/[<>]/g, "").trim();
   if (!/^https?:\/\//i.test(cleaned)) return `https://${cleaned}`;
   return cleaned;
+}
+
+// Make filenames safe for S3/R2 object keys.
+// - keeps letters/numbers/._-
+// - converts spaces to '-'
+// - collapses repeats
+// - prevents empty names
+function safeName(name) {
+  const base = String(name || "")
+    .trim()
+    .replace(/\s+/g, "-")
+    .replace(/[^a-zA-Z0-9._-]/g, "")
+    .replace(/-+/g, "-")
+    .replace(/\.+/g, "."); // avoid weird sequences
+  return base || "file";
 }
 
 function getS3Client() {
@@ -38,8 +54,9 @@ function getS3Client() {
 
 function publicUrlForKey(key) {
   const base = process.env.R2_PUBLIC_BASE_URL
-    ? String(process.env.R2_PUBLIC_BASE_URL).replace(/\/+$|\s+$/g, "").replace(/\/+$/, "")
+    ? String(process.env.R2_PUBLIC_BASE_URL).replace(/\/+$/g, "").trim()
     : null;
+
   if (base) return `${base}/${encodeURIComponent(key)}`;
 
   const endpoint = sanitizeEndpoint(mustEnv("R2_ENDPOINT")).replace(/\/+$/, "");
@@ -62,11 +79,13 @@ async function uploadFileToR2({ filePath, key, contentType }) {
 
   const inferredType =
     contentType ||
-    (filePath.toLowerCase().endsWith(".png")
+    (key.toLowerCase().endsWith(".png")
       ? "image/png"
-      : filePath.toLowerCase().endsWith(".jpg") || filePath.toLowerCase().endsWith(".jpeg")
-      ? "image/jpeg"
-      : "application/octet-stream");
+      : key.toLowerCase().endsWith(".jpg") || key.toLowerCase().endsWith(".jpeg")
+        ? "image/jpeg"
+        : key.toLowerCase().endsWith(".webp")
+          ? "image/webp"
+          : "application/octet-stream");
 
   await client.send(
     new PutObjectCommand({
@@ -74,8 +93,12 @@ async function uploadFileToR2({ filePath, key, contentType }) {
       Key: key,
       Body,
       ContentType: inferredType,
+      CacheControl: "public, max-age=31536000, immutable",
     })
   );
+
+  // Always cleanup temp file best-effort
+  await fs.unlink(filePath).catch(() => {});
 
   return { key, url: publicUrlForKey(key) };
 }
@@ -92,4 +115,5 @@ module.exports = {
   deleteFromR2,
   publicUrlForKey,
   sanitizeEndpoint,
+  safeName,
 };
