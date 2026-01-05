@@ -47,13 +47,18 @@ function getS3Client() {
 
 function publicUrlForKey(key) {
   const base = process.env.R2_PUBLIC_BASE_URL
-    ? String(process.env.R2_PUBLIC_BASE_URL).replace(/\/+$/g, "").trim()
+    ? String(process.env.R2_PUBLIC_BASE_URL).replace(/\/+$/, "").trim()
     : null;
 
-  if (base) return `${base}/${encodeURIComponent(key)}`;
+  const safePath = String(key)
+    .split("/")
+    .map((seg) => encodeURIComponent(seg))
+    .join("/");
+
+  if (base) return `${base}/${safePath}`;
 
   const endpoint = sanitizeEndpoint(mustEnv("R2_ENDPOINT")).replace(/\/+$/, "");
-  return `${endpoint}/${encodeURIComponent(key)}`;
+  return `${endpoint}/${safePath}`;
 }
 
 async function uploadFileToR2({ filePath, key, contentType }) {
@@ -79,6 +84,15 @@ async function deleteFromR2(key) {
   const Bucket = mustEnv("R2_BUCKET");
   const client = getS3Client();
   await client.send(new DeleteObjectCommand({ Bucket, Key: key }));
+}
+
+function safeName(name) {
+  const base = String(name || "")
+    .trim()
+    .replace(/\s+/g, "-")
+    .replace(/[^a-zA-Z0-9._-]/g, "")
+    .replace(/-+/g, "-");
+  return base || "file";
 }
 
 module.exports = {
