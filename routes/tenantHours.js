@@ -14,7 +14,7 @@ const { getTenantIdFromSlug } = require("../utils/tenants");
 // GET /api/tenant-hours?tenantSlug=&tenantId=
 // NOTE: your index.js had this incorrectly as POST. This router fixes it to GET.
 // GET /api/tenant-hours?tenantSlug=&tenantId=
-router.get("/", requireAdmin, async (req, res) => {
+router.get("/", async (req, res) => {
   try {
     const { tenantSlug, tenantId } = req.query;
 
