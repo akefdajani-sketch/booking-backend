@@ -8,7 +8,6 @@
 // 3) Provides safeName() used by upload routes to generate clean object keys.
 
 const fs = require("fs/promises");
-
 const { S3Client, PutObjectCommand, DeleteObjectCommand } = require("@aws-sdk/client-s3");
 
 function mustEnv(name) {
@@ -23,18 +22,12 @@ function sanitizeEndpoint(raw) {
   return cleaned;
 }
 
-// Make filenames safe for S3/R2 object keys.
-// - keeps letters/numbers/._-
-// - converts spaces to '-'
-// - collapses repeats
-// - prevents empty names
 function safeName(name) {
   const base = String(name || "")
     .trim()
     .replace(/\s+/g, "-")
     .replace(/[^a-zA-Z0-9._-]/g, "")
-    .replace(/-+/g, "-")
-    .replace(/\.+/g, "."); // avoid weird sequences
+    .replace(/-+/g, "-");
   return base || "file";
 }
 
@@ -64,41 +57,19 @@ function publicUrlForKey(key) {
 }
 
 async function uploadFileToR2({ filePath, key, contentType }) {
-  if (!filePath) throw new Error("uploadFileToR2: filePath is required");
-  if (!key) throw new Error("uploadFileToR2: key is required");
-
-  try {
-    await fs.access(filePath);
-  } catch {
-    throw new Error(`uploadFileToR2: temp file does not exist at ${filePath}`);
-  }
-
   const Bucket = mustEnv("R2_BUCKET");
   const client = getS3Client();
   const Body = await fs.readFile(filePath);
-
-  const inferredType =
-    contentType ||
-    (key.toLowerCase().endsWith(".png")
-      ? "image/png"
-      : key.toLowerCase().endsWith(".jpg") || key.toLowerCase().endsWith(".jpeg")
-        ? "image/jpeg"
-        : key.toLowerCase().endsWith(".webp")
-          ? "image/webp"
-          : "application/octet-stream");
 
   await client.send(
     new PutObjectCommand({
       Bucket,
       Key: key,
       Body,
-      ContentType: inferredType,
+      ContentType: contentType || "application/octet-stream",
       CacheControl: "public, max-age=31536000, immutable",
     })
   );
-
-  // Always cleanup temp file best-effort
-  await fs.unlink(filePath).catch(() => {});
 
   return { key, url: publicUrlForKey(key) };
 }
