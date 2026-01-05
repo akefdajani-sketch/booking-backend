@@ -1,11 +1,12 @@
 // utils/r2.js
 // Cloudflare R2 (S3-compatible) helper.
 //
-// Fixes:
-// 1) Prevents "Invalid URL" when R2_ENDPOINT accidentally contains placeholders like
-//    "https://<accountid>.r2.cloudflarestorage.com" (angle brackets break URL parsing).
-// 2) Gives clearer errors and always attempts temp-file cleanup.
-// 3) Provides safeName() used by upload routes to generate clean object keys.
+// Key points:
+// - Uses AWS SDK S3 client pointed at R2_ENDPOINT
+// - Builds PUBLIC URLs using R2_PUBLIC_BASE_URL (recommended) or falls back to R2_ENDPOINT
+// - Avoids encoding '/' into '%2F' by encoding path segments only
+// - Provides safeName() used by upload routes
+// - Best-effort cleanup of temp uploads
 
 const fs = require("fs/promises");
 const { S3Client, PutObjectCommand, DeleteObjectCommand } = require("@aws-sdk/client-s3");
@@ -17,7 +18,10 @@ function mustEnv(name) {
 }
 
 function sanitizeEndpoint(raw) {
-  const cleaned = String(raw).replace(/[<>]/g, "").trim();
+  // People sometimes paste placeholder endpoint like: https://<accountid>.r2.cloudflarestorage.com
+  // Angle brackets break URL parsing.
+  const cleaned = String(raw || "").replace(/[<>]/g, "").trim();
+  if (!cleaned) throw new Error("Missing env var: R2_ENDPOINT");
   if (!/^https?:\/\//i.test(cleaned)) return `https://${cleaned}`;
   return cleaned;
 }
@@ -45,36 +49,55 @@ function getS3Client() {
   });
 }
 
-function publicUrlForKey(key) {
-  const base = process.env.R2_PUBLIC_BASE_URL
-    ? String(process.env.R2_PUBLIC_BASE_URL).replace(/\/+$/, "").trim()
-    : null;
-
-  const safePath = String(key)
+function encodeKeyPath(key) {
+  // IMPORTANT: encode each segment (not the slashes)
+  return String(key)
     .split("/")
     .map((seg) => encodeURIComponent(seg))
     .join("/");
+}
+
+function publicUrlForKey(key) {
+  const safePath = encodeKeyPath(key);
+
+  const base = process.env.R2_PUBLIC_BASE_URL
+    ? String(process.env.R2_PUBLIC_BASE_URL).replace(/\/+$/g, "").trim()
+    : null;
 
   if (base) return `${base}/${safePath}`;
 
-  const endpoint = sanitizeEndpoint(mustEnv("R2_ENDPOINT")).replace(/\/+$/, "");
+  const endpoint = sanitizeEndpoint(mustEnv("R2_ENDPOINT")).replace(/\/+$/g, "");
   return `${endpoint}/${safePath}`;
 }
 
 async function uploadFileToR2({ filePath, key, contentType }) {
+  if (!filePath) throw new Error("uploadFileToR2: filePath is required");
+  if (!key) throw new Error("uploadFileToR2: key is required");
+
+  try {
+    await fs.access(filePath);
+  } catch {
+    throw new Error(`uploadFileToR2: temp file does not exist at ${filePath}`);
+  }
+
   const Bucket = mustEnv("R2_BUCKET");
   const client = getS3Client();
   const Body = await fs.readFile(filePath);
 
-  await client.send(
-    new PutObjectCommand({
-      Bucket,
-      Key: key,
-      Body,
-      ContentType: contentType || "application/octet-stream",
-      CacheControl: "public, max-age=31536000, immutable",
-    })
-  );
+  try {
+    await client.send(
+      new PutObjectCommand({
+        Bucket,
+        Key: key,
+        Body,
+        ContentType: contentType || "application/octet-stream",
+        CacheControl: "public, max-age=31536000, immutable",
+      })
+    );
+  } finally {
+    // Best-effort cleanup of temp file
+    await fs.unlink(filePath).catch(() => {});
+  }
 
   return { key, url: publicUrlForKey(key) };
 }
@@ -84,15 +107,6 @@ async function deleteFromR2(key) {
   const Bucket = mustEnv("R2_BUCKET");
   const client = getS3Client();
   await client.send(new DeleteObjectCommand({ Bucket, Key: key }));
-}
-
-function safeName(name) {
-  const base = String(name || "")
-    .trim()
-    .replace(/\s+/g, "-")
-    .replace(/[^a-zA-Z0-9._-]/g, "")
-    .replace(/-+/g, "-");
-  return base || "file";
 }
 
 module.exports = {
