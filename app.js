@@ -17,11 +17,13 @@ const availabilityRouter = require("./routes/availability");
 const membershipPlansRouter = require("./routes/membershipPlans");
 const customerMembershipsRouter = require("./routes/customerMemberships");
 
+// ✅ ADD THIS
+const uploadsRouter = require("./routes/uploads");
 
 const app = express();
 
 /**
- * --- Global middleware (match your current index.js behavior) ---
+ * --- Global middleware ---
  */
 
 // CORS (including OPTIONS preflight)
@@ -33,6 +35,7 @@ app.use(express.json({ limit: "2mb" }));
 app.use(express.urlencoded({ extended: true }));
 
 // Static uploads (keep same URL path as before)
+// NOTE: If you move fully to R2, this is optional. Keeping it does not break anything.
 app.use(
   "/uploads",
   express.static(uploadDir, {
@@ -58,7 +61,8 @@ app.use("/api/availability", availabilityRouter);
 app.use("/api/membership-plans", membershipPlansRouter);
 app.use("/api/customer-memberships", customerMembershipsRouter);
 
-
+// ✅ REGISTER UPLOADS ROUTES
+app.use("/api/uploads", uploadsRouter);
 
 /**
  * --- Health check ---
@@ -66,14 +70,14 @@ app.use("/api/customer-memberships", customerMembershipsRouter);
 app.get("/health", (req, res) => res.json({ ok: true }));
 
 /**
- * --- 404 handler for API routes (optional but helpful) ---
+ * --- 404 handler for API routes ---
  */
 app.use("/api", (req, res) => {
   res.status(404).json({ error: "Not found" });
 });
 
 /**
- * --- Global error handler (keeps crashes out of prod) ---
+ * --- Global error handler ---
  */
 app.use((err, req, res, next) => {
   console.error("Unhandled error:", err);
