@@ -9,6 +9,8 @@ const requireGoogleAuth = require("../middleware/requireGoogleAuth");
 const { upload, uploadErrorHandler } = require("../middleware/upload");
 const { uploadFileToR2, safeName } = require("../utils/r2");
 
+const fs = require("fs/promises");
+
 // ---------------------------------------------------------------------------
 // GET /api/staff?tenantSlug=&tenantId=&includeInactive=
 // ---------------------------------------------------------------------------
@@ -87,16 +89,18 @@ router.delete("/:id", requireAdmin, async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
-// POST /api/staff/:id/photo (admin-only upload)
+// POST /api/staff/:id/image (admin-only upload)
 // field name must be: "file"
-// Stores: staff.photo_url + staff.photo_key
+// NOTE: Frontend uses Next.js proxy that adds x-api-key, so this must be requireAdmin.
 // ---------------------------------------------------------------------------
 router.post(
-  "/:id/photo",
+  "/:id/image",
   requireAdmin,
   upload.single("file"),
   uploadErrorHandler,
   async (req, res) => {
+    let filePath = null;
+
     try {
       const id = Number(req.params.id);
       if (!Number.isFinite(id) || id <= 0) {
@@ -104,40 +108,34 @@ router.post(
       }
       if (!req.file) return res.status(400).json({ error: "No file uploaded" });
 
-      // Fetch tenant_id and old key
-      const cur = await db.query(
-        `SELECT tenant_id, photo_key FROM staff WHERE id = $1 LIMIT 1`,
-        [id]
-      );
-      if (!cur.rows.length) return res.status(404).json({ error: "Staff not found" });
+      filePath = req.file.path;
 
-      const tenantId = cur.rows[0].tenant_id;
-      const oldKey = cur.rows[0].photo_key || null;
-
-      const key = `tenants/${tenantId}/staff/${id}/photo/${Date.now()}-${safeName(
+      const key = `staff/${id}/image/${Date.now()}-${safeName(
         req.file.originalname
       )}`;
 
       const { url } = await uploadFileToR2({
-        filePath: req.file.path,
+        filePath,
         contentType: req.file.mimetype,
         key,
       });
 
       const result = await db.query(
-        "UPDATE staff SET photo_url=$1, photo_key=$2 WHERE id=$3 RETURNING *",
-        [url, key, id]
+        "UPDATE staff SET image_url=$1 WHERE id=$2 RETURNING *",
+        [url, id]
       );
 
-      if (oldKey && oldKey !== key) {
-        const { deleteFromR2 } = require("../utils/r2");
-        await deleteFromR2(oldKey).catch(() => {});
-      }
+      if (!result.rows.length) return res.status(404).json({ error: "Staff not found" });
 
-      res.json(result.rows[0]);
+      return res.json(result.rows[0]);
     } catch (err) {
-      console.error("Staff photo upload error:", err);
-      res.status(500).json({ error: "Upload failed" });
+      console.error("Staff image upload error:", err);
+      return res.status(500).json({ error: "Upload failed" });
+    } finally {
+      // prevent disk growth from temp upload files
+      if (filePath) {
+        await fs.unlink(filePath).catch(() => {});
+      }
     }
   }
 );
