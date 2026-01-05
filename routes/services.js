@@ -105,20 +105,32 @@ router.delete("/:id", requireAdmin, async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
-// POST /api/services/:id/image (Google auth + upload)
+// POST /api/services/:id/image (Admin only + upload)
 // field name must be: "file"
 // ---------------------------------------------------------------------------
 router.post(
   "/:id/image",
-  requireGoogleAuth,
+  requireAdmin,
   upload.single("file"),
   uploadErrorHandler,
   async (req, res) => {
     try {
       const id = Number(req.params.id);
+      if (!Number.isFinite(id) || id <= 0) {
+        return res.status(400).json({ error: "Invalid service id" });
+      }
       if (!req.file) return res.status(400).json({ error: "No file uploaded" });
 
-      const key = `services/${id}/image/${Date.now()}-${safeName(
+      const cur = await db.query(
+        `SELECT tenant_id, image_key FROM services WHERE id = $1 LIMIT 1`,
+        [id]
+      );
+      if (!cur.rows.length) return res.status(404).json({ error: "Service not found" });
+
+      const tenantId = cur.rows[0].tenant_id;
+      const oldKey = cur.rows[0].image_key || null;
+
+      const key = `tenants/${tenantId}/services/${id}/image/${Date.now()}-${safeName(
         req.file.originalname
       )}`;
 
@@ -129,9 +141,14 @@ router.post(
       });
 
       const result = await db.query(
-        "UPDATE services SET image_url=$1 WHERE id=$2 RETURNING *",
-        [url, id]
+        "UPDATE services SET image_url=$1, image_key=$2 WHERE id=$3 RETURNING *",
+        [url, key, id]
       );
+
+      if (oldKey && oldKey !== key) {
+        const { deleteFromR2 } = require("../utils/r2");
+        await deleteFromR2(oldKey).catch(() => {});
+      }
 
       res.json(result.rows[0]);
     } catch (err) {
