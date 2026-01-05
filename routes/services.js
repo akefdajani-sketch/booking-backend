@@ -5,16 +5,15 @@ const { pool } = require("../db");
 const db = pool;
 
 const requireAdmin = require("../middleware/requireAdmin");
-// NOTE: image uploads are admin-only via x-api-key; keep Google auth for other routes if needed.
-const requireGoogleAuth = require("../middleware/requireGoogleAuth");
+// Note: service data is public to support booking UI. Admin-only for mutations + uploads.
 const { upload, uploadErrorHandler } = require("../middleware/upload");
 const { uploadFileToR2, safeName } = require("../utils/r2");
 
-const fs = require("fs/promises");
-const fs = require("fs/promises");
+const fsp = require("fs/promises");
 
 // ---------------------------------------------------------------------------
 // GET /api/services?tenantSlug=&tenantId=&includeInactive=
+// Public (used by booking + owner UIs)
 // ---------------------------------------------------------------------------
 router.get("/", async (req, res) => {
   try {
@@ -31,14 +30,23 @@ router.get("/", async (req, res) => {
       where += ` WHERE t.slug = $${params.length}`;
     }
 
-    if (!includeInactive || includeInactive === "false") {
+    const include = includeInactive === "true" || includeInactive === true;
+    if (!include) {
       where += where ? " AND s.is_active = true" : " WHERE s.is_active = true";
     }
 
     const q = `
       SELECT
-        s.*,
-        t.slug AS tenant_slug
+        s.id,
+        s.tenant_id,
+        s.name,
+        s.duration_minutes,
+        s.price,
+        s.requires_staff,
+        s.requires_resource,
+        s.is_active,
+        s.image_url,
+        s.created_at
       FROM services s
       JOIN tenants t ON t.id = s.tenant_id
       ${where}
@@ -73,14 +81,14 @@ router.post("/", requireAdmin, async (req, res) => {
       INSERT INTO services
         (tenant_id, name, duration_minutes, price, requires_staff, requires_resource, is_active)
       VALUES
-        ($1, $2, $3, $4, $5, $6, $7)
+        ($1,$2,$3,$4,$5,$6,$7)
       RETURNING *
       `,
       [
-        tenant_id,
-        name,
-        duration_minutes ?? 60,
-        price ?? 0,
+        Number(tenant_id),
+        String(name || "").trim(),
+        Number(duration_minutes || 0),
+        price === null || price === undefined ? null : Number(price),
         !!requires_staff,
         !!requires_resource,
         is_active ?? true,
@@ -111,7 +119,6 @@ router.delete("/:id", requireAdmin, async (req, res) => {
 // ---------------------------------------------------------------------------
 // POST /api/services/:id/image (admin-only upload)
 // field name must be: "file"
-// NOTE: Frontend uses Next.js proxy that adds x-api-key, so this must be requireAdmin.
 // ---------------------------------------------------------------------------
 router.post(
   "/:id/image",
@@ -119,15 +126,15 @@ router.post(
   upload.single("file"),
   uploadErrorHandler,
   async (req, res) => {
+    const id = Number(req.params.id);
+
+    if (!req.file) {
+      return res.status(400).json({ error: "No file uploaded (field name: file)" });
+    }
+
     let filePath = null;
 
     try {
-      const id = Number(req.params.id);
-      if (!Number.isFinite(id) || id <= 0) {
-        return res.status(400).json({ error: "Invalid service id" });
-      }
-
-      if (!req.file) return res.status(400).json({ error: "No file uploaded" });
       filePath = req.file.path;
 
       const key = `services/${id}/image/${Date.now()}-${safeName(
@@ -145,17 +152,15 @@ router.post(
         [url, id]
       );
 
-      if (!result.rows.length) return res.status(404).json({ error: "Service not found" });
-
-      // Return row directly (frontend supports both row or {service: row})
-      return res.json(result.rows[0]);
+      res.json(result.rows[0]);
     } catch (err) {
       console.error("Service image upload error:", err);
-      return res.status(500).json({ error: "Upload failed" });
+      res.status(500).json({ error: "Upload failed" });
     } finally {
-      // prevent disk growth from temp upload files
       if (filePath) {
-        await fs.unlink(filePath).catch(() => {});
+        try {
+          await fsp.unlink(filePath);
+        } catch (_) {}
       }
     }
   }
