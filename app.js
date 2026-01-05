@@ -39,7 +39,7 @@ app.use(express.urlencoded({ extended: true }));
 app.use(
   "/uploads",
   express.static(uploadDir, {
-    fallthrough: false,
+    fallthrough: true,
     setHeaders: (res) => {
       res.setHeader("X-Content-Type-Options", "nosniff");
       res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
@@ -80,6 +80,9 @@ app.use("/api", (req, res) => {
  * --- Global error handler ---
  */
 app.use((err, req, res, next) => {
+  if (err && err.code === "ENOENT" && req.originalUrl && req.originalUrl.startsWith("/uploads")) {
+    return res.status(404).end();
+  }
   console.error("Unhandled error:", err);
   res.status(500).json({ error: "Internal server error" });
 });
