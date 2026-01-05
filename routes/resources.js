@@ -9,6 +9,8 @@ const requireGoogleAuth = require("../middleware/requireGoogleAuth");
 const { upload, uploadErrorHandler } = require("../middleware/upload");
 const { uploadFileToR2, safeName } = require("../utils/r2");
 
+const fs = require("fs/promises");
+
 // ---------------------------------------------------------------------------
 // GET /api/resources?tenantSlug=&tenantId=&includeInactive=
 // ---------------------------------------------------------------------------
@@ -88,8 +90,9 @@ router.delete("/:id", requireAdmin, async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
-// POST /api/resources/:id/image (Admin only + upload)
+// POST /api/resources/:id/image (admin-only upload)
 // field name must be: "file"
+// NOTE: Frontend uses Next.js proxy that adds x-api-key, so this must be requireAdmin.
 // ---------------------------------------------------------------------------
 router.post(
   "/:id/image",
@@ -97,6 +100,8 @@ router.post(
   upload.single("file"),
   uploadErrorHandler,
   async (req, res) => {
+    let filePath = null;
+
     try {
       const id = Number(req.params.id);
       if (!Number.isFinite(id) || id <= 0) {
@@ -104,42 +109,37 @@ router.post(
       }
       if (!req.file) return res.status(400).json({ error: "No file uploaded" });
 
-      const cur = await db.query(
-        `SELECT tenant_id, image_key FROM resources WHERE id = $1 LIMIT 1`,
-        [id]
-      );
-      if (!cur.rows.length) return res.status(404).json({ error: "Resource not found" });
+      filePath = req.file.path;
 
-      const tenantId = cur.rows[0].tenant_id;
-      const oldKey = cur.rows[0].image_key || null;
-
-      const key = `tenants/${tenantId}/resources/${id}/image/${Date.now()}-${safeName(
+      const key = `resources/${id}/image/${Date.now()}-${safeName(
         req.file.originalname
       )}`;
 
       const { url } = await uploadFileToR2({
-        filePath: req.file.path,
+        filePath,
         contentType: req.file.mimetype,
         key,
       });
 
       const result = await db.query(
-        "UPDATE resources SET image_url=$1, image_key=$2 WHERE id=$3 RETURNING *",
-        [url, key, id]
+        "UPDATE resources SET image_url=$1 WHERE id=$2 RETURNING *",
+        [url, id]
       );
 
-      if (oldKey && oldKey !== key) {
-        const { deleteFromR2 } = require("../utils/r2");
-        await deleteFromR2(oldKey).catch(() => {});
-      }
+      if (!result.rows.length)
+        return res.status(404).json({ error: "Resource not found" });
 
-      res.json(result.rows[0]);
+      return res.json(result.rows[0]);
     } catch (err) {
       console.error("Resource image upload error:", err);
-      res.status(500).json({ error: "Upload failed" });
+      return res.status(500).json({ error: "Upload failed" });
+    } finally {
+      // prevent disk growth from temp upload files
+      if (filePath) {
+        await fs.unlink(filePath).catch(() => {});
+      }
     }
   }
 );
-
 
 module.exports = router;
