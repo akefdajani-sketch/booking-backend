@@ -1,39 +1,45 @@
 // routes/services.js
 const express = require("express");
 const router = express.Router();
+
 const { pool } = require("../db");
 const db = pool;
 
 const requireAdmin = require("../middleware/requireAdmin");
-// Note: service data is public to support booking UI. Admin-only for mutations + uploads.
+
+// Upload middleware (multer) + error handler
 const { upload, uploadErrorHandler } = require("../middleware/upload");
+
+// Cloudflare R2 helper
 const { uploadFileToR2, safeName } = require("../utils/r2");
 
 const fsp = require("fs/promises");
 
 // ---------------------------------------------------------------------------
-// GET /api/services?tenantSlug=&tenantId=&includeInactive=
-// Public (used by booking + owner UIs)
+// GET /api/services?tenantSlug=&tenantId=&includeInactive=1
+// Public (used by booking UI + owner setup UI)
 // ---------------------------------------------------------------------------
 router.get("/", async (req, res) => {
   try {
     const { tenantSlug, tenantId, includeInactive } = req.query;
 
+    const where = [];
     const params = [];
-    let where = "";
 
     if (tenantId) {
       params.push(Number(tenantId));
-      where += ` WHERE s.tenant_id = $${params.length}`;
+      where.push(`s.tenant_id = $${params.length}`);
     } else if (tenantSlug) {
       params.push(String(tenantSlug));
-      where += ` WHERE t.slug = $${params.length}`;
+      where.push(`t.slug = $${params.length}`);
     }
 
-    const include = includeInactive === "true" || includeInactive === true;
-    if (!include) {
-      where += where ? " AND s.is_active = true" : " WHERE s.is_active = true";
+    // default: only active services unless includeInactive=1
+    if (!includeInactive || String(includeInactive) !== "1") {
+      where.push(`COALESCE(s.is_active, true) = true`);
     }
+
+    const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
 
     const q = `
       SELECT
@@ -41,84 +47,114 @@ router.get("/", async (req, res) => {
         s.tenant_id,
         s.name,
         s.duration_minutes,
-        s.price,
-        s.requires_staff,
-        s.requires_resource,
-        s.is_active,
-        s.image_url,
-        s.created_at
+        s.price_jd,
+        COALESCE(s.requires_staff, false)    AS requires_staff,
+        COALESCE(s.requires_resource, false) AS requires_resource,
+        COALESCE(s.is_active, true)          AS is_active,
+        s.image_url
       FROM services s
       JOIN tenants t ON t.id = s.tenant_id
-      ${where}
+      ${whereSql}
       ORDER BY s.id DESC
     `;
 
-    const result = await db.query(q, params);
-    res.json({ services: result.rows });
+    const { rows } = await db.query(q, params);
+    return res.json(rows);
   } catch (err) {
-    console.error("GET /api/services error:", err);
-    res.status(500).json({ error: "Failed to fetch services" });
+    console.error("Error loading services:", err);
+    return res.status(500).json({ error: "Failed to load services" });
   }
 });
 
 // ---------------------------------------------------------------------------
-// POST /api/services (admin-only create)
+// POST /api/services
+// Admin-only create
+// Body: { tenantSlug | tenantId, name, duration_minutes, price_jd, requires_staff, requires_resource }
 // ---------------------------------------------------------------------------
 router.post("/", requireAdmin, async (req, res) => {
   try {
     const {
-      tenant_id,
+      tenantSlug,
+      tenantId,
       name,
       duration_minutes,
-      price,
+      price_jd,
       requires_staff,
       requires_resource,
       is_active,
-    } = req.body;
+    } = req.body || {};
 
-    const result = await db.query(
-      `
+    if (!name || String(name).trim().length === 0) {
+      return res.status(400).json({ error: "name is required" });
+    }
+
+    let tenant_id = tenantId ? Number(tenantId) : null;
+
+    if (!tenant_id && tenantSlug) {
+      const t = await db.query("SELECT id FROM tenants WHERE slug = $1", [
+        String(tenantSlug),
+      ]);
+      tenant_id = t.rows?.[0]?.id ?? null;
+    }
+
+    if (!tenant_id) {
+      return res.status(400).json({ error: "tenantId or tenantSlug is required" });
+    }
+
+    const q = `
       INSERT INTO services
-        (tenant_id, name, duration_minutes, price, requires_staff, requires_resource, is_active)
+        (tenant_id, name, duration_minutes, price_jd, requires_staff, requires_resource, is_active)
       VALUES
-        ($1,$2,$3,$4,$5,$6,$7)
-      RETURNING *
-      `,
-      [
-        Number(tenant_id),
-        String(name || "").trim(),
-        Number(duration_minutes || 0),
-        price === null || price === undefined ? null : Number(price),
-        !!requires_staff,
-        !!requires_resource,
-        is_active ?? true,
-      ]
-    );
+        ($1, $2, $3, $4, $5, $6, $7)
+      RETURNING
+        id, tenant_id, name, duration_minutes, price_jd,
+        COALESCE(requires_staff,false) AS requires_staff,
+        COALESCE(requires_resource,false) AS requires_resource,
+        COALESCE(is_active,true) AS is_active,
+        image_url
+    `;
 
-    res.json(result.rows[0]);
+    const params = [
+      tenant_id,
+      String(name).trim(),
+      duration_minutes == null ? null : Number(duration_minutes),
+      price_jd == null ? null : Number(price_jd),
+      !!requires_staff,
+      !!requires_resource,
+      is_active == null ? true : !!is_active,
+    ];
+
+    const { rows } = await db.query(q, params);
+    return res.status(201).json(rows[0]);
   } catch (err) {
-    console.error("POST /api/services error:", err);
-    res.status(500).json({ error: "Failed to create service" });
+    console.error("Error creating service:", err);
+    return res.status(500).json({ error: "Failed to create service" });
   }
 });
 
 // ---------------------------------------------------------------------------
-// DELETE /api/services/:id (admin-only delete)
+// DELETE /api/services/:id
+// Admin-only delete
 // ---------------------------------------------------------------------------
 router.delete("/:id", requireAdmin, async (req, res) => {
   try {
     const id = Number(req.params.id);
-    await db.query(`DELETE FROM services WHERE id=$1`, [id]);
-    res.json({ ok: true });
+    if (!id) return res.status(400).json({ error: "invalid id" });
+
+    // Optional: if you track image_key in DB and want to delete from R2 too,
+    // add it here. For now we just delete the row.
+    await db.query("DELETE FROM services WHERE id = $1", [id]);
+    return res.json({ ok: true });
   } catch (err) {
-    console.error("DELETE /api/services/:id error:", err);
-    res.status(500).json({ error: "Failed to delete service" });
+    console.error("Error deleting service:", err);
+    return res.status(500).json({ error: "Failed to delete service" });
   }
 });
 
 // ---------------------------------------------------------------------------
 // POST /api/services/:id/image (admin-only upload)
 // field name must be: "file"
+// Saves to R2 and persists URL/key on services row.
 // ---------------------------------------------------------------------------
 router.post(
   "/:id/image",
@@ -128,40 +164,65 @@ router.post(
   async (req, res) => {
     const id = Number(req.params.id);
 
-    if (!req.file) {
-      return res.status(400).json({ error: "No file uploaded (field name: file)" });
-    }
+    if (!id) return res.status(400).json({ error: "invalid id" });
+    if (!req.file) return res.status(400).json({ error: "file is required" });
 
-    let filePath = null;
+    const tmpPath = req.file.path;
 
     try {
-      filePath = req.file.path;
+      // Fetch tenant slug + service name (for naming)
+      const meta = await db.query(
+        `
+        SELECT s.id, s.name AS service_name, t.slug AS tenant_slug
+        FROM services s
+        JOIN tenants t ON t.id = s.tenant_id
+        WHERE s.id = $1
+        `,
+        [id]
+      );
 
-      const key = `services/${id}/image/${Date.now()}-${safeName(
-        req.file.originalname
-      )}`;
+      if (!meta.rows.length) return res.status(404).json({ error: "not found" });
+
+      const { tenant_slug, service_name } = meta.rows[0];
+
+      const safeTenant = safeName(tenant_slug || "tenant");
+      const safeService = safeName(service_name || `service-${id}`);
+
+      // Keep a stable folder structure for multi-tenant
+      const key = `tenants/${safeTenant}/services/${id}-${safeService}-${Date.now()}`;
 
       const { url } = await uploadFileToR2({
-        filePath,
+        filePath: tmpPath,
         contentType: req.file.mimetype,
         key,
       });
 
-      const result = await db.query(
-        "UPDATE services SET image_url=$1 WHERE id=$2 RETURNING *",
-        [url, id]
+      // If you don't have image_key in DB, remove it from the query.
+      const upd = await db.query(
+        `
+        UPDATE services
+        SET image_url = $2,
+            image_key = $3
+        WHERE id = $1
+        RETURNING id, image_url
+        `,
+        [id, url, key]
       );
 
-      res.json(result.rows[0]);
+      return res.json({
+        ok: true,
+        id: upd.rows?.[0]?.id ?? id,
+        image_url: upd.rows?.[0]?.image_url ?? url,
+        image_key: key,
+      });
     } catch (err) {
-      console.error("Service image upload error:", err);
-      res.status(500).json({ error: "Upload failed" });
+      console.error("Error uploading service image:", err);
+      return res.status(500).json({ error: "Upload failed" });
     } finally {
-      if (filePath) {
-        try {
-          await fsp.unlink(filePath);
-        } catch (_) {}
-      }
+      // Always clean up temp file
+      try {
+        await fsp.unlink(tmpPath);
+      } catch (_) {}
     }
   }
 );
