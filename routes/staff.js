@@ -87,20 +87,34 @@ router.delete("/:id", requireAdmin, async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
-// POST /api/staff/:id/image (Google auth + upload)
+// POST /api/staff/:id/photo (admin-only upload)
 // field name must be: "file"
+// Stores: staff.photo_url + staff.photo_key
 // ---------------------------------------------------------------------------
 router.post(
-  "/:id/image",
-  requireGoogleAuth,
+  "/:id/photo",
+  requireAdmin,
   upload.single("file"),
   uploadErrorHandler,
   async (req, res) => {
     try {
       const id = Number(req.params.id);
+      if (!Number.isFinite(id) || id <= 0) {
+        return res.status(400).json({ error: "Invalid staff id" });
+      }
       if (!req.file) return res.status(400).json({ error: "No file uploaded" });
 
-      const key = `staff/${id}/image/${Date.now()}-${safeName(
+      // Fetch tenant_id and old key
+      const cur = await db.query(
+        `SELECT tenant_id, photo_key FROM staff WHERE id = $1 LIMIT 1`,
+        [id]
+      );
+      if (!cur.rows.length) return res.status(404).json({ error: "Staff not found" });
+
+      const tenantId = cur.rows[0].tenant_id;
+      const oldKey = cur.rows[0].photo_key || null;
+
+      const key = `tenants/${tenantId}/staff/${id}/photo/${Date.now()}-${safeName(
         req.file.originalname
       )}`;
 
@@ -111,13 +125,18 @@ router.post(
       });
 
       const result = await db.query(
-        "UPDATE staff SET image_url=$1 WHERE id=$2 RETURNING *",
-        [url, id]
+        "UPDATE staff SET photo_url=$1, photo_key=$2 WHERE id=$3 RETURNING *",
+        [url, key, id]
       );
+
+      if (oldKey && oldKey !== key) {
+        const { deleteFromR2 } = require("../utils/r2");
+        await deleteFromR2(oldKey).catch(() => {});
+      }
 
       res.json(result.rows[0]);
     } catch (err) {
-      console.error("Staff image upload error:", err);
+      console.error("Staff photo upload error:", err);
       res.status(500).json({ error: "Upload failed" });
     }
   }
