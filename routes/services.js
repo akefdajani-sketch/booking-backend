@@ -46,8 +46,12 @@ router.get("/", async (req, res) => {
         s.id,
         s.tenant_id,
         s.name,
+        s.description,
         s.duration_minutes,
         s.price_jd,
+        s.slot_interval_minutes AS slot_interval_minutes,
+        s.max_consecutive_slots AS max_consecutive_slots,
+        s.max_parallel_bookings AS max_parallel_bookings,
         COALESCE(s.requires_staff, false)    AS requires_staff,
         COALESCE(s.requires_resource, false) AS requires_resource,
         COALESCE(s.is_active, true)          AS is_active,
@@ -77,8 +81,12 @@ router.post("/", requireAdmin, async (req, res) => {
       tenantSlug,
       tenantId,
       name,
+	      description,
       duration_minutes,
       price_jd,
+	      slot_interval_minutes,
+	      max_consecutive_slots,
+	      max_parallel_bookings,
       requires_staff,
       requires_resource,
       is_active,
@@ -103,11 +111,31 @@ router.post("/", requireAdmin, async (req, res) => {
 
     const q = `
       INSERT INTO services
-        (tenant_id, name, duration_minutes, price_jd, requires_staff, requires_resource, is_active)
+        (
+          tenant_id,
+          name,
+          description,
+          duration_minutes,
+          price_jd,
+          slot_interval_minutes,
+          max_consecutive_slots,
+          max_parallel_bookings,
+          requires_staff,
+          requires_resource,
+          is_active
+        )
       VALUES
-        ($1, $2, $3, $4, $5, $6, $7)
+        ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
       RETURNING
-        id, tenant_id, name, duration_minutes, price_jd,
+        id,
+        tenant_id,
+        name,
+        description,
+        duration_minutes,
+        price_jd,
+        slot_interval_minutes,
+        max_consecutive_slots,
+        max_parallel_bookings,
         COALESCE(requires_staff,false) AS requires_staff,
         COALESCE(requires_resource,false) AS requires_resource,
         COALESCE(is_active,true) AS is_active,
@@ -117,8 +145,12 @@ router.post("/", requireAdmin, async (req, res) => {
     const params = [
       tenant_id,
       String(name).trim(),
+      description == null ? null : String(description).trim(),
       duration_minutes == null ? null : Number(duration_minutes),
       price_jd == null ? null : Number(price_jd),
+      slot_interval_minutes == null ? null : Number(slot_interval_minutes),
+      max_consecutive_slots == null ? null : Number(max_consecutive_slots),
+      max_parallel_bookings == null ? null : Number(max_parallel_bookings),
       !!requires_staff,
       !!requires_resource,
       is_active == null ? true : !!is_active,
