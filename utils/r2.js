@@ -2,13 +2,14 @@
 // Cloudflare R2 (S3-compatible) helper.
 //
 // Key points:
-// - Uses AWS SDK S3 client pointed at R2_ENDPOINT
-// - Builds PUBLIC URLs using R2_PUBLIC_BASE_URL (recommended) or falls back to R2_ENDPOINT
+// - Uses AWS SDK v3 S3 client pointed at R2_ENDPOINT (S3 API endpoint)
+// - Builds PUBLIC URLs using R2_PUBLIC_BASE_URL (your R2.dev or custom public domain)
 // - Avoids encoding '/' into '%2F' by encoding path segments only
 // - Provides safeName() used by upload routes
 // - Best-effort cleanup of temp uploads
 
-const fs = require("fs/promises");
+const fsp = require("fs/promises");
+const fs = require("fs");
 const { S3Client, PutObjectCommand, DeleteObjectCommand } = require("@aws-sdk/client-s3");
 
 function mustEnv(name) {
@@ -42,6 +43,8 @@ function getS3Client() {
   return new S3Client({
     region,
     endpoint,
+    // R2 works best with path-style addressing when using a custom endpoint.
+    forcePathStyle: true,
     credentials: {
       accessKeyId: mustEnv("R2_ACCESS_KEY_ID"),
       secretAccessKey: mustEnv("R2_SECRET_ACCESS_KEY"),
@@ -66,7 +69,23 @@ function publicUrlForKey(key) {
 
   if (base) return `${base}/${safePath}`;
 
+  // If you do not provide a public base URL, don't silently return the S3 endpoint
+  // (it usually won't serve public objects). Fail loudly so it's fixed once.
   const endpoint = sanitizeEndpoint(mustEnv("R2_ENDPOINT")).replace(/\/+$/g, "");
+  try {
+    const host = new URL(endpoint).hostname;
+    if (/\.r2\.cloudflarestorage\.com$/i.test(host)) {
+      throw new Error(
+        "R2_PUBLIC_BASE_URL is required to build public image URLs (use your *.r2.dev or custom domain)."
+      );
+    }
+  } catch {
+    // If endpoint isn't a valid URL (shouldn't happen after sanitize), still fail.
+    throw new Error(
+      "R2_PUBLIC_BASE_URL is required to build public image URLs (use your *.r2.dev or custom domain)."
+    );
+  }
+
   return `${endpoint}/${safePath}`;
 }
 
@@ -75,14 +94,16 @@ async function uploadFileToR2({ filePath, key, contentType }) {
   if (!key) throw new Error("uploadFileToR2: key is required");
 
   try {
-    await fs.access(filePath);
+    await fsp.access(filePath);
   } catch {
     throw new Error(`uploadFileToR2: temp file does not exist at ${filePath}`);
   }
 
   const Bucket = mustEnv("R2_BUCKET");
   const client = getS3Client();
-  const Body = await fs.readFile(filePath);
+
+  // Stream the file to avoid loading it fully into memory.
+  const Body = fs.createReadStream(filePath);
 
   try {
     await client.send(
@@ -96,7 +117,7 @@ async function uploadFileToR2({ filePath, key, contentType }) {
     );
   } finally {
     // Best-effort cleanup of temp file
-    await fs.unlink(filePath).catch(() => {});
+    await fsp.unlink(filePath).catch(() => {});
   }
 
   return { key, url: publicUrlForKey(key) };
