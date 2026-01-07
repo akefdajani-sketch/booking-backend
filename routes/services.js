@@ -229,23 +229,40 @@ router.post(
         key,
       });
 
-      // If you don't have image_key in DB, remove it from the query.
-      const upd = await db.query(
+      // DB compatibility: some deployments don't have services.image_key.
+      // Detect columns at runtime and only update what exists.
+      const cols = await db.query(
         `
-        UPDATE services
-        SET image_url = $2,
-            image_key = $3
-        WHERE id = $1
-        RETURNING id, image_url
-        `,
-        [id, url, key]
+        SELECT column_name
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'services'
+          AND column_name IN ('image_url','image_key')
+        `
+      );
+      const have = new Set(cols.rows.map((r) => r.column_name));
+      if (!have.has('image_url')) {
+        return res.status(500).json({ error: "DB misconfigured: services.image_url is missing" });
+      }
+
+      // Build UPDATE dynamically.
+      const sets = ["image_url = $2"]; // url
+      const params = [id, url];
+      if (have.has('image_key')) {
+        sets.push("image_key = $3");
+        params.push(key);
+      }
+
+      const upd = await db.query(
+        `UPDATE services SET ${sets.join(", ")} WHERE id = $1 RETURNING id, image_url${have.has('image_key') ? ', image_key' : ''}`,
+        params
       );
 
       return res.json({
         ok: true,
         id: upd.rows?.[0]?.id ?? id,
         image_url: upd.rows?.[0]?.image_url ?? url,
-        image_key: key,
+        ...(have.has('image_key') ? { image_key: upd.rows?.[0]?.image_key ?? key } : {}),
       });
     } catch (err) {
       console.error("Error uploading service image:", err);
