@@ -110,7 +110,13 @@ router.post(
 
       filePath = req.file.path;
 
-      const key = `staff/${id}/image/${Date.now()}-${safeName(
+      // Resolve tenant_id for clean multi-tenant key structure
+      const staffRow = await db.query("SELECT tenant_id FROM staff WHERE id=$1", [id]);
+      const tenantId = staffRow.rows?.[0]?.tenant_id;
+      if (!tenantId) return res.status(404).json({ error: "Staff not found" });
+
+      // Treat this as the staff avatar upload: update BOTH avatar_url + image_url
+      const key = `tenants/${tenantId}/staff/${id}/avatar/${Date.now()}-${safeName(
         req.file.originalname
       )}`;
 
@@ -121,7 +127,7 @@ router.post(
       });
 
       const result = await db.query(
-        "UPDATE staff SET image_url=$1 WHERE id=$2 RETURNING *",
+        "UPDATE staff SET avatar_url=$1, image_url=$1 WHERE id=$2 RETURNING *",
         [url, id]
       );
 
