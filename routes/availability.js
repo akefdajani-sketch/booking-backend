@@ -132,7 +132,13 @@ router.get("/", async (req, res) => {
     const maxParallel = Number(service.max_parallel_bookings) || 1;
 
     const reqStaff = !!service.requires_staff;
-    const reqResource = !!service.requires_resource;
+    const reqResource = !!service.requires_resource
+
+    const rawBasis = service.availability_basis ? String(service.availability_basis).toLowerCase() : "";
+    const derivedBasis = reqStaff && reqResource ? "both" : reqStaff ? "staff" : reqResource ? "resource" : "none";
+    // If DB stores 'auto' or NULL, fall back to derived basis from requires_* flags.
+    const availabilityBasis = rawBasis && rawBasis !== "auto" ? rawBasis : derivedBasis;
+;
 
     // If the service requires staff/resource but none selected yet, return "no slots" (same UX as public flow)
     if (reqStaff && !staffId) {
@@ -148,6 +154,8 @@ router.get("/", async (req, res) => {
           max_parallel_bookings: maxParallel,
           requires_staff: reqStaff,
           requires_resource: reqResource,
+        availability_basis: availabilityBasis,
+        derived_basis: derivedBasis,
           reason: "staff_required",
         },
       });
@@ -165,7 +173,49 @@ router.get("/", async (req, res) => {
           max_parallel_bookings: maxParallel,
           requires_staff: reqStaff,
           requires_resource: reqResource,
+        availability_basis: availabilityBasis,
+        derived_basis: derivedBasis,
           reason: "resource_required",
+        },
+      });
+    }
+
+    // Additional requirement: availability basis may require staff/resource even if the service flags don't.
+    if ((availabilityBasis === "resource" || availabilityBasis === "both") && !resourceId) {
+      return res.json({
+        tenantId,
+        tenantSlug: tenantSlug ?? null,
+        date,
+        times: [],
+        slots: [],
+        meta: {
+          duration_minutes: durationMin,
+          slot_interval_minutes: stepMin,
+          max_parallel_bookings: maxParallel,
+          requires_staff: reqStaff,
+          requires_resource: reqResource,
+          availability_basis: availabilityBasis,
+          derived_basis: derivedBasis,
+          reason: "resource_required_for_availability",
+        },
+      });
+    }
+    if ((availabilityBasis === "staff" || availabilityBasis === "both") && !staffId) {
+      return res.json({
+        tenantId,
+        tenantSlug: tenantSlug ?? null,
+        date,
+        times: [],
+        slots: [],
+        meta: {
+          duration_minutes: durationMin,
+          slot_interval_minutes: stepMin,
+          max_parallel_bookings: maxParallel,
+          requires_staff: reqStaff,
+          requires_resource: reqResource,
+          availability_basis: availabilityBasis,
+          derived_basis: derivedBasis,
+          reason: "staff_required_for_availability",
         },
       });
     }
@@ -210,6 +260,8 @@ router.get("/", async (req, res) => {
           max_parallel_bookings: maxParallel,
           requires_staff: reqStaff,
           requires_resource: reqResource,
+        availability_basis: availabilityBasis,
+        derived_basis: derivedBasis,
           reason: "tenant_closed",
         },
       });
@@ -235,6 +287,8 @@ router.get("/", async (req, res) => {
           max_parallel_bookings: maxParallel,
           requires_staff: reqStaff,
           requires_resource: reqResource,
+        availability_basis: availabilityBasis,
+        derived_basis: derivedBasis,
           reason: "invalid_working_hours",
           open_time: openTime,
           close_time: closeTime,
@@ -274,21 +328,10 @@ while (cursor + stepMin <= closeMin) {
 
       // Build a timestamptz range in the tenant's timezone.
       // candidateStart/candidateEnd are "local" wall-clock times, converted via AT TIME ZONE.
-      const params = [tenantId, candidateStart, candidateEnd, tenantTz];
-      let whereExtra = "";
+      
+      const baseParams = [tenantId, candidateStart, candidateEnd, tenantTz];
 
-      if (reqStaff && staffId) {
-        params.push(staffId);
-        whereExtra += ` AND staff_id = $${params.length}`;
-      }
-      if (reqResource && resourceId) {
-        params.push(resourceId);
-        whereExtra += ` AND resource_id = $${params.length}`;
-      }
-
-      // Overlap (range): existing.booking_range && candidateRange
-      const overlapResult = await pool.query(
-        `
+      const overlapBaseSql = `
         SELECT COUNT(*)::int AS count
         FROM bookings
         WHERE tenant_id = $1
@@ -298,21 +341,48 @@ while (cursor + stepMin <= closeMin) {
             ($3::timestamp AT TIME ZONE $4),
             '[)'
           )
-          ${whereExtra}
-        `,
-        params
-      );
+      `;
 
-      const overlapsCount = overlapResult.rows[0]?.count ?? 0;
-      const isAvailable = overlapsCount < maxParallel;
+      let overlapsResource = 0;
+      let overlapsStaff = 0;
 
-      const slotObj = {
+      if (availabilityBasis === "resource" || availabilityBasis === "both") {
+        const params = [...baseParams, resourceId];
+        const r = await pool.query(`${overlapBaseSql} AND resource_id = $5`, params);
+        overlapsResource = r.rows[0]?.count ?? 0;
+      }
+
+      if (availabilityBasis === "staff" || availabilityBasis === "both") {
+        const params = [...baseParams, staffId];
+        const r = await pool.query(`${overlapBaseSql} AND staff_id = $5`, params);
+        overlapsStaff = r.rows[0]?.count ?? 0;
+      }
+
+      // Final availability decision
+      let isAvailable = true;
+      if (availabilityBasis === "resource") {
+        isAvailable = overlapsResource < maxParallel;
+      } else if (availabilityBasis === "staff") {
+        isAvailable = overlapsStaff < maxParallel;
+      } else if (availabilityBasis === "both") {
+        isAvailable = overlapsResource < maxParallel && overlapsStaff < maxParallel;
+      } else {
+        // "none" => always available (still bounded by working hours + max_consecutive on the UI)
+        isAvailable = true;
+      }
+
+      const overlapsCount = availabilityBasis === "both"
+        ? Math.max(overlapsResource, overlapsStaff)
+        : (availabilityBasis === "staff" ? overlapsStaff : overlapsResource);
+const slotObj = {
         time: startHHMM,
         label: startHHMM,
         is_available: isAvailable,
         available: isAvailable,
         // helpful for UI + debugging
         overlaps: overlapsCount,
+        overlaps_resource: overlapsResource,
+        overlaps_staff: overlapsStaff,
         capacity: maxParallel,
       };
 
@@ -334,6 +404,8 @@ while (cursor + stepMin <= closeMin) {
         max_parallel_bookings: maxParallel,
         requires_staff: reqStaff,
         requires_resource: reqResource,
+        availability_basis: availabilityBasis,
+        derived_basis: derivedBasis,
         staffId: staffId ?? null,
         resourceId: resourceId ?? null,
         used_default_hours: usedDefaultHours,
