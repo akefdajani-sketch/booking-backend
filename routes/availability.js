@@ -87,16 +87,25 @@ router.get("/", async (req, res) => {
 
     // 1) Resolve tenantId (supports either tenantId or tenantSlug)
     let tenantId = tenantIdRaw != null && tenantIdRaw !== "" ? Number(tenantIdRaw) : null;
+    // Tenant timezone (used to convert local candidate times into timestamptz ranges)
+    let tenantTz = "UTC";
 
     if (!tenantId) {
       const tenantResult = await pool.query(
-        "SELECT id, slug FROM tenants WHERE slug = $1",
+        "SELECT id, slug, timezone FROM tenants WHERE slug = $1",
         [tenantSlug]
       );
       if (tenantResult.rows.length === 0) {
         return res.status(404).json({ error: "Tenant not found" });
       }
       tenantId = Number(tenantResult.rows[0].id);
+      tenantTz = tenantResult.rows[0]?.timezone || "UTC";
+    }
+
+    // If tenantId was provided directly, fetch timezone
+    if (tenantId && tenantTz === "UTC") {
+      const tzResult = await pool.query("SELECT timezone FROM tenants WHERE id = $1", [tenantId]);
+      tenantTz = tzResult.rows[0]?.timezone || "UTC";
     }
 
     if (!Number.isFinite(tenantId) || !Number.isFinite(serviceId)) {
@@ -247,9 +256,11 @@ if (isOvernight) closeMin += 24 * 60;
 
 let cursor = openMin;
 
-while (cursor + durationMin <= closeMin) {
+// Pills represent slot *segments* (slot_interval_minutes), not full service durations.
+// So build candidates at stepMin granularity and mark each segment unavailable if it overlaps.
+while (cursor + stepMin <= closeMin) {
   const startOffsetDays = Math.floor(cursor / (24 * 60));
-  const endCursor = cursor + durationMin;
+  const endCursor = cursor + stepMin;
   const endOffsetDays = Math.floor(endCursor / (24 * 60));
 
   const startHHMM = minutesToHHMM(cursor % (24 * 60));
@@ -260,7 +271,10 @@ while (cursor + durationMin <= closeMin) {
 
   const candidateStart = `${startDateISO} ${startHHMM}:00`;
   const candidateEnd = `${endDateISO} ${endHHMM}:00`;
-const params = [tenantId, candidateEnd, candidateStart];
+
+      // Build a timestamptz range in the tenant's timezone.
+      // candidateStart/candidateEnd are "local" wall-clock times, converted via AT TIME ZONE.
+      const params = [tenantId, candidateStart, candidateEnd, tenantTz];
       let whereExtra = "";
 
       if (reqStaff && staffId) {
@@ -272,15 +286,18 @@ const params = [tenantId, candidateEnd, candidateStart];
         whereExtra += ` AND resource_id = $${params.length}`;
       }
 
-      // Overlap: existing.start < candidateEnd AND existing.end > candidateStart
+      // Overlap (range): existing.booking_range && candidateRange
       const overlapResult = await pool.query(
         `
         SELECT COUNT(*)::int AS count
         FROM bookings
         WHERE tenant_id = $1
-          AND start_time < $2
-          AND (start_time + (duration_minutes || ' minutes')::interval) > $3
-          AND status NOT IN ('cancelled')
+          AND status IN ('pending','confirmed')
+          AND booking_range && tstzrange(
+            ($2::timestamp AT TIME ZONE $4),
+            ($3::timestamp AT TIME ZONE $4),
+            '[)'
+          )
           ${whereExtra}
         `,
         params
