@@ -7,6 +7,15 @@ const db = pool;
 
 const requireAdmin = require("../middleware/requireAdmin");
 
+const ALLOWED_AVAILABILITY_BASIS = new Set(["auto","resource","staff","both","none"]);
+function normalizeAvailabilityBasis(v) {
+  if (v == null || v === "") return null;
+  const s = String(v).toLowerCase().trim();
+  if (!ALLOWED_AVAILABILITY_BASIS.has(s)) return null;
+  return s;
+}
+
+
 // Upload middleware (multer) + error handler
 const { upload, uploadErrorHandler } = require("../middleware/upload");
 
@@ -54,6 +63,7 @@ router.get("/", async (req, res) => {
         s.max_parallel_bookings AS max_parallel_bookings,
         COALESCE(s.requires_staff, false)    AS requires_staff,
         COALESCE(s.requires_resource, false) AS requires_resource,
+        s.availability_basis                AS availability_basis,
         COALESCE(s.is_active, true)          AS is_active,
         s.image_url
       FROM services s
@@ -89,8 +99,14 @@ router.post("/", requireAdmin, async (req, res) => {
 	      max_parallel_bookings,
       requires_staff,
       requires_resource,
+      availability_basis,
       is_active,
     } = req.body || {};
+
+    const ab = normalizeAvailabilityBasis(availability_basis);
+    if (availability_basis != null && availability_basis !== "" && ab == null) {
+      return res.status(400).json({ error: "Invalid availability_basis" });
+    }
 
     if (!name || String(name).trim().length === 0) {
       return res.status(400).json({ error: "name is required" });
@@ -122,6 +138,7 @@ router.post("/", requireAdmin, async (req, res) => {
           max_parallel_bookings,
           requires_staff,
           requires_resource,
+          availability_basis,
           is_active
         )
       VALUES
@@ -153,6 +170,7 @@ router.post("/", requireAdmin, async (req, res) => {
       max_parallel_bookings == null ? null : Number(max_parallel_bookings),
       !!requires_staff,
       !!requires_resource,
+      ab,
       is_active == null ? true : !!is_active,
     ];
 
