@@ -33,6 +33,7 @@ router.get("/", async (req, res) => {
         banner_reservations_url,
         banner_account_url,
         banner_home_url,
+        branding,
         created_at
       FROM tenants
       ORDER BY name ASC
@@ -69,6 +70,7 @@ router.get("/by-slug/:slug", async (req, res) => {
         banner_reservations_url,
         banner_account_url,
         banner_home_url,
+        branding,
         created_at
       FROM tenants
       WHERE slug = $1
@@ -93,6 +95,90 @@ router.get("/by-slug/:slug", async (req, res) => {
 // Admin: upload tenant logo to R2 and update tenants.logo_url + tenants.logo_key
 // field name must be: "file"
 // -----------------------------------------------------------------------------
+
+
+// -----------------------------------------------------------------------------
+// Tenant Branding (JSONB)
+// -----------------------------------------------------------------------------
+
+// GET /api/tenants/by-slug/:slug/branding  (public read)
+router.get("/by-slug/:slug/branding", async (req, res) => {
+  try {
+    const slug = String(req.params.slug || "").trim();
+    if (!slug) return res.status(400).json({ error: "Missing slug" });
+
+    const result = await db.query(
+      `
+      SELECT branding
+      FROM tenants
+      WHERE slug = $1
+      LIMIT 1
+      `,
+      [slug]
+    );
+
+    if (!result.rows.length) {
+      return res.status(404).json({ error: "Tenant not found" });
+    }
+
+    return res.json({ branding: result.rows[0].branding || {} });
+  } catch (err) {
+    console.error("Error loading tenant branding by slug:", err);
+    return res.status(500).json({ error: "Failed to load branding" });
+  }
+});
+
+// PATCH /api/tenants/:id/branding  (admin/owner)
+// Body: { patch: {...} } merges into existing branding JSONB
+//    or { branding: {...} } replaces entire object
+router.patch("/:id/branding", requireAdmin, async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id)) return res.status(400).json({ error: "Invalid id" });
+
+    const { patch, branding } = req.body || {};
+
+    const currentRes = await db.query(
+      `SELECT branding FROM tenants WHERE id = $1 LIMIT 1`,
+      [id]
+    );
+    if (!currentRes.rows.length) return res.status(404).json({ error: "Tenant not found" });
+
+    const current = currentRes.rows[0].branding || {};
+
+    const isObj = (v) => v && typeof v === "object" && !Array.isArray(v);
+    const deepMerge = (a, b) => {
+      const out = { ...(isObj(a) ? a : {}) };
+      if (!isObj(b)) return out;
+      for (const k of Object.keys(b)) {
+        if (isObj(b[k]) && isObj(out[k])) out[k] = deepMerge(out[k], b[k]);
+        else out[k] = b[k];
+      }
+      return out;
+    };
+
+    let nextBranding = current;
+    if (isObj(branding)) nextBranding = branding;
+    else if (isObj(patch)) nextBranding = deepMerge(current, patch);
+    else return res.status(400).json({ error: "Provide {patch} or {branding}" });
+
+    const upd = await db.query(
+      `
+      UPDATE tenants
+      SET branding = $2::jsonb
+      WHERE id = $1
+      RETURNING id, slug, branding
+      `,
+      [id, JSON.stringify(nextBranding)]
+    );
+
+    return res.json({ tenant: upd.rows[0] });
+  } catch (err) {
+    console.error("Error updating tenant branding:", err);
+    return res.status(500).json({ error: "Failed to update branding" });
+  }
+});
+
 router.post(
   "/:id/logo",
   requireAdmin,
