@@ -516,7 +516,10 @@ router.post("/", async (req, res) => {
       durationMinutes: duration,
     });
 
-    if (conflicts.staffConflict || conflicts.resourceConflict) {
+    // NOTE: checkConflicts returns { conflict: boolean, conflicts: [...] }
+    // The old route logic expected staffConflict/resourceConflict, which meant
+    // conflicts were never enforced and double-bookings could slip through.
+    if (conflicts.conflict) {
       return res.status(409).json({
         error: "Booking conflicts with an existing booking.",
         conflicts,
@@ -611,7 +614,8 @@ router.post("/", async (req, res) => {
       bookingId,
     ]);
 
-    const joined = await loadJoinedBookingById(bookingId, tenantId);
+    // Use the resolved tenantId (not the raw body tenantId which might be empty/mismatched)
+    const joined = await loadJoinedBookingById(bookingId, resolvedTenantId);
     return res.status(201).json({ booking: joined });
   } catch (err) {
     console.error("Error creating booking:", err);
