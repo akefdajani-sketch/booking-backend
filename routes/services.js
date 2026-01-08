@@ -155,6 +155,7 @@ router.post("/", requireAdmin, async (req, res) => {
         max_parallel_bookings,
         COALESCE(requires_staff,false) AS requires_staff,
         COALESCE(requires_resource,false) AS requires_resource,
+        availability_basis,
         COALESCE(is_active,true) AS is_active,
         image_url
     `;
@@ -179,6 +180,90 @@ router.post("/", requireAdmin, async (req, res) => {
   } catch (err) {
     console.error("Error creating service:", err);
     return res.status(500).json({ error: "Failed to create service" });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// PATCH /api/services/:id
+// Admin-only update (used by Owner Setup UI)
+// Body: any of { name, description, duration_minutes, price_jd, slot_interval_minutes,
+//                max_consecutive_slots, max_parallel_bookings,
+//                requires_staff, requires_resource, availability_basis, is_active }
+// ---------------------------------------------------------------------------
+router.patch("/:id", requireAdmin, async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!id) return res.status(400).json({ error: "invalid id" });
+
+    const {
+      name,
+      description,
+      duration_minutes,
+      price_jd,
+      slot_interval_minutes,
+      max_consecutive_slots,
+      max_parallel_bookings,
+      requires_staff,
+      requires_resource,
+      availability_basis,
+      is_active,
+    } = req.body || {};
+
+    const ab = normalizeAvailabilityBasis(availability_basis);
+    if (availability_basis != null && availability_basis !== "" && ab == null) {
+      return res.status(400).json({ error: "Invalid availability_basis" });
+    }
+
+    const sets = [];
+    const params = [];
+    const add = (sql, val) => {
+      params.push(val);
+      sets.push(`${sql} = $${params.length}`);
+    };
+
+    if (name != null) add("name", String(name).trim());
+    if (description !== undefined) add("description", description == null ? null : String(description).trim());
+    if (duration_minutes !== undefined) add("duration_minutes", duration_minutes == null ? null : Number(duration_minutes));
+    if (price_jd !== undefined) add("price_jd", price_jd == null ? null : Number(price_jd));
+    if (slot_interval_minutes !== undefined) add("slot_interval_minutes", slot_interval_minutes == null ? null : Number(slot_interval_minutes));
+    if (max_consecutive_slots !== undefined) add("max_consecutive_slots", max_consecutive_slots == null ? null : Number(max_consecutive_slots));
+    if (max_parallel_bookings !== undefined) add("max_parallel_bookings", max_parallel_bookings == null ? null : Number(max_parallel_bookings));
+    if (requires_staff !== undefined) add("requires_staff", !!requires_staff);
+    if (requires_resource !== undefined) add("requires_resource", !!requires_resource);
+    if (availability_basis !== undefined) add("availability_basis", ab);
+    if (is_active !== undefined) add("is_active", !!is_active);
+
+    if (!sets.length) return res.status(400).json({ error: "No fields to update" });
+
+    params.push(id);
+    const q = `
+      UPDATE services
+      SET ${sets.join(", ")}
+      WHERE id = $${params.length}
+      RETURNING
+        id,
+        tenant_id,
+        name,
+        description,
+        duration_minutes,
+        price_jd,
+        slot_interval_minutes AS slot_interval_minutes,
+        max_consecutive_slots AS max_consecutive_slots,
+        max_parallel_bookings AS max_parallel_bookings,
+        COALESCE(requires_staff,false) AS requires_staff,
+        COALESCE(requires_resource,false) AS requires_resource,
+        availability_basis,
+        COALESCE(is_active,true) AS is_active,
+        image_url
+    `;
+
+    const { rows } = await db.query(q, params);
+    if (!rows.length) return res.status(404).json({ error: "not found" });
+
+    return res.json(rows[0]);
+  } catch (err) {
+    console.error("Error updating service:", err);
+    return res.status(500).json({ error: "Failed to update service" });
   }
 });
 
