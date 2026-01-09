@@ -11,6 +11,28 @@ const { upload, uploadErrorHandler } = require("../middleware/upload");
 const { uploadFileToR2, deleteFromR2, safeName } = require("../utils/r2");
 
 const fs = require("fs/promises");
+// -----------------------------------------------------------------------------
+// Branding JSONB helpers (Phase 2)
+// -----------------------------------------------------------------------------
+async function setBrandingAsset(tenantId, jsonPathArray, value) {
+  // jsonPathArray example: ["assets","logoUrl"] or ["assets","banners","book"]
+  const pathSql = `{${jsonPathArray.join(",")}}`;
+  const result = await db.query(
+    `
+    UPDATE tenants
+    SET branding = jsonb_set(
+      COALESCE(branding, '{}'::jsonb),
+      $2::text[],
+      to_jsonb($3::text),
+      true
+    )
+    WHERE id = $1
+    RETURNING id, slug, branding
+    `,
+    [tenantId, jsonPathArray, String(value || "")]
+  );
+  return result.rows?.[0] || null;
+}
 
 // -----------------------------------------------------------------------------
 // GET /api/tenants
@@ -215,8 +237,10 @@ router.post(
         await deleteFromR2(oldKey).catch(() => {});
       }
 
+            // also keep branding.assets.logoUrl in sync
+      await setBrandingAsset(id, ["assets", "logoUrl"], result.rows[0].logo_url);
       return res.json(result.rows[0]);
-    } catch (err) {
+} catch (err) {
       console.error("Tenant logo upload error:", err);
       return res.status(500).json({ error: "Upload failed" });
     } finally {
@@ -228,6 +252,102 @@ router.post(
 );
 
 // -----------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
+// POST /api/tenants/:id/favicon
+// Admin: upload tenant favicon to R2 and store in tenants.branding.assets.faviconUrl
+// field name must be: "file"
+// -----------------------------------------------------------------------------
+router.post(
+  "/:id/favicon",
+  requireAdmin,
+  upload.single("file"),
+  uploadErrorHandler,
+  async (req, res) => {
+    let filePath = null;
+    try {
+      const id = Number(req.params.id);
+      if (!Number.isFinite(id) || id <= 0) {
+        return res.status(400).json({ error: "Invalid tenant id" });
+      }
+      if (!req.file) {
+        return res.status(400).json({ error: "No file uploaded" });
+      }
+
+      filePath = req.file.path;
+
+      const key = `tenants/${id}/branding/favicon/${Date.now()}-${safeName(
+        req.file.originalname
+      )}`;
+
+      const { url } = await uploadFileToR2({
+        key,
+        filePath,
+        contentType: req.file.mimetype,
+      });
+
+      const tenant = await setBrandingAsset(id, ["assets", "faviconUrl"], url);
+      if (!tenant) return res.status(404).json({ error: "Tenant not found" });
+
+      return res.json({ tenant, favicon_url: url });
+    } catch (err) {
+      console.error("Tenant favicon upload error:", err);
+      return res.status(500).json({ error: "Upload failed" });
+    } finally {
+      if (filePath) {
+        await fs.unlink(filePath).catch(() => {});
+      }
+    }
+  }
+);
+
+// -----------------------------------------------------------------------------
+// POST /api/tenants/:id/hero
+// Admin: upload tenant hero (default banner) to R2 and store in tenants.branding.assets.heroUrl
+// field name must be: "file"
+// -----------------------------------------------------------------------------
+router.post(
+  "/:id/hero",
+  requireAdmin,
+  upload.single("file"),
+  uploadErrorHandler,
+  async (req, res) => {
+    let filePath = null;
+    try {
+      const id = Number(req.params.id);
+      if (!Number.isFinite(id) || id <= 0) {
+        return res.status(400).json({ error: "Invalid tenant id" });
+      }
+      if (!req.file) {
+        return res.status(400).json({ error: "No file uploaded" });
+      }
+
+      filePath = req.file.path;
+
+      const key = `tenants/${id}/branding/hero/${Date.now()}-${safeName(
+        req.file.originalname
+      )}`;
+
+      const { url } = await uploadFileToR2({
+        key,
+        filePath,
+        contentType: req.file.mimetype,
+      });
+
+      const tenant = await setBrandingAsset(id, ["assets", "heroUrl"], url);
+      if (!tenant) return res.status(404).json({ error: "Tenant not found" });
+
+      return res.json({ tenant, hero_url: url });
+    } catch (err) {
+      console.error("Tenant hero upload error:", err);
+      return res.status(500).json({ error: "Upload failed" });
+    } finally {
+      if (filePath) {
+        await fs.unlink(filePath).catch(() => {});
+      }
+    }
+  }
+);
+
 // POST /api/tenants/:id/banner/:slot
 // Admin: upload tenant banner for bottom tabs (book/reservations/account/home)
 // Stores tenants.banner_*_url + tenants.banner_*_key
@@ -299,8 +419,10 @@ router.post(
         await deleteFromR2(oldKey).catch(() => {});
       }
 
+            // also keep branding.assets.banners.<slot> in sync
+      await setBrandingAsset(id, ["assets", "banners", slot], result.rows[0][urlCol]);
       return res.json(result.rows[0]);
-    } catch (err) {
+} catch (err) {
       console.error("Tenant banner upload error:", err);
       return res.status(500).json({ error: "Upload failed" });
     } finally {
