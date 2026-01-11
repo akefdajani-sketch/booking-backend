@@ -1,0 +1,7 @@
+# Replace @handles with your GitHub users/teams.
+/routes/availability.js        @core-engine-owners
+/routes/bookings.js            @core-engine-owners
+/utils/bookings.js             @core-engine-owners
+/middleware/requireTenant.js   @platform-owners
+/middleware/requireTenantRole.js @platform-owners
+/middleware/ensureUser.js      @platform-owners
