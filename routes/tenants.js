@@ -11,6 +11,147 @@ const { upload, uploadErrorHandler } = require("../middleware/upload");
 const { uploadFileToR2, deleteFromR2, safeName } = require("../utils/r2");
 
 const fs = require("fs/promises");
+
+// -----------------------------------------------------------------------------
+// Onboarding (computed state)
+// -----------------------------------------------------------------------------
+
+/**
+ * Compute onboarding state for a tenant based on existing data.
+ * This is DERIVED state (no manual toggles).
+ *
+ * v1 rules:
+ *  - business: name + timezone present
+ *  - hours: at least 1 open day with valid open/close
+ *  - services: at least 1 active service
+ *  - capacity: at least 1 active staff OR 1 active resource
+ *  - first_booking: at least 1 booking with status confirmed|completed
+ */
+async function computeOnboardingSnapshot(tenantId) {
+  const tid = Number(tenantId);
+  if (!Number.isFinite(tid) || tid <= 0) {
+    throw new Error("Invalid tenantId");
+  }
+
+  const tenantRes = await db.query(
+    `SELECT id, slug, name, timezone FROM tenants WHERE id = $1 LIMIT 1`,
+    [tid]
+  );
+  const tenant = tenantRes.rows?.[0];
+  if (!tenant) return null;
+
+  const business = Boolean(String(tenant.name || "").trim()) && Boolean(String(tenant.timezone || "").trim());
+
+  const hoursRes = await db.query(
+    `
+    SELECT COUNT(*)::int AS open_days
+    FROM tenant_hours
+    WHERE tenant_id = $1
+      AND COALESCE(is_closed, FALSE) = FALSE
+      AND open_time IS NOT NULL
+      AND close_time IS NOT NULL
+      AND open_time < close_time
+    `,
+    [tid]
+  );
+  const openDays = Number(hoursRes.rows?.[0]?.open_days || 0);
+  const hours = openDays > 0;
+
+  const servicesRes = await db.query(
+    `
+    SELECT COUNT(*)::int AS active_services
+    FROM services
+    WHERE tenant_id = $1
+      AND COALESCE(is_active, TRUE) = TRUE
+    `,
+    [tid]
+  );
+  const activeServices = Number(servicesRes.rows?.[0]?.active_services || 0);
+  const services = activeServices > 0;
+
+  const staffRes = await db.query(
+    `
+    SELECT COUNT(*)::int AS active_staff
+    FROM staff
+    WHERE tenant_id = $1
+      AND COALESCE(is_active, TRUE) = TRUE
+    `,
+    [tid]
+  );
+  const activeStaff = Number(staffRes.rows?.[0]?.active_staff || 0);
+
+  const resourcesRes = await db.query(
+    `
+    SELECT COUNT(*)::int AS active_resources
+    FROM resources
+    WHERE tenant_id = $1
+      AND COALESCE(is_active, TRUE) = TRUE
+    `,
+    [tid]
+  );
+  const activeResources = Number(resourcesRes.rows?.[0]?.active_resources || 0);
+
+  const capacity = activeStaff > 0 || activeResources > 0;
+
+  const bookingsRes = await db.query(
+    `
+    SELECT COUNT(*)::int AS good_bookings
+    FROM bookings
+    WHERE tenant_id = $1
+      AND status = ANY(ARRAY['confirmed','completed']::text[])
+    `,
+    [tid]
+  );
+  const goodBookings = Number(bookingsRes.rows?.[0]?.good_bookings || 0);
+  const first_booking = goodBookings > 0;
+
+  const completed = business && hours && services && capacity && first_booking;
+
+  const missing = [];
+  if (!business) missing.push("business");
+  if (!hours) missing.push("hours");
+  if (!services) missing.push("services");
+  if (!capacity) missing.push("capacity");
+  if (!first_booking) missing.push("first_booking");
+
+  return {
+    tenantId: tenant.id,
+    tenantSlug: tenant.slug,
+    steps: {
+      business,
+      hours,
+      services,
+      capacity,
+      first_booking,
+    },
+    metrics: {
+      openDays,
+      activeServices,
+      activeStaff,
+      activeResources,
+      goodBookings,
+    },
+    missing,
+    completed,
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+async function persistOnboardingSnapshot(tenantId, snapshot) {
+  await db.query(
+    `
+    UPDATE tenants
+    SET branding = jsonb_set(
+      COALESCE(branding, '{}'::jsonb),
+      '{onboarding}',
+      $2::jsonb,
+      true
+    )
+    WHERE id = $1
+    `,
+    [Number(tenantId), JSON.stringify(snapshot || {})]
+  );
+}
 // -----------------------------------------------------------------------------
 // Branding JSONB helpers (Phase 2)
 // -----------------------------------------------------------------------------
@@ -103,22 +244,7 @@ router.post("/", requireAdmin, async (req, res) => {
 
     const name = rawName.length > 200 ? rawName.slice(0, 200) : rawName;
 
-    // IMPORTANT: tenants.kind is protected by a DB CHECK constraint.
-    // If the UI sends an unknown value (e.g. "other"), Postgres will reject the insert.
-    // Keep this list aligned with your DB constraint values.
-    const ALLOWED_KINDS = new Set([
-      "golf",
-      "salon",
-      "studio",
-      "clinic",
-      "entertainment",
-    ]);
-
-    let kind = req.body?.kind != null ? String(req.body.kind).trim().toLowerCase() : "";
-    if (!ALLOWED_KINDS.has(kind)) {
-      // Fallback to a safe, generic kind that is allowed by the DB.
-      kind = "entertainment";
-    }
+    const kind = req.body?.kind != null ? String(req.body.kind).trim() : null;
     const timezone = req.body?.timezone != null ? String(req.body.timezone).trim() : null;
 
     // Optional branding JSON (must be an object)
@@ -235,6 +361,63 @@ router.get("/by-slug/:slug/branding", async (req, res) => {
   } catch (err) {
     console.error("Error loading tenant branding:", err);
     return res.status(500).json({ error: "Failed to load tenant branding" });
+  }
+});
+
+// -----------------------------------------------------------------------------
+// GET /api/tenants/by-slug/:slug/onboarding
+// Admin/Owner: returns computed onboarding snapshot for a tenant.
+// By default, also persists snapshot into tenants.branding.onboarding.
+// Query: persist=true|false
+// -----------------------------------------------------------------------------
+router.get("/by-slug/:slug/onboarding", requireAdmin, async (req, res) => {
+  try {
+    const slug = String(req.params.slug || "").trim();
+    if (!slug) return res.status(400).json({ error: "Missing slug" });
+
+    const t = await db.query(`SELECT id FROM tenants WHERE slug = $1 LIMIT 1`, [slug]);
+    const tenantId = t.rows?.[0]?.id;
+    if (!tenantId) return res.status(404).json({ error: "Tenant not found" });
+
+    const snapshot = await computeOnboardingSnapshot(tenantId);
+    if (!snapshot) return res.status(404).json({ error: "Tenant not found" });
+
+    const persist = String(req.query.persist ?? "true").toLowerCase() !== "false";
+    if (persist) {
+      await persistOnboardingSnapshot(tenantId, snapshot);
+    }
+
+    return res.json({ onboarding: snapshot });
+  } catch (err) {
+    console.error("Error computing onboarding by slug:", err);
+    return res.status(500).json({ error: "Failed to compute onboarding" });
+  }
+});
+
+// -----------------------------------------------------------------------------
+// GET /api/tenants/:id/onboarding
+// Admin/Owner: returns computed onboarding snapshot for a tenantId.
+// Query: persist=true|false
+// -----------------------------------------------------------------------------
+router.get("/:id/onboarding", requireAdmin, async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id) || id <= 0) {
+      return res.status(400).json({ error: "Invalid tenant id" });
+    }
+
+    const snapshot = await computeOnboardingSnapshot(id);
+    if (!snapshot) return res.status(404).json({ error: "Tenant not found" });
+
+    const persist = String(req.query.persist ?? "true").toLowerCase() !== "false";
+    if (persist) {
+      await persistOnboardingSnapshot(id, snapshot);
+    }
+
+    return res.json({ onboarding: snapshot });
+  } catch (err) {
+    console.error("Error computing onboarding by id:", err);
+    return res.status(500).json({ error: "Failed to compute onboarding" });
   }
 });
 
