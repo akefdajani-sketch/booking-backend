@@ -70,6 +70,92 @@ router.get("/", async (req, res) => {
 });
 
 // -----------------------------------------------------------------------------
+// POST /api/tenants
+// Admin/Owner: create a tenant (minimal fields only; no DB migration required)
+// Body:
+//   { name, slug, kind?, timezone?, branding? }
+// Notes:
+//   - slug must be unique
+//   - we default branding to {} if not provided
+// -----------------------------------------------------------------------------
+router.post("/", requireAdmin, async (req, res) => {
+  try {
+    const rawName = String(req.body?.name || "").trim();
+    const rawSlug = String(req.body?.slug || "").trim();
+
+    if (!rawName) return res.status(400).json({ error: "Missing name" });
+    if (!rawSlug) return res.status(400).json({ error: "Missing slug" });
+
+    // normalize slug (lowercase, url-safe)
+    const slug = rawSlug
+      .toLowerCase()
+      .replace(/\s+/g, "-")
+      .replace(/[^a-z0-9-]/g, "")
+      .replace(/-+/g, "-")
+      .replace(/^-|-$/g, "");
+
+    if (!slug) {
+      return res.status(400).json({ error: "Invalid slug" });
+    }
+    if (slug.length > 80) {
+      return res.status(400).json({ error: "Slug too long" });
+    }
+
+    const name = rawName.length > 200 ? rawName.slice(0, 200) : rawName;
+
+    const kind = req.body?.kind != null ? String(req.body.kind).trim() : null;
+    const timezone = req.body?.timezone != null ? String(req.body.timezone).trim() : null;
+
+    // Optional branding JSON (must be an object)
+    let branding = req.body?.branding;
+    if (branding == null) branding = {};
+    if (typeof branding !== "object" || Array.isArray(branding)) {
+      return res.status(400).json({ error: "branding must be a JSON object" });
+    }
+
+    // Ensure unique slug before insert (friendlier error)
+    const exists = await db.query(
+      `SELECT 1 FROM tenants WHERE slug = $1 LIMIT 1`,
+      [slug]
+    );
+    if (exists.rows.length) {
+      return res.status(409).json({ error: "Slug already exists" });
+    }
+
+    const result = await db.query(
+      `
+      INSERT INTO tenants (slug, name, kind, timezone, branding)
+      VALUES ($1, $2, $3, $4, $5::jsonb)
+      RETURNING
+        id,
+        slug,
+        name,
+        kind,
+        timezone,
+        branding,
+        logo_url,
+        cover_image_url,
+        banner_book_url,
+        banner_reservations_url,
+        banner_account_url,
+        banner_home_url,
+        created_at
+      `,
+      [slug, name, kind, timezone, JSON.stringify(branding)]
+    );
+
+    return res.status(201).json({ tenant: result.rows[0] });
+  } catch (err) {
+    // Handle race condition on unique constraint (if any)
+    if (err && err.code === "23505") {
+      return res.status(409).json({ error: "Slug already exists" });
+    }
+    console.error("Error creating tenant:", err);
+    return res.status(500).json({ error: "Failed to create tenant" });
+  }
+});
+
+// -----------------------------------------------------------------------------
 // GET /api/tenants/by-slug/:slug
 // Public: returns one tenant by slug (scale-friendly for owner/[slug] + booking app)
 // -----------------------------------------------------------------------------
