@@ -5,6 +5,8 @@
 //   GET    /api/tenant/:slug/me
 //   GET    /api/tenant/:slug/users
 //   POST   /api/tenant/:slug/users/invite
+//   GET    /api/tenant/:slug/users/invites
+//   DELETE /api/tenant/:slug/users/invites/:inviteId
 //   PATCH  /api/tenant/:slug/users/:userId
 //   DELETE /api/tenant/:slug/users/:userId
 //
@@ -51,6 +53,21 @@ function base64Url(buf) {
     .replace(/\+/g, "-")
     .replace(/\//g, "_")
     .replace(/=+$/g, "");
+}
+
+function toIso(d) {
+  try {
+    return d instanceof Date ? d.toISOString() : new Date(d).toISOString();
+  } catch {
+    return null;
+  }
+}
+
+function computeInviteStatus(invite) {
+  if (invite.accepted_at) return "accepted";
+  const exp = new Date(invite.expires_at);
+  if (Number.isFinite(exp.getTime()) && Date.now() > exp.getTime()) return "expired";
+  return "pending";
 }
 
 async function countOwners(tenantId) {
@@ -174,6 +191,16 @@ router.post(
         return res.status(409).json({ error: "User already belongs to this tenant." });
       }
 
+      // If there is an existing *unaccepted* invite for this email, revoke it so we
+      // don't end up with multiple valid tokens floating around.
+      await db.query(
+        `
+        DELETE FROM tenant_invites
+        WHERE tenant_id = $1 AND lower(email) = $2 AND accepted_at IS NULL
+        `,
+        [req.tenantId, email]
+      );
+
       // Create secure token (store only a hash)
       const token = base64Url(crypto.randomBytes(32));
       const tokenHash = sha256Hex(token);
@@ -214,6 +241,211 @@ router.post(
       }
       console.error("Invite user error:", err);
       return res.status(500).json({ error: "Failed to create invite." });
+    }
+  }
+);
+
+// -----------------------------------------------------------------------------
+// GET /api/tenant/:slug/users/invites
+// Lists invites for a tenant
+// Query:
+//   - status: pending|expired|accepted|all (default: pending)
+//   - limit: default 50
+//   - offset: default 0
+// -----------------------------------------------------------------------------
+router.get(
+  "/:slug/users/invites",
+  requireGoogleAuth,
+  ensureUser,
+  resolveTenantIdFromParam,
+  requireTenantRole("owner"),
+  async (req, res) => {
+    try {
+      const status = String(req.query?.status || "pending").trim().toLowerCase();
+      const limit = Math.min(Math.max(Number(req.query?.limit || 50), 1), 200);
+      const offset = Math.max(Number(req.query?.offset || 0), 0);
+
+      let where = `WHERE ti.tenant_id = $1`;
+      const params = [req.tenantId];
+
+      if (status === "pending") {
+        where += ` AND ti.accepted_at IS NULL AND ti.expires_at > now()`;
+      } else if (status === "expired") {
+        where += ` AND ti.accepted_at IS NULL AND ti.expires_at <= now()`;
+      } else if (status === "accepted") {
+        where += ` AND ti.accepted_at IS NOT NULL`;
+      } else if (status === "all") {
+        // no-op
+      } else {
+        return res.status(400).json({ error: "Invalid status filter." });
+      }
+
+      const q = await db.query(
+        `
+        SELECT
+          ti.id,
+          ti.email,
+          ti.role,
+          ti.expires_at,
+          ti.accepted_at,
+          ti.created_at,
+          ti.invited_by_user_id,
+          u.email AS invited_by_email,
+          u.full_name AS invited_by_full_name
+        FROM tenant_invites ti
+        LEFT JOIN users u ON u.id = ti.invited_by_user_id
+        ${where}
+        ORDER BY ti.created_at DESC
+        LIMIT $2 OFFSET $3
+        `,
+        [req.tenantId, limit, offset]
+      );
+
+      const invites = (q.rows || []).map((r) => ({
+        id: Number(r.id),
+        email: String(r.email),
+        role: String(r.role),
+        status: computeInviteStatus(r),
+        expires_at: toIso(r.expires_at),
+        accepted_at: r.accepted_at ? toIso(r.accepted_at) : null,
+        created_at: toIso(r.created_at),
+        invited_by: r.invited_by_user_id
+          ? {
+              user_id: Number(r.invited_by_user_id),
+              email: r.invited_by_email ? String(r.invited_by_email) : null,
+              full_name: r.invited_by_full_name ? String(r.invited_by_full_name) : null,
+            }
+          : null,
+      }));
+
+      return res.json({
+        tenant: { id: req.tenantId, slug: req.tenantSlug },
+        invites,
+        paging: { limit, offset, returned: invites.length },
+      });
+    } catch (err) {
+      console.error("List invites error:", err);
+      return res.status(500).json({ error: "Failed to load invites." });
+    }
+  }
+);
+
+// -----------------------------------------------------------------------------
+// POST /api/tenant/:slug/users/invites/:inviteId/resend
+// Rotates token + extends expiry for a pending/expired invite.
+// (Email sending can be added later; we return an invite_url.)
+// Optional Body: { role }  (lets owner change role before acceptance)
+// -----------------------------------------------------------------------------
+router.post(
+  "/:slug/users/invites/:inviteId/resend",
+  requireGoogleAuth,
+  ensureUser,
+  resolveTenantIdFromParam,
+  requireTenantRole("owner"),
+  async (req, res) => {
+    try {
+      const inviteId = Number(req.params.inviteId);
+      if (!Number.isFinite(inviteId) || inviteId <= 0) {
+        return res.status(400).json({ error: "Invalid inviteId." });
+      }
+
+      const roleRaw = req.body?.role != null ? String(req.body.role).trim() : null;
+      const role = roleRaw ? normalizeRole(roleRaw) : null;
+      if (roleRaw && (!role || !ALLOWED_ROLES.has(role))) {
+        return res.status(400).json({ error: "Invalid role." });
+      }
+
+      const found = await db.query(
+        `
+        SELECT id, tenant_id, email, role, expires_at, accepted_at
+        FROM tenant_invites
+        WHERE id = $1 AND tenant_id = $2
+        LIMIT 1
+        `,
+        [inviteId, req.tenantId]
+      );
+      if (!found.rows.length) {
+        return res.status(404).json({ error: "Invite not found." });
+      }
+
+      const inv = found.rows[0];
+      if (inv.accepted_at) {
+        return res.status(400).json({ error: "Invite already accepted." });
+      }
+
+      // Rotate token (store only hash)
+      const token = base64Url(crypto.randomBytes(32));
+      const tokenHash = sha256Hex(token);
+      const expiresDays = Number(process.env.INVITE_EXPIRES_DAYS || 7);
+      const expiresAt = new Date(Date.now() + expiresDays * 24 * 60 * 60 * 1000);
+
+      const upd = await db.query(
+        `
+        UPDATE tenant_invites
+        SET token_hash = $3,
+            expires_at = $4,
+            role = COALESCE($5, role),
+            invited_by_user_id = $6
+        WHERE id = $1 AND tenant_id = $2
+        RETURNING id, email, role, expires_at
+        `,
+        [inviteId, req.tenantId, tokenHash, expiresAt.toISOString(), role, req.user.id]
+      );
+
+      const base = String(process.env.FRONTEND_BASE_URL || "").replace(/\/$/, "");
+      const inviteUrl = base ? `${base}/invite?token=${token}` : null;
+
+      return res.json({
+        ok: true,
+        invite: {
+          id: Number(upd.rows[0].id),
+          email: String(upd.rows[0].email),
+          role: String(upd.rows[0].role),
+          expires_at: upd.rows[0].expires_at,
+          invite_url: inviteUrl,
+          token: inviteUrl ? undefined : token,
+        },
+      });
+    } catch (err) {
+      if (err && err.code === "23505") {
+        return res.status(500).json({ error: "Please try again." });
+      }
+      console.error("Resend invite error:", err);
+      return res.status(500).json({ error: "Failed to resend invite." });
+    }
+  }
+);
+
+// -----------------------------------------------------------------------------
+// DELETE /api/tenant/:slug/users/invites/:inviteId
+// Revokes an invite (delete row). Safe even if already expired.
+// -----------------------------------------------------------------------------
+router.delete(
+  "/:slug/users/invites/:inviteId",
+  requireGoogleAuth,
+  ensureUser,
+  resolveTenantIdFromParam,
+  requireTenantRole("owner"),
+  async (req, res) => {
+    try {
+      const inviteId = Number(req.params.inviteId);
+      if (!Number.isFinite(inviteId) || inviteId <= 0) {
+        return res.status(400).json({ error: "Invalid inviteId." });
+      }
+
+      const del = await db.query(
+        `DELETE FROM tenant_invites WHERE id = $1 AND tenant_id = $2 RETURNING id`,
+        [inviteId, req.tenantId]
+      );
+
+      if (!del.rows.length) {
+        return res.status(404).json({ error: "Invite not found." });
+      }
+
+      return res.json({ ok: true });
+    } catch (err) {
+      console.error("Revoke invite error:", err);
+      return res.status(500).json({ error: "Failed to revoke invite." });
     }
   }
 );
