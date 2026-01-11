@@ -312,85 +312,110 @@ let cursor = openMin;
 
 // Pills represent slot *segments* (slot_interval_minutes), not full service durations.
 // So build candidates at stepMin granularity and mark each segment unavailable if it overlaps.
-while (cursor + stepMin <= closeMin) {
-  const startOffsetDays = Math.floor(cursor / (24 * 60));
-  const endCursor = cursor + stepMin;
-  const endOffsetDays = Math.floor(endCursor / (24 * 60));
 
-  const startHHMM = minutesToHHMM(cursor % (24 * 60));
-  const endHHMM = minutesToHHMM(endCursor % (24 * 60));
+// Performance: avoid per-slot DB queries.
+// Query overlaps for the whole window in one SQL call using generate_series.
 
-  const startDateISO = addDaysISO(date, startOffsetDays);
-  const endDateISO = addDaysISO(date, endOffsetDays);
+const windowStartLocal = `${date} ${openHHMM}:00`;
+const windowEndLocal = `${addDaysISO(date, isOvernight ? 1 : 0)} ${closeHHMM}:00`;
 
-  const candidateStart = `${startDateISO} ${startHHMM}:00`;
-  const candidateEnd = `${endDateISO} ${endHHMM}:00`;
+if (availabilityBasis === "none") {
+  const q = `
+    SELECT to_char(gs AT TIME ZONE $4, 'HH24:MI') AS time
+    FROM generate_series(
+      ($1::timestamp AT TIME ZONE $4),
+      ($2::timestamp AT TIME ZONE $4) - make_interval(mins => $5),
+      make_interval(mins => $5)
+    ) gs
+    ORDER BY gs
+  `;
+  const r = await pool.query(q, [windowStartLocal, windowEndLocal, tenantId, tenantTz, stepMin]);
+  for (const row of r.rows) {
+    const startHHMM = row.time;
+    const slotObj = {
+      time: startHHMM,
+      label: startHHMM,
+      is_available: true,
+      available: true,
+      overlaps: 0,
+      overlaps_resource: 0,
+      overlaps_staff: 0,
+      capacity: maxParallel,
+    };
 
-      // Build a timestamptz range in the tenant's timezone.
-      // candidateStart/candidateEnd are "local" wall-clock times, converted via AT TIME ZONE.
-      
-      const baseParams = [tenantId, candidateStart, candidateEnd, tenantTz];
+    allSlots.push(slotObj);
+    availableTimes.push(startHHMM);
+  }
+} else {
+  const q = `
+    WITH slots AS (
+      SELECT
+        gs AS slot_start,
+        gs + make_interval(mins => $5) AS slot_end
+      FROM generate_series(
+        ($1::timestamp AT TIME ZONE $4),
+        ($2::timestamp AT TIME ZONE $4) - make_interval(mins => $5),
+        make_interval(mins => $5)
+      ) gs
+    )
+    SELECT
+      to_char(slot_start AT TIME ZONE $4, 'HH24:MI') AS time,
+      COUNT(b.*) FILTER (WHERE $6 IN ('resource','both') AND b.resource_id = $7)::int AS overlaps_resource,
+      COUNT(b.*) FILTER (WHERE $6 IN ('staff','both') AND b.staff_id = $8)::int AS overlaps_staff
+    FROM slots
+    LEFT JOIN bookings b
+      ON b.tenant_id = $3
+     AND b.status IN ('pending','confirmed')
+     AND b.booking_range && tstzrange(slot_start, slot_end, '[)')
+    GROUP BY slot_start
+    ORDER BY slot_start;
+  `;
 
-      const overlapBaseSql = `
-        SELECT COUNT(*)::int AS count
-        FROM bookings
-        WHERE tenant_id = $1
-          AND status IN ('pending','confirmed')
-          AND booking_range && tstzrange(
-            ($2::timestamp AT TIME ZONE $4),
-            ($3::timestamp AT TIME ZONE $4),
-            '[)'
-          )
-      `;
+  const r = await pool.query(q, [
+    windowStartLocal,
+    windowEndLocal,
+    tenantId,
+    tenantTz,
+    stepMin,
+    availabilityBasis,
+    resourceId ?? null,
+    staffId ?? null,
+  ]);
 
-      let overlapsResource = 0;
-      let overlapsStaff = 0;
+  for (const row of r.rows) {
+    const startHHMM = row.time;
+    const overlapsResource = Number(row.overlaps_resource ?? 0);
+    const overlapsStaff = Number(row.overlaps_staff ?? 0);
 
-      if (availabilityBasis === "resource" || availabilityBasis === "both") {
-        const params = [...baseParams, resourceId];
-        const r = await pool.query(`${overlapBaseSql} AND resource_id = $5`, params);
-        overlapsResource = r.rows[0]?.count ?? 0;
-      }
-
-      if (availabilityBasis === "staff" || availabilityBasis === "both") {
-        const params = [...baseParams, staffId];
-        const r = await pool.query(`${overlapBaseSql} AND staff_id = $5`, params);
-        overlapsStaff = r.rows[0]?.count ?? 0;
-      }
-
-      // Final availability decision
-      let isAvailable = true;
-      if (availabilityBasis === "resource") {
-        isAvailable = overlapsResource < maxParallel;
-      } else if (availabilityBasis === "staff") {
-        isAvailable = overlapsStaff < maxParallel;
-      } else if (availabilityBasis === "both") {
-        isAvailable = overlapsResource < maxParallel && overlapsStaff < maxParallel;
-      } else {
-        // "none" => always available (still bounded by working hours + max_consecutive on the UI)
-        isAvailable = true;
-      }
-
-      const overlapsCount = availabilityBasis === "both"
-        ? Math.max(overlapsResource, overlapsStaff)
-        : (availabilityBasis === "staff" ? overlapsStaff : overlapsResource);
-const slotObj = {
-        time: startHHMM,
-        label: startHHMM,
-        is_available: isAvailable,
-        available: isAvailable,
-        // helpful for UI + debugging
-        overlaps: overlapsCount,
-        overlaps_resource: overlapsResource,
-        overlaps_staff: overlapsStaff,
-        capacity: maxParallel,
-      };
-
-      allSlots.push(slotObj);
-      if (isAvailable) availableTimes.push(startHHMM);
-
-      cursor += stepMin;
+    let isAvailable = true;
+    if (availabilityBasis === "resource") {
+      isAvailable = overlapsResource < maxParallel;
+    } else if (availabilityBasis === "staff") {
+      isAvailable = overlapsStaff < maxParallel;
+    } else if (availabilityBasis === "both") {
+      isAvailable = overlapsResource < maxParallel && overlapsStaff < maxParallel;
     }
+
+    const overlapsCount = availabilityBasis === "both"
+      ? Math.max(overlapsResource, overlapsStaff)
+      : (availabilityBasis === "staff" ? overlapsStaff : overlapsResource);
+
+    const slotObj = {
+      time: startHHMM,
+      label: startHHMM,
+      is_available: isAvailable,
+      available: isAvailable,
+      overlaps: overlapsCount,
+      overlaps_resource: overlapsResource,
+      overlaps_staff: overlapsStaff,
+      capacity: maxParallel,
+    };
+
+    allSlots.push(slotObj);
+    if (isAvailable) availableTimes.push(startHHMM);
+  }
+}
+
 
     return res.json({
       tenantId,
