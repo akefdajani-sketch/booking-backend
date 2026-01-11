@@ -4,7 +4,7 @@
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "test": "cross-env NODE_ENV=test jest --runInBand",
+    "test": "cross-env NODE_ENV=test jest --runInBand --config jest.config.js",
     "test:watch": "NODE_ENV=test jest --watchAll"
   },
   "dependencies": {
