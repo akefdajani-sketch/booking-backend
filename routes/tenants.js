@@ -103,7 +103,22 @@ router.post("/", requireAdmin, async (req, res) => {
 
     const name = rawName.length > 200 ? rawName.slice(0, 200) : rawName;
 
-    const kind = req.body?.kind != null ? String(req.body.kind).trim() : null;
+    // IMPORTANT: tenants.kind is protected by a DB CHECK constraint.
+    // If the UI sends an unknown value (e.g. "other"), Postgres will reject the insert.
+    // Keep this list aligned with your DB constraint values.
+    const ALLOWED_KINDS = new Set([
+      "golf",
+      "salon",
+      "studio",
+      "clinic",
+      "entertainment",
+    ]);
+
+    let kind = req.body?.kind != null ? String(req.body.kind).trim().toLowerCase() : "";
+    if (!ALLOWED_KINDS.has(kind)) {
+      // Fallback to a safe, generic kind that is allowed by the DB.
+      kind = "entertainment";
+    }
     const timezone = req.body?.timezone != null ? String(req.body.timezone).trim() : null;
 
     // Optional branding JSON (must be an object)
@@ -133,6 +148,12 @@ router.post("/", requireAdmin, async (req, res) => {
         kind,
         timezone,
         branding,
+        logo_url,
+        cover_image_url,
+        banner_book_url,
+        banner_reservations_url,
+        banner_account_url,
+        banner_home_url,
         created_at
       `,
       [slug, name, kind, timezone, JSON.stringify(branding)]
