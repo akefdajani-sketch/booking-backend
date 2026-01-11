@@ -67,11 +67,13 @@ async function getSchema() {
   };
 
   // saas_plan_features columns
+  // Your schema is typed: enabled (boolean NOT NULL) + limit_value (integer nullable)
   schema.features = {
     id: pick(schema.saas_plan_features, ["id"]),
     planId: pick(schema.saas_plan_features, ["plan_id", "saas_plan_id", "platform_plan_id"]),
     key: pick(schema.saas_plan_features, ["feature_key", "key", "name"]),
-    value: pick(schema.saas_plan_features, ["feature_value", "value", "json_value", "enabled", "limit_value"]),
+    enabled: pick(schema.saas_plan_features, ["enabled"]),
+    limitValue: pick(schema.saas_plan_features, ["limit_value", "limitValue", "limit"]),
     createdAt: pick(schema.saas_plan_features, ["created_at"]),
   };
 
@@ -125,9 +127,9 @@ router.get(
           error: "saas_plans table schema not recognized (missing id/code/name columns).",
         });
       }
-      if (!schema.features.planId || !schema.features.key || !schema.features.value) {
+      if (!schema.features.planId || !schema.features.key || !schema.features.enabled) {
         return res.status(500).json({
-          error: "saas_plan_features table schema not recognized (missing plan_id/key/value columns).",
+          error: "saas_plan_features table schema not recognized (missing plan_id/feature_key/enabled columns).",
         });
       }
       if (!schema.subs.tenantId || !schema.subs.planId || !schema.subs.status) {
@@ -178,19 +180,27 @@ router.get(
 
       const sub = subRes.rows[0];
 
-      // 2) Features map for this plan
+      // 2) Features map for this plan (explicit, typed)
       const featQuery = `
-        SELECT ${schema.features.key} AS k, ${schema.features.value} AS v
+        SELECT
+          ${schema.features.key} AS feature_key,
+          ${schema.features.enabled} AS enabled
+          ${schema.features.limitValue ? `, ${schema.features.limitValue} AS limit_value` : ``}
         FROM saas_plan_features
         WHERE ${schema.features.planId} = $1
         ORDER BY ${schema.features.key} ASC
       `;
       const featRes = await db.query(featQuery, [sub.plan_id]);
 
+      /** @type {Record<string, boolean|number>} */
       const features = {};
-      for (const r of featRes.rows) {
-        // if v is JSONB, pg will return object; if text/int/bool, it returns primitive
-        features[r.k] = r.v;
+      for (const row of featRes.rows) {
+        // If limit_value exists and is not null, treat as numeric limit; otherwise use enabled flag.
+        if (row.limit_value !== undefined && row.limit_value !== null) {
+          features[row.feature_key] = Number(row.limit_value);
+        } else {
+          features[row.feature_key] = Boolean(row.enabled);
+        }
       }
 
       // 3) Usage snapshot (informational only)
