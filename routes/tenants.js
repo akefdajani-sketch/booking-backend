@@ -133,12 +133,6 @@ router.post("/", requireAdmin, async (req, res) => {
         kind,
         timezone,
         branding,
-        logo_url,
-        cover_image_url,
-        banner_book_url,
-        banner_reservations_url,
-        banner_account_url,
-        banner_home_url,
         created_at
       `,
       [slug, name, kind, timezone, JSON.stringify(branding)]
