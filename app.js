@@ -17,6 +17,10 @@ const availabilityRouter = require("./routes/availability");
 const membershipPlansRouter = require("./routes/membershipPlans");
 const customerMembershipsRouter = require("./routes/customerMemberships");
 
+// Users & Roles
+const tenantUsersRouter = require("./routes/tenantUsers");
+const invitesRouter = require("./routes/invites");
+
 // ✅ ADD THIS
 const uploadsRouter = require("./routes/uploads");
 
@@ -60,6 +64,10 @@ app.use("/api/bookings", bookingsRouter);
 app.use("/api/availability", availabilityRouter);
 app.use("/api/membership-plans", membershipPlansRouter);
 app.use("/api/customer-memberships", customerMembershipsRouter);
+
+// Users & Roles
+app.use("/api/tenant", tenantUsersRouter);
+app.use("/api/invites", invitesRouter);
 
 // ✅ REGISTER UPLOADS ROUTES
 app.use("/api/uploads", uploadsRouter);
