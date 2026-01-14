@@ -1,11 +1,10 @@
-// src/app.js
 const express = require("express");
 const cors = require("cors");
 
 const { corsMiddleware, corsOptions } = require("./middleware/cors");
 const { uploadDir } = require("./middleware/upload");
 
-// Routers
+// Core routers
 const tenantsRouter = require("./routes/tenants");
 const tenantHoursRouter = require("./routes/tenantHours");
 const servicesRouter = require("./routes/services");
@@ -22,25 +21,25 @@ const tenantUsersRouter = require("./routes/tenantUsers");
 const invitesRouter = require("./routes/invites");
 const tenantPlanRouter = require("./routes/tenantPlan");
 
-// ✅ ADD THIS
+// Uploads
 const uploadsRouter = require("./routes/uploads");
+
+// NEW: Theme system routes
+const adminThemesRouter = require("./routes/adminThemes");
+const adminTenantsThemeRouter = require("./routes/adminTenantsTheme");
+const publicTenantThemeRouter = require("./routes/publicTenantTheme");
 
 const app = express();
 
 /**
  * --- Global middleware ---
  */
-
-// CORS (including OPTIONS preflight)
 app.use(corsMiddleware);
 app.options("*", cors(corsOptions));
 
-// Body parsing
 app.use(express.json({ limit: "2mb" }));
 app.use(express.urlencoded({ extended: true }));
 
-// Static uploads (keep same URL path as before)
-// NOTE: If you move fully to R2, this is optional. Keeping it does not break anything.
 app.use(
   "/uploads",
   express.static(uploadDir, {
@@ -71,8 +70,13 @@ app.use("/api/tenant", tenantUsersRouter);
 app.use("/api/tenant", tenantPlanRouter);
 app.use("/api/invites", invitesRouter);
 
-// ✅ REGISTER UPLOADS ROUTES
+// Uploads
 app.use("/api/uploads", uploadsRouter);
+
+// Theme system
+app.use("/api/admin/themes", adminThemesRouter);
+app.use("/api/admin/tenants", adminTenantsThemeRouter);
+app.use("/api/public/tenant-theme", publicTenantThemeRouter);
 
 /**
  * --- Health check ---
