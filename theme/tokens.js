@@ -67,6 +67,10 @@ const THEME_TOKEN_KEYS = new Set([
   "--bf-account-outline-pill-px",
   "--bf-account-solid-pill-py",
   "--bf-account-solid-pill-px",
+
+  // Modal sizing (Theme Studio)
+  "--bf-modal-max-w",
+  "--bf-modal-blur",
 ]);
 
 // Brand + semantic variables that tenants may override safely.
@@ -143,6 +147,9 @@ const BRAND_OVERRIDE_KEYS = new Set([
 
   // Feature flags
   "--bf-rich-select",
+
+  // Modal backdrop (Theme Studio)
+  "--bf-modal-backdrop",
 ]);
 
 module.exports = { THEME_TOKEN_KEYS, BRAND_OVERRIDE_KEYS };
