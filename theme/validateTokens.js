@@ -35,6 +35,11 @@ function isSafeValue(key, val) {
     return RX_PX.test(v);
   }
 
+  // Modal sizing tokens (explicit)
+  if (key === "--bf-modal-max-w" || key === "--bf-modal-blur") {
+    return RX_PX.test(v);
+  }
+
   // Scale tokens (unitless)
   if (key.endsWith("-scale")) {
     if (!/^\d+(\.\d+)?$/.test(v)) return false;
@@ -58,7 +63,8 @@ function isSafeValue(key, val) {
     key.includes("border") ||
     key.includes("brand") ||
     key.includes("text") ||
-    key === "--bf-page-bg"
+    key === "--bf-page-bg" ||
+    key === "--bf-modal-backdrop"
   ) {
     return RX_COLOR.test(v);
   }
