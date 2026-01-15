@@ -24,21 +24,86 @@ const THEME_TOKEN_KEYS = new Set([
   "--bf-control-height",
   "--bf-control-pad-x",
 
-  // Extras to remove hardcoding in booking UI
-  "--bf-pill-gap",
-  "--bf-inline-pad",
-  "--bf-btn-pad-y",
-  "--bf-btn-pad-x",
-  "--bf-preview-h",
-  "--bf-preview-radius",
-  "--bf-premium-header-pad",
+  // layout + navigation
+  "--bf-page-bg",
+  "--bf-page-pad-top",
+  "--bf-page-pad-x",
+  "--bf-page-pad-bottom",
+  "--bf-page-max-w",
+  "--bf-page-content-mt",
+  "--bf-page-hero-pad-top",
+  "--bf-page-content-pad-top",
 
-  // Modal
-  "--bf-modal-top-pad",
-  "--bf-modal-bottom-pad",
-  "--bf-modal-side-pad",
-  "--bf-modal-blur",
-  "--bf-modal-max-w",
+  "--bf-bottomnav-pad-top",
+  "--bf-bottomnav-pad-bottom",
+  "--bf-bottomnav-bg",
+  "--bf-bottomnav-blur",
+  "--bf-bottomnav-max-w",
+  "--bf-bottomnav-item-pad",
+  "--bf-bottomnav-item-gap",
+  "--bf-bottomnav-font",
+  "--bf-bottomnav-icon-box",
+  "--bf-bottomnav-icon-size",
+  "--bf-bottomnav-emoji-font",
+
+  // hero
+  "--bf-hero-mb",
+  "--bf-hero-radius",
+  "--bf-hero-shadow",
+  "--bf-hero-media-h",
+  "--bf-hero-pad",
+  "--bf-hero-gap",
+  "--bf-hero-label-fs",
+  "--bf-hero-label-mb",
+  "--bf-hero-title-fs",
+  "--bf-hero-title-weight",
+  "--bf-hero-member-fs",
+  "--bf-hero-member-mt",
+  "--bf-hero-avatar-size",
+  "--bf-hero-avatar-fs",
+  "--bf-hero-logo-size",
+  "--bf-hero-subtext",
+  "--bf-hero-right-gap",
+
+  // selects / popovers
+  "--bf-select-gap",
+  "--bf-select-avatar",
+  "--bf-select-avatar-fs",
+  "--bf-popover-offset",
+  "--bf-popover-bg",
+  "--bf-popover-border",
+  "--bf-popover-radius",
+  "--bf-popover-shadow",
+  "--bf-popover-blur",
+  "--bf-popover-item-pad",
+  "--bf-popover-max-h",
+
+  // misc
+  "--bf-signin-btn-pad",
+  "--bf-signin-btn-fs",
+  "--bf-avatar-btn-size",
+  "--bf-avatar-btn-fs",
+  "--bf-avatar-btn-weight",
+  "--bf-avatar-btn-shadow",
+
+  "--bf-home-title-fs",
+  "--bf-home-title-mb",
+  "--bf-home-body-fs",
+  "--bf-home-body-mb",
+  "--bf-home-list-fs",
+  "--bf-home-list-mb",
+  "--bf-home-list-pl",
+  "--bf-home-note-fs",
+
+  "--bf-details-header-gap",
+  "--bf-details-title-fs",
+  "--bf-details-subtitle-fs",
+  "--bf-details-box-mt",
+  "--bf-details-box-radius",
+  "--bf-details-box-pad",
+  "--bf-details-grid-gap",
+  "--bf-details-label-fs",
+  "--bf-details-label-mb",
 ]);
 
 // Brand + semantic variables that tenants may override safely.
@@ -98,10 +163,6 @@ const BRAND_OVERRIDE_KEYS = new Set([
   // Optional (kept for forwards/backwards compatibility)
   "--bf-shadow",
   "--bf-glass",
-
-  // Modal + preview visuals
-  "--bf-modal-backdrop",
-  "--bf-preview-border",
 ]);
 
 module.exports = { THEME_TOKEN_KEYS, BRAND_OVERRIDE_KEYS };
