@@ -74,6 +74,17 @@ function isSafeValue(key, val) {
     return Number.isFinite(n) && n >= 100 && n <= 900;
   }
 
+  // Label/value weights (Premium form typography): numeric string 100-900
+  if (key === "--bf-label-weight" || key === "--bf-value-weight") {
+    const n = Number(v);
+    return Number.isFinite(n) && n >= 100 && n <= 900;
+  }
+
+  // Feature flags
+  if (key === "--bf-rich-select") {
+    return v === "0" || v === "1";
+  }
+
   // Shadows/glass strings (if used): allow but block braces/semicolons
   if (key === "--bf-shadow" || key === "--bf-glass") {
     return v.length <= 200 && !/[;{}]/.test(v);
