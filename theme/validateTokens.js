@@ -21,8 +21,6 @@ function isSafeValue(key, val) {
     key.includes("pad") ||
     key.includes("gap") ||
     key.includes("height") ||
-    key.includes("width") ||
-    key.includes("max-w") ||
     key.includes("blur") ||
     key.includes("mt") ||
     key.includes("mb") ||
@@ -55,7 +53,8 @@ function isSafeValue(key, val) {
   }
 
   // Shadows/glass strings (if used): allow but block braces/semicolons
-  if (key === "--bf-shadow" || key === "--bf-glass") {
+  // (We keep this permissive but guarded so Theme Studio can control depth.)
+  if (key === "--bf-glass" || key === "--bf-shadow" || key.includes("shadow")) {
     return v.length <= 200 && !/[;{}]/.test(v);
   }
 
