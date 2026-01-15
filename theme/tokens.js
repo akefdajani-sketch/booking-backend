@@ -1,4 +1,9 @@
-export const THEME_TOKEN_KEYS = new Set([
+/**
+ * theme/tokens.js (CommonJS)
+ * Whitelists the CSS variables we allow to be stored/applied for platform themes
+ * and a smaller subset for tenant brand overrides.
+ */
+const THEME_TOKEN_KEYS = new Set([
   "--bf-font-family",
   "--bf-label-font",
   "--bf-control-font",
@@ -29,9 +34,11 @@ export const THEME_TOKEN_KEYS = new Set([
   "--bf-modal-blur"
 ]);
 
-export const BRAND_OVERRIDE_KEYS = new Set([
+const BRAND_OVERRIDE_KEYS = new Set([
   "--bf-brand-primary",
   "--bf-on-primary",
   "--bf-page-bg",
   "--bf-card-bg"
 ]);
+
+module.exports = { THEME_TOKEN_KEYS, BRAND_OVERRIDE_KEYS };
