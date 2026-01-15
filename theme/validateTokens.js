@@ -21,6 +21,8 @@ function isSafeValue(key, val) {
     key.includes("pad") ||
     key.includes("gap") ||
     key.includes("height") ||
+    key.includes("width") ||
+    key.includes("max-w") ||
     key.includes("blur") ||
     key.includes("mt") ||
     key.includes("mb") ||
