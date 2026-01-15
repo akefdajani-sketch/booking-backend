@@ -4,6 +4,7 @@ const cors = require("cors");
 const { corsMiddleware, corsOptions } = require("./middleware/cors");
 const { uploadDir } = require("./middleware/upload");
 
+// existing routers
 const tenantsRouter = require("./routes/tenants");
 const tenantHoursRouter = require("./routes/tenantHours");
 const servicesRouter = require("./routes/services");
@@ -18,8 +19,10 @@ const customerMembershipsRouter = require("./routes/customerMemberships");
 const tenantUsersRouter = require("./routes/tenantUsers");
 const invitesRouter = require("./routes/invites");
 const tenantPlanRouter = require("./routes/tenantPlan");
+
 const uploadsRouter = require("./routes/uploads");
 
+// NEW theme routers
 const adminThemesRouter = require("./routes/adminThemes");
 const adminTenantsThemeRouter = require("./routes/adminTenantsTheme");
 const publicTenantThemeRouter = require("./routes/publicTenantTheme");
@@ -33,6 +36,7 @@ app.use(express.urlencoded({ extended: true }));
 
 app.use("/uploads", express.static(uploadDir));
 
+// core APIs
 app.use("/api/tenants", tenantsRouter);
 app.use("/api/tenant-hours", tenantHoursRouter);
 app.use("/api/services", servicesRouter);
@@ -44,11 +48,15 @@ app.use("/api/availability", availabilityRouter);
 app.use("/api/membership-plans", membershipPlansRouter);
 app.use("/api/customer-memberships", customerMembershipsRouter);
 
+// users/roles + invites
 app.use("/api/tenant", tenantUsersRouter);
 app.use("/api/tenant", tenantPlanRouter);
 app.use("/api/invites", invitesRouter);
+
+// uploads
 app.use("/api/uploads", uploadsRouter);
 
+// THEME SYSTEM
 app.use("/api/admin/themes", adminThemesRouter);
 app.use("/api/admin/tenants", adminTenantsThemeRouter);
 app.use("/api/public/tenant-theme", publicTenantThemeRouter);
@@ -58,7 +66,7 @@ app.get("/health", (req, res) => res.json({ ok: true }));
 app.use("/api", (req, res) => res.status(404).json({ error: "Not found" }));
 
 app.use((err, req, res, next) => {
-  console.error(err);
+  console.error("Unhandled error:", err);
   res.status(500).json({ error: "Internal server error" });
 });
 
