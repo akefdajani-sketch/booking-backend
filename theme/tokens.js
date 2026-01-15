@@ -24,30 +24,49 @@ const THEME_TOKEN_KEYS = new Set([
   "--bf-control-height",
   "--bf-control-pad-x",
 
-  // Time-slot grid / pills
+  // Booking pills grid + helper box
   "--bf-pill-grid-gap",
-  "--bf-pill-status-mb",
-  "--bf-pill-shadow",
-  "--bf-pill-selected-shadow",
-
-  // Helper / inline info blocks
   "--bf-helper-radius",
   "--bf-helper-pad-y",
   "--bf-helper-pad-x",
 
-  // In-page alerts (errors/warnings)
-  "--bf-alert-radius",
-  "--bf-alert-fs",
-  "--bf-alert-mb",
-  "--bf-alert-mt",
-  "--bf-alert-pad-y",
-  "--bf-alert-pad-x",
-  "--bf-alert-error-bg",
-  "--bf-alert-error-text",
-  "--bf-alert-error-border",
-  "--bf-alert-warn-bg",
-  "--bf-alert-warn-text",
-  "--bf-alert-warn-border",
+  // Pill hover / active feedback
+  "--bf-pill-hover-filter",
+  "--bf-pill-hover-translate",
+  "--bf-pill-hover-scale",
+  "--bf-pill-hover-shadow",
+  "--bf-pill-active-filter",
+  "--bf-pill-active-translate",
+  "--bf-pill-active-scale",
+  "--bf-pill-active-shadow",
+  "--bf-pill-selected-hover-filter",
+  "--bf-pill-selected-hover-translate",
+  "--bf-pill-selected-hover-scale",
+  "--bf-pill-selected-hover-shadow",
+  "--bf-pill-selected-active-filter",
+  "--bf-pill-selected-active-translate",
+  "--bf-pill-selected-active-scale",
+  "--bf-pill-selected-active-shadow",
+
+  // Reservations spacing
+  "--bf-section-gap-sm",
+  "--bf-res-scroller-maxh",
+  "--bf-res-scroller-pr",
+  "--bf-res-item-py",
+  "--bf-res-item-gap",
+  "--bf-outline-pill-py",
+  "--bf-outline-pill-px",
+  "--bf-outline-pill-fs",
+
+  // Account spacing
+  "--bf-account-pill-py",
+  "--bf-account-pill-px",
+  "--bf-account-pill-fs",
+  "--bf-account-pill-h",
+  "--bf-account-outline-pill-py",
+  "--bf-account-outline-pill-px",
+  "--bf-account-solid-pill-py",
+  "--bf-account-solid-pill-px",
 ]);
 
 // Brand + semantic variables that tenants may override safely.
