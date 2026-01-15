@@ -23,6 +23,22 @@ const THEME_TOKEN_KEYS = new Set([
   "--bf-control-font",
   "--bf-control-height",
   "--bf-control-pad-x",
+
+  // Extras to remove hardcoding in booking UI
+  "--bf-pill-gap",
+  "--bf-inline-pad",
+  "--bf-btn-pad-y",
+  "--bf-btn-pad-x",
+  "--bf-preview-h",
+  "--bf-preview-radius",
+  "--bf-premium-header-pad",
+
+  // Modal
+  "--bf-modal-top-pad",
+  "--bf-modal-bottom-pad",
+  "--bf-modal-side-pad",
+  "--bf-modal-blur",
+  "--bf-modal-max-w",
 ]);
 
 // Brand + semantic variables that tenants may override safely.
@@ -82,6 +98,10 @@ const BRAND_OVERRIDE_KEYS = new Set([
   // Optional (kept for forwards/backwards compatibility)
   "--bf-shadow",
   "--bf-glass",
+
+  // Modal + preview visuals
+  "--bf-modal-backdrop",
+  "--bf-preview-border",
 ]);
 
 module.exports = { THEME_TOKEN_KEYS, BRAND_OVERRIDE_KEYS };
