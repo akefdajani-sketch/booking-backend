@@ -88,6 +88,14 @@ const BRAND_OVERRIDE_KEYS = new Set([
   // Card
   "--bf-card-bg",
   "--bf-card-border",
+  "--bf-card-shadow",
+
+  // Controls
+  "--bf-control-bg",
+  "--bf-control-border",
+  "--bf-label-weight",
+  "--bf-value-weight",
+  "--bf-rich-select",
 
   // Pills
   "--bf-pill-bg",
@@ -97,8 +105,14 @@ const BRAND_OVERRIDE_KEYS = new Set([
   "--bf-pill-selected-border",
   "--bf-pill-selected-text",
 
+  // Disabled pill tokens (Premium theme)
+  "--bf-pill-disabled-bg",
+  "--bf-pill-disabled-text",
+  "--bf-pill-disabled-border",
+
   // Buttons
   "--bf-btn-bg",
+  "--bf-btn-border",
   "--bf-btn-text",
   "--bf-btn-bg-disabled",
   "--bf-btn-text-disabled",
@@ -126,6 +140,9 @@ const BRAND_OVERRIDE_KEYS = new Set([
   // Optional (kept for forwards/backwards compatibility)
   "--bf-shadow",
   "--bf-glass",
+
+  // Feature flags
+  "--bf-rich-select",
 ]);
 
 module.exports = { THEME_TOKEN_KEYS, BRAND_OVERRIDE_KEYS };
