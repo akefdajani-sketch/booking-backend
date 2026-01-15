@@ -20,17 +20,17 @@ router.get("/:slug", async (req, res) => {
   const themeKey = tenant.theme_key || "default_v1";
 
   let th = await db.query(
-    "SELECT key, tokens_json FROM platform_themes WHERE key = $1 AND is_published = TRUE",
+    "SELECT key, tokens_json, layout_key FROM platform_themes WHERE key = $1 AND is_published = TRUE",
     [themeKey]
   );
 
   if (!th.rows[0]) {
     th = await db.query(
-      "SELECT key, tokens_json FROM platform_themes WHERE key = 'default_v1' AND is_published = TRUE"
+      "SELECT key, tokens_json, layout_key FROM platform_themes WHERE key = 'default_v1' AND is_published = TRUE"
     );
   }
 
-  const theme = th.rows[0] || { key: "default_v1", tokens_json: {} };
+  const theme = th.rows[0] || { key: "default_v1", tokens_json: {}, layout_key: "classic" };
 
   res.json({
     tenant: {
@@ -47,6 +47,7 @@ router.get("/:slug", async (req, res) => {
     },
     theme: {
       key: theme.key,
+      layout_key: theme.layout_key || "classic",
       tokens: theme.tokens_json || {}
     }
   });
