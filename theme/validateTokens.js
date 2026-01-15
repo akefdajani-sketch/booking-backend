@@ -21,13 +21,35 @@ function isSafeValue(key, val) {
     key.includes("pad") ||
     key.includes("gap") ||
     key.includes("height") ||
+    key.includes("translate") ||
+    key.includes("maxh") ||
+    key.includes("maxw") ||
     key.includes("blur") ||
     key.includes("mt") ||
     key.includes("mb") ||
     key.endsWith("-fs") ||
-    key.endsWith("-px")
+    key.endsWith("-px") ||
+    key.endsWith("-py") ||
+    key.endsWith("-pr")
   ) {
     return RX_PX.test(v);
+  }
+
+  // Scale tokens (unitless)
+  if (key.endsWith("-scale")) {
+    if (!/^\d+(\.\d+)?$/.test(v)) return false;
+    const n = Number(v);
+    return Number.isFinite(n) && n >= 0.8 && n <= 1.2;
+  }
+
+  // Filter tokens (conservative: block braces/semicolons)
+  if (key.endsWith("-filter")) {
+    return v.length <= 80 && !/[;{}]/.test(v);
+  }
+
+  // Shadow tokens (conservative: block braces/semicolons)
+  if (key.endsWith("-shadow")) {
+    return v.length <= 200 && !/[;{}]/.test(v);
   }
 
   // Colors
@@ -53,8 +75,7 @@ function isSafeValue(key, val) {
   }
 
   // Shadows/glass strings (if used): allow but block braces/semicolons
-  // (We keep this permissive but guarded so Theme Studio can control depth.)
-  if (key === "--bf-glass" || key === "--bf-shadow" || key.includes("shadow")) {
+  if (key === "--bf-shadow" || key === "--bf-glass") {
     return v.length <= 200 && !/[;{}]/.test(v);
   }
 
