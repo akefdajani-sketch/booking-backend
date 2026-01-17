@@ -73,14 +73,17 @@ router.get("/", async (req, res) => {
     const svcCols = await getServicesColumns();
     const tenantCols = await getTenantsColumns();
 
+    // Pricing:
+    // Your current DB uses services.price_amount (numeric).
+    // Keep backward compatibility with older schemas that used services.price.
     const priceExpr =
-      svcCols.has("price") && svcCols.has("price_jd")
-        ? "COALESCE(s.price, s.price_jd) AS price"
+      svcCols.has("price_amount") && svcCols.has("price")
+        ? "COALESCE(s.price_amount, s.price) AS price_amount"
+        : svcCols.has("price_amount")
+        ? "s.price_amount AS price_amount"
         : svcCols.has("price")
-        ? "s.price AS price"
-        : svcCols.has("price_jd")
-        ? "s.price_jd AS price"
-        : "NULL::numeric AS price";
+        ? "s.price AS price_amount"
+        : "NULL::numeric AS price_amount";
 
     const maxParallelExpr =
       svcCols.has("max_parallel_bookings") && svcCols.has("max_parallel")
@@ -160,8 +163,9 @@ router.post("/", requireAdmin, async (req, res) => {
       name,
       description,
       duration_minutes,
-      // accept both to be backwards compatible:
+      // accept multiple names for backwards compatibility:
       price,
+      price_amount,
       price_jd,
       slot_interval_minutes,
       max_consecutive_slots,
@@ -211,11 +215,14 @@ router.post("/", requireAdmin, async (req, res) => {
     if (svcCols.has("description")) add("description", description == null ? null : String(description).trim());
     if (svcCols.has("duration_minutes")) add("duration_minutes", duration_minutes == null ? null : Number(duration_minutes));
 
-    // Price: prefer "price" if column exists, else fall back to price_jd.
-    // Also accept incoming price_jd so older UI doesn't break.
-    const incomingPrice = price != null ? price : price_jd;
-    if (svcCols.has("price")) add("price", incomingPrice == null ? null : Number(incomingPrice));
-    else if (svcCols.has("price_jd")) add("price_jd", incomingPrice == null ? null : Number(incomingPrice));
+    // Price: your current schema uses price_amount.
+    // Accept legacy fields (price, price_jd) to avoid breaking older UIs.
+    const incomingPrice =
+      price_amount !== undefined ? price_amount : price !== undefined ? price : price_jd;
+    if (incomingPrice !== undefined) {
+      if (svcCols.has("price_amount")) add("price_amount", incomingPrice == null ? null : Number(incomingPrice));
+      else if (svcCols.has("price")) add("price", incomingPrice == null ? null : Number(incomingPrice));
+    }
 
     if (svcCols.has("slot_interval_minutes")) add("slot_interval_minutes", slot_interval_minutes == null ? null : Number(slot_interval_minutes));
     if (svcCols.has("max_consecutive_slots")) add("max_consecutive_slots", max_consecutive_slots == null ? null : Number(max_consecutive_slots));
@@ -261,6 +268,7 @@ router.patch("/:id", requireAdmin, async (req, res) => {
       description,
       duration_minutes,
       price,
+      price_amount,
       price_jd,
       slot_interval_minutes,
       max_consecutive_slots,
@@ -289,10 +297,11 @@ router.patch("/:id", requireAdmin, async (req, res) => {
     if (description !== undefined && svcCols.has("description")) add("description", description == null ? null : String(description).trim());
     if (duration_minutes !== undefined && svcCols.has("duration_minutes")) add("duration_minutes", duration_minutes == null ? null : Number(duration_minutes));
 
-    const incomingPrice = price !== undefined ? price : price_jd;
+    const incomingPrice =
+      price_amount !== undefined ? price_amount : price !== undefined ? price : price_jd;
     if (incomingPrice !== undefined) {
-      if (svcCols.has("price")) add("price", incomingPrice == null ? null : Number(incomingPrice));
-      else if (svcCols.has("price_jd")) add("price_jd", incomingPrice == null ? null : Number(incomingPrice));
+      if (svcCols.has("price_amount")) add("price_amount", incomingPrice == null ? null : Number(incomingPrice));
+      else if (svcCols.has("price")) add("price", incomingPrice == null ? null : Number(incomingPrice));
     }
 
     if (slot_interval_minutes !== undefined && svcCols.has("slot_interval_minutes"))
