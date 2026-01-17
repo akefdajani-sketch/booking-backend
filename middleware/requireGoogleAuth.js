@@ -1,38 +1,23 @@
 // middleware/requireGoogleAuth.js
+// Supports BOTH:
+// 1) Google ID tokens (JWT) -> verified locally via verifyIdToken
+// 2) Google access tokens -> validated via Google UserInfo endpoint
+//
+// Why: NextAuth refresh reliably maintains *access tokens* (with refresh_token)
+// but does not reliably provide a fresh id_token after refresh.
+// Accepting access tokens prevents "Google auth failed" after ~1 hour.
 const { OAuth2Client } = require("google-auth-library");
 
-const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
+// Allow one or many client ids (comma separated) for multi-env deploys
+const CLIENT_IDS = String(
+  process.env.GOOGLE_CLIENT_IDS || process.env.GOOGLE_CLIENT_ID || ""
+)
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
 
-async function tryUserInfo(accessToken) {
-  // Fallback path when the frontend sends an access token (or when ID token
-  // verification fails due to key rotation / unexpected `kid`).
-  // Requires scopes: openid email profile.
-  const res = await fetch("https://openidconnect.googleapis.com/v1/userinfo", {
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-    },
-  });
-
-  if (!res.ok) {
-    const txt = await res.text().catch(() => "");
-    const err = new Error(`userinfo_failed:${res.status}:${txt || res.statusText}`);
-    err.status = res.status;
-    throw err;
-  }
-
-  const data = await res.json().catch(() => null);
-  if (!data?.email) {
-    throw new Error("userinfo_missing_email");
-  }
-
-  return {
-    email: data.email,
-    email_verified: !!data.email_verified,
-    name: data.name || null,
-    picture: data.picture || null,
-    sub: data.sub || null,
-  };
-}
+const primaryClientId = CLIENT_IDS[0] || process.env.GOOGLE_CLIENT_ID;
+const client = new OAuth2Client(primaryClientId);
 
 function extractBearer(req) {
   const h = req.headers.authorization || req.headers.Authorization;
@@ -41,6 +26,32 @@ function extractBearer(req) {
   if (parts.length !== 2) return null;
   if (parts[0].toLowerCase() !== "bearer") return null;
   return parts[1];
+}
+
+function looksLikeJwt(token) {
+  // basic JWT check: 3 dot-separated parts
+  const parts = String(token || "").split(".");
+  return parts.length === 3 && parts[0].length > 0 && parts[1].length > 0;
+}
+
+async function fetchGoogleUserInfo(accessToken) {
+  const res = await fetch("https://www.googleapis.com/oauth2/v3/userinfo", {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  const txt = await res.text();
+  let json = null;
+  try {
+    json = txt ? JSON.parse(txt) : null;
+  } catch {
+    json = null;
+  }
+  if (!res.ok) {
+    const details = json || { raw: txt };
+    const err = new Error(`userinfo_failed:${res.status}:${JSON.stringify(details)}`);
+    err.status = res.status;
+    throw err;
+  }
+  return json;
 }
 
 module.exports = async function requireGoogleAuth(req, res, next) {
@@ -57,13 +68,14 @@ module.exports = async function requireGoogleAuth(req, res, next) {
       });
     }
 
-    // Primary path: treat token as an ID token (JWT) and verify it.
-    // Fallback: if it's actually an access token (or key rotation makes the JWT
-    // unverifiable), validate via OpenID userinfo.
-    try {
+    // Prefer ID-token verification when token looks like a JWT.
+    // Otherwise treat it as an access token.
+    if (looksLikeJwt(token)) {
+      const audience = CLIENT_IDS.length ? CLIENT_IDS : process.env.GOOGLE_CLIENT_ID;
+
       const ticket = await client.verifyIdToken({
         idToken: token,
-        audience: process.env.GOOGLE_CLIENT_ID,
+        audience,
       });
 
       const payload = ticket.getPayload();
@@ -74,7 +86,7 @@ module.exports = async function requireGoogleAuth(req, res, next) {
         });
       }
 
-      // Optional: basic exp guard (verifyIdToken already checks, but keep explicit)
+      // Optional: explicit exp guard
       const nowSec = Math.floor(Date.now() / 1000);
       if (payload.exp && nowSec >= payload.exp) {
         return res.status(401).json({
@@ -92,15 +104,22 @@ module.exports = async function requireGoogleAuth(req, res, next) {
         picture: payload.picture || null,
         sub: payload.sub || null,
       };
-    } catch (e) {
-      const msg = String(e?.message || e);
-      // Your current production symptom:
-      // "No pem found for envelope" (kid not found / key rotation / non-id token)
-      if (msg.toLowerCase().includes("no pem found") || msg.toLowerCase().includes("wrong recipient") || msg.toLowerCase().includes("jwt")) {
-        req.googleUser = await tryUserInfo(token);
-      } else {
-        throw e;
+    } else {
+      // Access token path (recommended for long-lived NextAuth sessions)
+      const info = await fetchGoogleUserInfo(token);
+      if (!info?.email) {
+        return res.status(401).json({
+          error: "Invalid Google token (no email).",
+          code: "GOOGLE_TOKEN_INVALID",
+        });
       }
+      req.googleUser = {
+        email: info.email,
+        email_verified: !!info.email_verified,
+        name: info.name || null,
+        picture: info.picture || null,
+        sub: info.sub || null,
+      };
     }
 
     return next();
