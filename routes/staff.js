@@ -56,15 +56,23 @@ router.get("/", async (req, res) => {
 // ---------------------------------------------------------------------------
 router.post("/", requireAdmin, async (req, res) => {
   try {
-    const { tenant_id, name, title, is_active } = req.body;
+    // Frontend uses: { tenant_id, name, role, is_active }
+    // Legacy support: some older clients used `title` instead of `role`.
+    const { tenant_id, name, role, title, is_active } = req.body;
+
+    if (!tenant_id || !name) {
+      return res.status(400).json({ error: "tenant_id and name are required" });
+    }
+
+    const roleValue = (role ?? title ?? "").toString();
 
     const result = await db.query(
       `
-      INSERT INTO staff (tenant_id, name, title, is_active)
+      INSERT INTO staff (tenant_id, name, role, is_active)
       VALUES ($1, $2, $3, $4)
       RETURNING *
       `,
-      [tenant_id, name, title || "", is_active ?? true]
+      [tenant_id, name, roleValue, is_active ?? true]
     );
 
     res.json(result.rows[0]);
