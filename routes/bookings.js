@@ -49,7 +49,7 @@ function canTransitionStatus(fromStatus, toStatus) {
 //
 // SaaS-ready list endpoint:
 // - Defaults to upcoming bookings (start_time >= now) ordered ASC
-// - Supports scope: upcoming | past | range (or legacy: view=upcoming|past|all)
+// - Supports scope: upcoming | past | range | all | latest (or legacy: view=upcoming|past|all)
 // - Supports filters: from, to, status, serviceId, staffId, resourceId, customerId
 // - Supports search: query (matches booking_code + customer fields)
 // - Uses keyset (cursor) pagination: cursorStartTime + cursorId
@@ -83,8 +83,16 @@ router.get("/", requireTenant, async (req, res) => {
       : null;
     const cursorId = req.query.cursorId ? Number(req.query.cursorId) : null;
 
+    const cursorCreatedAt = req.query.cursorCreatedAt
+      ? new Date(String(req.query.cursorCreatedAt))
+      : null;
+
     if (cursorStartTime && Number.isNaN(cursorStartTime.getTime())) {
       return res.status(400).json({ error: "Invalid cursorStartTime." });
+    }
+
+    if (cursorCreatedAt && Number.isNaN(cursorCreatedAt.getTime())) {
+      return res.status(400).json({ error: "Invalid cursorCreatedAt." });
     }
     if (cursorId != null && (!Number.isFinite(cursorId) || cursorId <= 0)) {
       return res.status(400).json({ error: "Invalid cursorId." });
@@ -108,7 +116,7 @@ router.get("/", requireTenant, async (req, res) => {
       where.push(`b.start_time < NOW()`);
     } else if (scope === "range") {
       // rely on from/to
-    } else if (scope === "all") {
+    } else if (scope === "all" || scope === "latest") {
       // no implicit time filter
     } else {
       // treat unknown scope as upcoming
@@ -165,16 +173,35 @@ router.get("/", requireTenant, async (req, res) => {
 
     // ---- order + keyset cursor ----
     const isPast = scope === "past";
-    const orderDir = isPast ? "DESC" : "ASC";
-    const comparator = isPast ? "<" : ">";
+    const isLatest = scope === "latest";
 
-    if (cursorStartTime && cursorId) {
-      params.push(cursorStartTime.toISOString());
-      const pStart = `$${params.length}`;
-      params.push(cursorId);
-      const pId = `$${params.length}`;
-      where.push(`(b.start_time, b.id) ${comparator} (${pStart}, ${pId})`);
+    // Default ordering is by start_time (ASC). Past uses start_time DESC.
+    // Latest uses created_at DESC (most recently created bookings first).
+    const orderDir = (isPast || isLatest) ? "DESC" : "ASC";
+    const comparator = (isPast || isLatest) ? "<" : ">";
+
+    // Keyset cursor
+    if (isLatest) {
+      if (cursorCreatedAt && cursorId) {
+        params.push(cursorCreatedAt.toISOString());
+        const pCreated = `$${params.length}`;
+        params.push(cursorId);
+        const pId = `$${params.length}`;
+        where.push(`(b.created_at, b.id) ${comparator} (${pCreated}, ${pId})`);
+      }
+    } else {
+      if (cursorStartTime && cursorId) {
+        params.push(cursorStartTime.toISOString());
+        const pStart = `$${params.length}`;
+        params.push(cursorId);
+        const pId = `$${params.length}`;
+        where.push(`(b.start_time, b.id) ${comparator} (${pStart}, ${pId})`);
+      }
     }
+
+    const orderBy = isLatest
+      ? `b.created_at ${orderDir}, b.id ${orderDir}`
+      : `b.start_time ${orderDir}, b.id ${orderDir}`;
 
     // ---- query ----
     const sql = `
@@ -211,7 +238,7 @@ router.get("/", requireTenant, async (req, res) => {
       LEFT JOIN resources r
         ON r.tenant_id = b.tenant_id AND r.id = b.resource_id
       WHERE ${where.join(" AND ")}
-      ORDER BY b.start_time ${orderDir}, b.id ${orderDir}
+      ORDER BY ${orderBy}
       LIMIT $${params.length + 1}
     `;
 
@@ -222,7 +249,11 @@ router.get("/", requireTenant, async (req, res) => {
 
     return res.json({
       bookings: rows,
-      nextCursor: last ? { start_time: last.start_time, id: last.id } : null,
+      nextCursor: last
+        ? (isLatest
+            ? { created_at: last.created_at, id: last.id }
+            : { start_time: last.start_time, id: last.id })
+        : null,
     });
   } catch (err) {
     console.error("Error loading bookings:", err);
