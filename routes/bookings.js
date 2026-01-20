@@ -66,7 +66,8 @@ async function bumpTenantBookingChange(tenantId) {
       WHERE id = $1
       `,
       [tid, new Date().toISOString()]
-    );} catch (err) {
+    );
+  } catch (err) {
     // best-effort; never fail booking flows because of heartbeat
     console.warn("Failed to bump tenant booking heartbeat:", err?.message || err);
   }
@@ -541,8 +542,6 @@ router.delete("/:id", requireTenant, async (req, res) => {
       );
     }
 
-    // heartbeat nudge (best-effort)
-    await bumpTenantBookingChange(tenantId);
     // heartbeat nudge (best-effort)
     await bumpTenantBookingChange(tenantId);
 
