@@ -44,6 +44,7 @@ function canTransitionStatus(fromStatus, toStatus) {
   return Boolean(allowed[from] && allowed[from].has(to));
 }
 
+
 // ---------------------------------------------------------------------------
 // Heartbeat nudge helper: bump tenants.branding.system.lastBookingChangeAt
 // (No DB migrations needed; stored in tenants.branding JSONB)
@@ -71,6 +72,7 @@ async function bumpTenantBookingChange(tenantId) {
     console.warn("Failed to bump tenant booking heartbeat:", err?.message || err);
   }
 }
+
 
 // ---------------------------------------------------------------------------
 // GET /api/bookings?tenantSlug|tenantId=...
@@ -419,11 +421,10 @@ router.get("/:id", requireTenant, async (req, res) => {
       return res.status(404).json({ error: "Booking not found." });
     }
 
-    const joined = await loadJoinedBookingById(bookingId, tenantId);
-
     // heartbeat nudge (best-effort)
     await bumpTenantBookingChange(tenantId);
 
+    const joined = await loadJoinedBookingById(bookingId, tenantId);
     return res.json({ booking: joined });
   } catch (err) {
     console.error("Error loading booking:", err);
@@ -473,11 +474,7 @@ router.patch("/:id/status", requireTenant, async (req, res) => {
     // Idempotent no-op
     if (currentStatus === nextStatus) {
       const joined = await loadJoinedBookingById(bookingId, tenantId);
-
-    // heartbeat nudge (best-effort)
-    await bumpTenantBookingChange(tenantId);
-
-    return res.json({ booking: joined });
+      return res.json({ booking: joined });
     }
 
     const upd = await db.query(
@@ -490,11 +487,10 @@ router.patch("/:id/status", requireTenant, async (req, res) => {
 
     if (!upd.rows.length) return res.status(404).json({ error: "Booking not found." });
 
-    const joined = await loadJoinedBookingById(bookingId, tenantId);
-
     // heartbeat nudge (best-effort)
     await bumpTenantBookingChange(tenantId);
 
+    const joined = await loadJoinedBookingById(bookingId, tenantId);
     return res.json({ booking: joined });
   } catch (err) {
     console.error("Error updating booking status:", err);
@@ -546,11 +542,13 @@ router.delete("/:id", requireTenant, async (req, res) => {
       );
     }
 
-    const joined = await loadJoinedBookingById(bookingId, tenantId);
-
+    // heartbeat nudge (best-effort)
+    await bumpTenantBookingChange(tenantId);
     // heartbeat nudge (best-effort)
     await bumpTenantBookingChange(tenantId);
 
+
+    const joined = await loadJoinedBookingById(bookingId, tenantId);
     return res.json({ booking: joined });
   } catch (err) {
     console.error("Error cancelling booking:", err);
