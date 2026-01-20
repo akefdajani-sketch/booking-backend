@@ -792,7 +792,21 @@ router.post("/", async (req, res) => {
 
     // Use the resolved tenantId (not the raw body tenantId which might be empty/mismatched)
     const joined = await loadJoinedBookingById(bookingId, resolvedTenantId);
-    return res.status(created ? 201 : 200).json({ booking: joined, replay: !created });
+    return res.status(created ? 201 : 200).json({
+      booking: joined,
+      replay: !created,
+      debug: {
+        service: process.env.RENDER_SERVICE_NAME || process.env.SERVICE_NAME || null,
+        dbName: (() => {
+          try {
+            const u = new URL(String(process.env.DATABASE_URL || ""));
+            return u.pathname ? u.pathname.replace(/^\//, "") : null;
+          } catch {
+            return null;
+          }
+        })(),
+      },
+    });
     } catch (err) {
       try { await client.query("ROLLBACK"); } catch (_) {}
       throw err;
