@@ -176,6 +176,8 @@ async function setBrandingAsset(tenantId, jsonPathArray, value) {
   return result.rows?.[0] || null;
 }
 
+
+
 // -----------------------------------------------------------------------------
 // GET /api/tenants/heartbeat?tenantSlug=...
 // Tenant-scoped lightweight endpoint for "nudge" polling.
@@ -330,6 +332,41 @@ router.post("/", requireAdmin, async (req, res) => {
   }
 });
 
+
+
+// -----------------------------------------------------------------------------
+// GET /api/tenants/heartbeat?tenantSlug=...
+// Tenant-scoped lightweight endpoint for "nudge" polling.
+// Returns a single marker that changes whenever bookings change for this tenant.
+// -----------------------------------------------------------------------------
+router.get("/heartbeat", requireTenant, async (req, res) => {
+  try {
+    const tenantId = req.tenantId;
+
+    const result = await db.query(
+      `
+      SELECT
+        (COALESCE(branding, '{}'::jsonb) #>> '{system,lastBookingChangeAt}') AS last_booking_change_at
+      FROM tenants
+      WHERE id = $1
+      LIMIT 1
+      `,
+      [tenantId]
+    );
+
+    const lastBookingChangeAt = result.rows?.[0]?.last_booking_change_at || null;
+
+    return res.json({
+      tenantId,
+      lastBookingChangeAt,
+      serverTime: new Date().toISOString(),
+    });
+  } catch (err) {
+    console.error("Error loading tenant heartbeat:", err);
+    return res.status(500).json({ error: "Failed to load tenant heartbeat" });
+  }
+});
+
 // -----------------------------------------------------------------------------
 // GET /api/tenants/by-slug/:slug
 // Public: returns one tenant by slug (scale-friendly for owner/[slug] + booking app)
@@ -373,6 +410,41 @@ router.get("/by-slug/:slug", async (req, res) => {
   }
 });
 
+
+
+// -----------------------------------------------------------------------------
+// GET /api/tenants/heartbeat?tenantSlug=...
+// Tenant-scoped lightweight endpoint for "nudge" polling.
+// Returns a single marker that changes whenever bookings change for this tenant.
+// -----------------------------------------------------------------------------
+router.get("/heartbeat", requireTenant, async (req, res) => {
+  try {
+    const tenantId = req.tenantId;
+
+    const result = await db.query(
+      `
+      SELECT
+        (COALESCE(branding, '{}'::jsonb) #>> '{system,lastBookingChangeAt}') AS last_booking_change_at
+      FROM tenants
+      WHERE id = $1
+      LIMIT 1
+      `,
+      [tenantId]
+    );
+
+    const lastBookingChangeAt = result.rows?.[0]?.last_booking_change_at || null;
+
+    return res.json({
+      tenantId,
+      lastBookingChangeAt,
+      serverTime: new Date().toISOString(),
+    });
+  } catch (err) {
+    console.error("Error loading tenant heartbeat:", err);
+    return res.status(500).json({ error: "Failed to load tenant heartbeat" });
+  }
+});
+
 // -----------------------------------------------------------------------------
 // GET /api/tenants/by-slug/:slug/branding
 // Public: returns branding json only
@@ -395,6 +467,41 @@ router.get("/by-slug/:slug/branding", async (req, res) => {
   } catch (err) {
     console.error("Error loading tenant branding:", err);
     return res.status(500).json({ error: "Failed to load tenant branding" });
+  }
+});
+
+
+
+// -----------------------------------------------------------------------------
+// GET /api/tenants/heartbeat?tenantSlug=...
+// Tenant-scoped lightweight endpoint for "nudge" polling.
+// Returns a single marker that changes whenever bookings change for this tenant.
+// -----------------------------------------------------------------------------
+router.get("/heartbeat", requireTenant, async (req, res) => {
+  try {
+    const tenantId = req.tenantId;
+
+    const result = await db.query(
+      `
+      SELECT
+        (COALESCE(branding, '{}'::jsonb) #>> '{system,lastBookingChangeAt}') AS last_booking_change_at
+      FROM tenants
+      WHERE id = $1
+      LIMIT 1
+      `,
+      [tenantId]
+    );
+
+    const lastBookingChangeAt = result.rows?.[0]?.last_booking_change_at || null;
+
+    return res.json({
+      tenantId,
+      lastBookingChangeAt,
+      serverTime: new Date().toISOString(),
+    });
+  } catch (err) {
+    console.error("Error loading tenant heartbeat:", err);
+    return res.status(500).json({ error: "Failed to load tenant heartbeat" });
   }
 });
 
@@ -425,6 +532,41 @@ router.get("/by-slug/:slug/onboarding", requireAdmin, async (req, res) => {
   } catch (err) {
     console.error("Error computing onboarding by slug:", err);
     return res.status(500).json({ error: "Failed to compute onboarding" });
+  }
+});
+
+
+
+// -----------------------------------------------------------------------------
+// GET /api/tenants/heartbeat?tenantSlug=...
+// Tenant-scoped lightweight endpoint for "nudge" polling.
+// Returns a single marker that changes whenever bookings change for this tenant.
+// -----------------------------------------------------------------------------
+router.get("/heartbeat", requireTenant, async (req, res) => {
+  try {
+    const tenantId = req.tenantId;
+
+    const result = await db.query(
+      `
+      SELECT
+        (COALESCE(branding, '{}'::jsonb) #>> '{system,lastBookingChangeAt}') AS last_booking_change_at
+      FROM tenants
+      WHERE id = $1
+      LIMIT 1
+      `,
+      [tenantId]
+    );
+
+    const lastBookingChangeAt = result.rows?.[0]?.last_booking_change_at || null;
+
+    return res.json({
+      tenantId,
+      lastBookingChangeAt,
+      serverTime: new Date().toISOString(),
+    });
+  } catch (err) {
+    console.error("Error loading tenant heartbeat:", err);
+    return res.status(500).json({ error: "Failed to load tenant heartbeat" });
   }
 });
 
