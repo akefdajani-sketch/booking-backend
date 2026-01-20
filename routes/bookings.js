@@ -60,14 +60,13 @@ async function bumpTenantBookingChange(tenantId) {
       SET branding = jsonb_set(
         COALESCE(branding, '{}'::jsonb),
         '{system,lastBookingChangeAt}',
-        to_jsonb(NOW()),
+        to_jsonb($2::text),
         true
       )
       WHERE id = $1
       `,
-      [tid]
-    );
-  } catch (err) {
+      [tid, new Date().toISOString()]
+    );} catch (err) {
     // best-effort; never fail booking flows because of heartbeat
     console.warn("Failed to bump tenant booking heartbeat:", err?.message || err);
   }
