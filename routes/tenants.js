@@ -204,10 +204,61 @@ router.get("/heartbeat", requireTenant, async (req, res) => {
       tenantId,
       lastBookingChangeAt,
       serverTime: new Date().toISOString(),
+      // Debug helpers (safe, no secrets). Useful to detect environment mismatch.
+      debug: {
+        service: process.env.RENDER_SERVICE_NAME || process.env.SERVICE_NAME || null,
+        dbName: (() => {
+          try {
+            const u = new URL(String(process.env.DATABASE_URL || ""));
+            return u.pathname ? u.pathname.replace(/^\//, "") : null;
+          } catch {
+            return null;
+          }
+        })(),
+      },
     });
   } catch (err) {
     console.error("Error loading tenant heartbeat:", err);
     return res.status(500).json({ error: "Failed to load tenant heartbeat" });
+  }
+});
+
+// -----------------------------------------------------------------------------
+// POST /api/tenants/heartbeat/bump?tenantSlug=...
+// Admin-protected manual bump for debugging "always null" issues.
+// Lets us verify the DB write path independently of booking creation.
+// -----------------------------------------------------------------------------
+router.post("/heartbeat/bump", requireAdmin, requireTenant, async (req, res) => {
+  try {
+    const tenantId = req.tenantId;
+    const nowIso = new Date().toISOString();
+
+    const upd = await db.query(
+      `
+      UPDATE tenants
+      SET branding = jsonb_set(
+        COALESCE(branding, '{}'::jsonb),
+        '{system,lastBookingChangeAt}',
+        to_jsonb($2::text),
+        true
+      )
+      WHERE id = $1
+      RETURNING (COALESCE(branding, '{}'::jsonb) #>> '{system,lastBookingChangeAt}') AS last_booking_change_at
+      `,
+      [Number(tenantId), nowIso]
+    );
+
+    const lastBookingChangeAt = upd.rows?.[0]?.last_booking_change_at || null;
+
+    return res.json({
+      ok: true,
+      tenantId,
+      lastBookingChangeAt,
+      serverTime: new Date().toISOString(),
+    });
+  } catch (err) {
+    console.error("Error bumping tenant heartbeat:", err);
+    return res.status(500).json({ error: "Failed to bump tenant heartbeat" });
   }
 });
 
