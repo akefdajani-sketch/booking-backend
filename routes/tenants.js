@@ -5,6 +5,7 @@ const { pool } = require("../db");
 const db = pool;
 
 const requireAdmin = require("../middleware/requireAdmin");
+const { requireTenant } = require("../middleware/requireTenant");
 
 // ✅ IMPORTANT: destructure these (do NOT do: const upload = require(...))
 const { upload, uploadErrorHandler } = require("../middleware/upload");
@@ -174,6 +175,39 @@ async function setBrandingAsset(tenantId, jsonPathArray, value) {
   );
   return result.rows?.[0] || null;
 }
+
+// -----------------------------------------------------------------------------
+// GET /api/tenants/heartbeat?tenantSlug=...
+// Tenant-scoped lightweight endpoint for "nudge" polling.
+// Returns a single marker that changes whenever bookings change for this tenant.
+// -----------------------------------------------------------------------------
+router.get("/heartbeat", requireTenant, async (req, res) => {
+  try {
+    const tenantId = req.tenantId;
+
+    const result = await db.query(
+      `
+      SELECT
+        (COALESCE(branding, '{}'::jsonb) #>> '{system,lastBookingChangeAt}') AS last_booking_change_at
+      FROM tenants
+      WHERE id = $1
+      LIMIT 1
+      `,
+      [tenantId]
+    );
+
+    const lastBookingChangeAt = result.rows?.[0]?.last_booking_change_at || null;
+
+    return res.json({
+      tenantId,
+      lastBookingChangeAt,
+      serverTime: new Date().toISOString(),
+    });
+  } catch (err) {
+    console.error("Error loading tenant heartbeat:", err);
+    return res.status(500).json({ error: "Failed to load tenant heartbeat" });
+  }
+});
 
 // -----------------------------------------------------------------------------
 // GET /api/tenants
