@@ -7,6 +7,7 @@ const { uploadDir } = require("./middleware/upload");
 // existing routers
 const tenantsRouter = require("./routes/tenants");
 const tenantHoursRouter = require("./routes/tenantHours");
+const tenantBlackoutsRouter = require("./routes/tenantBlackouts");
 const servicesRouter = require("./routes/services");
 const staffRouter = require("./routes/staff");
 const resourcesRouter = require("./routes/resources");
@@ -39,6 +40,7 @@ app.use("/uploads", express.static(uploadDir));
 // core APIs
 app.use("/api/tenants", tenantsRouter);
 app.use("/api/tenant-hours", tenantHoursRouter);
+app.use("/api/tenant-blackouts", tenantBlackoutsRouter);
 app.use("/api/services", servicesRouter);
 app.use("/api/staff", staffRouter);
 app.use("/api/resources", resourcesRouter);
