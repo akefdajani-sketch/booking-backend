@@ -8,23 +8,6 @@ const { requireTenant } = require("../middleware/requireTenant");
 const { checkConflicts, loadJoinedBookingById } = require("../utils/bookings");
 
 // ---------------------------------------------------------------------------
-// Debug helpers (safe, no secrets)
-// ---------------------------------------------------------------------------
-function getDebugFingerprint() {
-  return {
-    service: process.env.RENDER_SERVICE_NAME || process.env.SERVICE_NAME || null,
-    dbName: (() => {
-      try {
-        const u = new URL(String(process.env.DATABASE_URL || ""));
-        return u.pathname ? u.pathname.replace(/^\//, "") : null;
-      } catch {
-        return null;
-      }
-    })(),
-  };
-}
-
-// ---------------------------------------------------------------------------
 // Phase 0 safety helpers
 // ---------------------------------------------------------------------------
 function getIdempotencyKey(req) {
@@ -75,10 +58,7 @@ async function bumpTenantBookingChange(tenantId) {
       `
       UPDATE tenants
       SET branding = jsonb_set(
-        CASE
-          WHEN jsonb_typeof(branding) = 'object' THEN branding
-          ELSE '{}'::jsonb
-        END,
+        (CASE WHEN jsonb_typeof(branding) = 'object' THEN branding ELSE '{}'::jsonb END),
         '{system,lastBookingChangeAt}',
         to_jsonb($2::text),
         true
@@ -815,7 +795,17 @@ router.post("/", async (req, res) => {
     return res.status(created ? 201 : 200).json({
       booking: joined,
       replay: !created,
-      debug: getDebugFingerprint(),
+      debug: {
+        service: process.env.RENDER_SERVICE_NAME || process.env.SERVICE_NAME || null,
+        dbName: (() => {
+          try {
+            const u = new URL(String(process.env.DATABASE_URL || ""));
+            return u.pathname ? u.pathname.replace(/^\//, "") : null;
+          } catch {
+            return null;
+          }
+        })(),
+      },
     });
     } catch (err) {
       try { await client.query("ROLLBACK"); } catch (_) {}
