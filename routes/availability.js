@@ -321,30 +321,48 @@ const windowEndLocal = `${addDaysISO(date, isOvernight ? 1 : 0)} ${closeHHMM}:00
 
 if (availabilityBasis === "none") {
   const q = `
-    SELECT to_char(gs AT TIME ZONE $4, 'HH24:MI') AS time
-    FROM generate_series(
+    WITH slots AS (
+      SELECT
+        gs AS slot_start,
+        gs + make_interval(mins => $5) AS slot_end
+      FROM generate_series(
       ($1::timestamp AT TIME ZONE $4),
       ($2::timestamp AT TIME ZONE $4) - make_interval(mins => $5),
       make_interval(mins => $5)
-    ) gs
-    ORDER BY gs
+      ) gs
+    )
+    SELECT
+      to_char(slot_start AT TIME ZONE $4, 'HH24:MI') AS time,
+      COUNT(tb.*)::int AS blackout_hits
+    FROM slots
+    LEFT JOIN tenant_blackouts tb
+      ON tb.tenant_id = $3
+     AND tb.is_active = TRUE
+     AND tstzrange(tb.starts_at, tb.ends_at, '[)') && tstzrange(slot_start, slot_end, '[)')
+     AND (
+       tb.resource_id IS NULL OR tb.resource_id = $6
+     )
+    GROUP BY slot_start
+    ORDER BY slot_start
   `;
-  const r = await pool.query(q, [windowStartLocal, windowEndLocal, tenantId, tenantTz, stepMin]);
+  const r = await pool.query(q, [windowStartLocal, windowEndLocal, tenantId, tenantTz, stepMin, resourceId ?? null]);
   for (const row of r.rows) {
     const startHHMM = row.time;
+    const blackoutHits = Number(row.blackout_hits ?? 0);
     const slotObj = {
       time: startHHMM,
       label: startHHMM,
-      is_available: true,
-      available: true,
+      is_available: blackoutHits === 0,
+      available: blackoutHits === 0,
       overlaps: 0,
       overlaps_resource: 0,
       overlaps_staff: 0,
       capacity: maxParallel,
+      blackout_hits: blackoutHits,
     };
 
     allSlots.push(slotObj);
-    availableTimes.push(startHHMM);
+    if (blackoutHits === 0) availableTimes.push(startHHMM);
   }
 } else {
   const q = `
@@ -361,12 +379,20 @@ if (availabilityBasis === "none") {
     SELECT
       to_char(slot_start AT TIME ZONE $4, 'HH24:MI') AS time,
       COUNT(b.*) FILTER (WHERE $6 IN ('resource','both') AND b.resource_id = $7)::int AS overlaps_resource,
-      COUNT(b.*) FILTER (WHERE $6 IN ('staff','both') AND b.staff_id = $8)::int AS overlaps_staff
+      COUNT(b.*) FILTER (WHERE $6 IN ('staff','both') AND b.staff_id = $8)::int AS overlaps_staff,
+      COUNT(tb.*)::int AS blackout_hits
     FROM slots
     LEFT JOIN bookings b
       ON b.tenant_id = $3
      AND b.status IN ('pending','confirmed')
      AND b.booking_range && tstzrange(slot_start, slot_end, '[)')
+    LEFT JOIN tenant_blackouts tb
+      ON tb.tenant_id = $3
+     AND tb.is_active = TRUE
+     AND tstzrange(tb.starts_at, tb.ends_at, '[)') && tstzrange(slot_start, slot_end, '[)')
+     AND (
+       tb.resource_id IS NULL OR tb.resource_id = $7
+     )
     GROUP BY slot_start
     ORDER BY slot_start;
   `;
@@ -386,6 +412,7 @@ if (availabilityBasis === "none") {
     const startHHMM = row.time;
     const overlapsResource = Number(row.overlaps_resource ?? 0);
     const overlapsStaff = Number(row.overlaps_staff ?? 0);
+    const blackoutHits = Number(row.blackout_hits ?? 0);
 
     let isAvailable = true;
     if (availabilityBasis === "resource") {
@@ -403,16 +430,17 @@ if (availabilityBasis === "none") {
     const slotObj = {
       time: startHHMM,
       label: startHHMM,
-      is_available: isAvailable,
-      available: isAvailable,
+      is_available: isAvailable && blackoutHits === 0,
+      available: isAvailable && blackoutHits === 0,
       overlaps: overlapsCount,
       overlaps_resource: overlapsResource,
       overlaps_staff: overlapsStaff,
       capacity: maxParallel,
+      blackout_hits: blackoutHits,
     };
 
     allSlots.push(slotObj);
-    if (isAvailable) availableTimes.push(startHHMM);
+    if (isAvailable && blackoutHits === 0) availableTimes.push(startHHMM);
   }
 }
 
