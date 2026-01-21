@@ -41,7 +41,9 @@ async function computeOnboardingSnapshot(tenantId) {
   const tenant = tenantRes.rows?.[0];
   if (!tenant) return null;
 
-  const business = Boolean(String(tenant.name || "").trim()) && Boolean(String(tenant.timezone || "").trim());
+  const business =
+    Boolean(String(tenant.name || "").trim()) &&
+    Boolean(String(tenant.timezone || "").trim());
 
   const hoursRes = await db.query(
     `
@@ -153,12 +155,12 @@ async function persistOnboardingSnapshot(tenantId, snapshot) {
     [Number(tenantId), JSON.stringify(snapshot || {})]
   );
 }
+
 // -----------------------------------------------------------------------------
 // Branding JSONB helpers (Phase 2)
 // -----------------------------------------------------------------------------
 async function setBrandingAsset(tenantId, jsonPathArray, value) {
   // jsonPathArray example: ["assets","logoUrl"] or ["assets","banners","book"]
-  const pathSql = `{${jsonPathArray.join(",")}}`;
   const result = await db.query(
     `
     UPDATE tenants
@@ -176,8 +178,6 @@ async function setBrandingAsset(tenantId, jsonPathArray, value) {
   return result.rows?.[0] || null;
 }
 
-
-
 // -----------------------------------------------------------------------------
 // GET /api/tenants/heartbeat?tenantSlug=...
 // Tenant-scoped lightweight endpoint for "nudge" polling.
@@ -187,15 +187,20 @@ router.get("/heartbeat", requireTenant, async (req, res) => {
   try {
     const tenantId = req.tenantId;
 
+    // Canonical signal is tenants.last_booking_change_at
+    // Fallback to legacy JSONB branding.system.lastBookingChangeAt if column is null.
     const result = await db.query(
       `
       SELECT
-        (COALESCE(branding, '{}'::jsonb) #>> '{system,lastBookingChangeAt}') AS last_booking_change_at
+        COALESCE(
+          last_booking_change_at,
+          NULLIF((COALESCE(branding, '{}'::jsonb) #>> '{system,lastBookingChangeAt}'), '')::timestamptz
+        ) AS last_booking_change_at
       FROM tenants
       WHERE id = $1
       LIMIT 1
       `,
-      [tenantId]
+      [Number(tenantId)]
     );
 
     const lastBookingChangeAt = result.rows?.[0]?.last_booking_change_at || null;
@@ -226,26 +231,30 @@ router.get("/heartbeat", requireTenant, async (req, res) => {
 // -----------------------------------------------------------------------------
 // POST /api/tenants/heartbeat/bump?tenantSlug=...
 // Admin-protected manual bump for debugging "always null" issues.
-// Lets us verify the DB write path independently of booking creation.
+// Updates BOTH the canonical column and the legacy JSONB field.
 // -----------------------------------------------------------------------------
 router.post("/heartbeat/bump", requireAdmin, requireTenant, async (req, res) => {
   try {
-    const tenantId = req.tenantId;
+    const tenantId = Number(req.tenantId);
     const nowIso = new Date().toISOString();
 
     const upd = await db.query(
       `
       UPDATE tenants
-      SET branding = jsonb_set(
-        (CASE WHEN jsonb_typeof(branding) = 'object' THEN branding ELSE '{}'::jsonb END),
-        '{system,lastBookingChangeAt}',
-        to_jsonb($2::text),
-        true
-      )
+      SET
+        last_booking_change_at = NOW(),
+        branding = jsonb_set(
+          (CASE WHEN jsonb_typeof(branding) = 'object' THEN branding ELSE '{}'::jsonb END),
+          '{system,lastBookingChangeAt}',
+          to_jsonb($2::text),
+          true
+        )
       WHERE id = $1
-      RETURNING (CASE WHEN jsonb_typeof(branding) = 'object' THEN branding ELSE '{}'::jsonb END) #>> '{system,lastBookingChangeAt}' AS last_booking_change_at
+      RETURNING
+        last_booking_change_at,
+        (CASE WHEN jsonb_typeof(branding) = 'object' THEN branding ELSE '{}'::jsonb END) #>> '{system,lastBookingChangeAt}' AS legacy_last_booking_change_at
       `,
-      [Number(tenantId), nowIso]
+      [tenantId, nowIso]
     );
 
     const lastBookingChangeAt = upd.rows?.[0]?.last_booking_change_at || null;
@@ -265,26 +274,29 @@ router.post("/heartbeat/bump", requireAdmin, requireTenant, async (req, res) => 
 // -----------------------------------------------------------------------------
 // GET /api/tenants/heartbeat/bump?tenantSlug=...
 // Convenience alias for browsers (address bar == GET). Same behavior as POST.
-// Admin-protected manual bump for debugging.
 // -----------------------------------------------------------------------------
 router.get("/heartbeat/bump", requireAdmin, requireTenant, async (req, res) => {
   try {
-    const tenantId = req.tenantId;
+    const tenantId = Number(req.tenantId);
     const nowIso = new Date().toISOString();
 
     const upd = await db.query(
       `
       UPDATE tenants
-      SET branding = jsonb_set(
-        (CASE WHEN jsonb_typeof(branding) = 'object' THEN branding ELSE '{}'::jsonb END),
-        '{system,lastBookingChangeAt}',
-        to_jsonb($2::text),
-        true
-      )
+      SET
+        last_booking_change_at = NOW(),
+        branding = jsonb_set(
+          (CASE WHEN jsonb_typeof(branding) = 'object' THEN branding ELSE '{}'::jsonb END),
+          '{system,lastBookingChangeAt}',
+          to_jsonb($2::text),
+          true
+        )
       WHERE id = $1
-      RETURNING (CASE WHEN jsonb_typeof(branding) = 'object' THEN branding ELSE '{}'::jsonb END) #>> '{system,lastBookingChangeAt}' AS last_booking_change_at
+      RETURNING
+        last_booking_change_at,
+        (CASE WHEN jsonb_typeof(branding) = 'object' THEN branding ELSE '{}'::jsonb END) #>> '{system,lastBookingChangeAt}' AS legacy_last_booking_change_at
       `,
-      [Number(tenantId), nowIso]
+      [tenantId, nowIso]
     );
 
     const lastBookingChangeAt = upd.rows?.[0]?.last_booking_change_at || null;
@@ -381,10 +393,7 @@ router.post("/", requireAdmin, async (req, res) => {
     }
 
     // Ensure unique slug before insert (friendlier error)
-    const exists = await db.query(
-      `SELECT 1 FROM tenants WHERE slug = $1 LIMIT 1`,
-      [slug]
-    );
+    const exists = await db.query(`SELECT 1 FROM tenants WHERE slug = $1 LIMIT 1`, [slug]);
     if (exists.rows.length) {
       return res.status(409).json({ error: "Slug already exists" });
     }
@@ -419,41 +428,6 @@ router.post("/", requireAdmin, async (req, res) => {
     }
     console.error("Error creating tenant:", err);
     return res.status(500).json({ error: "Failed to create tenant" });
-  }
-});
-
-
-
-// -----------------------------------------------------------------------------
-// GET /api/tenants/heartbeat?tenantSlug=...
-// Tenant-scoped lightweight endpoint for "nudge" polling.
-// Returns a single marker that changes whenever bookings change for this tenant.
-// -----------------------------------------------------------------------------
-router.get("/heartbeat", requireTenant, async (req, res) => {
-  try {
-    const tenantId = req.tenantId;
-
-    const result = await db.query(
-      `
-      SELECT
-        (COALESCE(branding, '{}'::jsonb) #>> '{system,lastBookingChangeAt}') AS last_booking_change_at
-      FROM tenants
-      WHERE id = $1
-      LIMIT 1
-      `,
-      [tenantId]
-    );
-
-    const lastBookingChangeAt = result.rows?.[0]?.last_booking_change_at || null;
-
-    return res.json({
-      tenantId,
-      lastBookingChangeAt,
-      serverTime: new Date().toISOString(),
-    });
-  } catch (err) {
-    console.error("Error loading tenant heartbeat:", err);
-    return res.status(500).json({ error: "Failed to load tenant heartbeat" });
   }
 });
 
@@ -500,41 +474,6 @@ router.get("/by-slug/:slug", async (req, res) => {
   }
 });
 
-
-
-// -----------------------------------------------------------------------------
-// GET /api/tenants/heartbeat?tenantSlug=...
-// Tenant-scoped lightweight endpoint for "nudge" polling.
-// Returns a single marker that changes whenever bookings change for this tenant.
-// -----------------------------------------------------------------------------
-router.get("/heartbeat", requireTenant, async (req, res) => {
-  try {
-    const tenantId = req.tenantId;
-
-    const result = await db.query(
-      `
-      SELECT
-        (COALESCE(branding, '{}'::jsonb) #>> '{system,lastBookingChangeAt}') AS last_booking_change_at
-      FROM tenants
-      WHERE id = $1
-      LIMIT 1
-      `,
-      [tenantId]
-    );
-
-    const lastBookingChangeAt = result.rows?.[0]?.last_booking_change_at || null;
-
-    return res.json({
-      tenantId,
-      lastBookingChangeAt,
-      serverTime: new Date().toISOString(),
-    });
-  } catch (err) {
-    console.error("Error loading tenant heartbeat:", err);
-    return res.status(500).json({ error: "Failed to load tenant heartbeat" });
-  }
-});
-
 // -----------------------------------------------------------------------------
 // GET /api/tenants/by-slug/:slug/branding
 // Public: returns branding json only
@@ -544,10 +483,9 @@ router.get("/by-slug/:slug/branding", async (req, res) => {
     const slug = String(req.params.slug || "").trim();
     if (!slug) return res.status(400).json({ error: "Missing slug" });
 
-    const result = await db.query(
-      `SELECT branding FROM tenants WHERE slug = $1 LIMIT 1`,
-      [slug]
-    );
+    const result = await db.query(`SELECT branding FROM tenants WHERE slug = $1 LIMIT 1`, [
+      slug,
+    ]);
 
     if (!result.rows.length) {
       return res.status(404).json({ error: "Tenant not found" });
@@ -557,41 +495,6 @@ router.get("/by-slug/:slug/branding", async (req, res) => {
   } catch (err) {
     console.error("Error loading tenant branding:", err);
     return res.status(500).json({ error: "Failed to load tenant branding" });
-  }
-});
-
-
-
-// -----------------------------------------------------------------------------
-// GET /api/tenants/heartbeat?tenantSlug=...
-// Tenant-scoped lightweight endpoint for "nudge" polling.
-// Returns a single marker that changes whenever bookings change for this tenant.
-// -----------------------------------------------------------------------------
-router.get("/heartbeat", requireTenant, async (req, res) => {
-  try {
-    const tenantId = req.tenantId;
-
-    const result = await db.query(
-      `
-      SELECT
-        (COALESCE(branding, '{}'::jsonb) #>> '{system,lastBookingChangeAt}') AS last_booking_change_at
-      FROM tenants
-      WHERE id = $1
-      LIMIT 1
-      `,
-      [tenantId]
-    );
-
-    const lastBookingChangeAt = result.rows?.[0]?.last_booking_change_at || null;
-
-    return res.json({
-      tenantId,
-      lastBookingChangeAt,
-      serverTime: new Date().toISOString(),
-    });
-  } catch (err) {
-    console.error("Error loading tenant heartbeat:", err);
-    return res.status(500).json({ error: "Failed to load tenant heartbeat" });
   }
 });
 
@@ -622,41 +525,6 @@ router.get("/by-slug/:slug/onboarding", requireAdmin, async (req, res) => {
   } catch (err) {
     console.error("Error computing onboarding by slug:", err);
     return res.status(500).json({ error: "Failed to compute onboarding" });
-  }
-});
-
-
-
-// -----------------------------------------------------------------------------
-// GET /api/tenants/heartbeat?tenantSlug=...
-// Tenant-scoped lightweight endpoint for "nudge" polling.
-// Returns a single marker that changes whenever bookings change for this tenant.
-// -----------------------------------------------------------------------------
-router.get("/heartbeat", requireTenant, async (req, res) => {
-  try {
-    const tenantId = req.tenantId;
-
-    const result = await db.query(
-      `
-      SELECT
-        (COALESCE(branding, '{}'::jsonb) #>> '{system,lastBookingChangeAt}') AS last_booking_change_at
-      FROM tenants
-      WHERE id = $1
-      LIMIT 1
-      `,
-      [tenantId]
-    );
-
-    const lastBookingChangeAt = result.rows?.[0]?.last_booking_change_at || null;
-
-    return res.json({
-      tenantId,
-      lastBookingChangeAt,
-      serverTime: new Date().toISOString(),
-    });
-  } catch (err) {
-    console.error("Error loading tenant heartbeat:", err);
-    return res.status(500).json({ error: "Failed to load tenant heartbeat" });
   }
 });
 
@@ -757,10 +625,7 @@ router.post(
       filePath = req.file.path;
 
       // Fetch old key (so we can delete on replace)
-      const old = await db.query(
-        `SELECT logo_key FROM tenants WHERE id = $1 LIMIT 1`,
-        [id]
-      );
+      const old = await db.query(`SELECT logo_key FROM tenants WHERE id = $1 LIMIT 1`, [id]);
       const oldKey = old.rows?.[0]?.logo_key || null;
 
       const key = `tenants/${id}/branding/logo/${Date.now()}-${safeName(
@@ -787,10 +652,10 @@ router.post(
         await deleteFromR2(oldKey).catch(() => {});
       }
 
-            // also keep branding.assets.logoUrl in sync
+      // also keep branding.assets.logoUrl in sync
       await setBrandingAsset(id, ["assets", "logoUrl"], result.rows[0].logo_url);
       return res.json(result.rows[0]);
-} catch (err) {
+    } catch (err) {
       console.error("Tenant logo upload error:", err);
       return res.status(500).json({ error: "Upload failed" });
     } finally {
@@ -801,7 +666,6 @@ router.post(
   }
 );
 
-// -----------------------------------------------------------------------------
 // -----------------------------------------------------------------------------
 // POST /api/tenants/:id/favicon
 // Admin: upload tenant favicon to R2 and store in tenants.branding.assets.faviconUrl
@@ -898,6 +762,7 @@ router.post(
   }
 );
 
+// -----------------------------------------------------------------------------
 // POST /api/tenants/:id/banner/:slot
 // Admin: upload tenant banner for bottom tabs (book/reservations/account/home)
 // Stores tenants.banner_*_url + tenants.banner_*_key
@@ -936,10 +801,7 @@ router.post(
       const keyCol = `banner_${slot}_key`;
 
       // Read old key
-      const old = await db.query(
-        `SELECT ${keyCol} FROM tenants WHERE id = $1 LIMIT 1`,
-        [id]
-      );
+      const old = await db.query(`SELECT ${keyCol} FROM tenants WHERE id = $1 LIMIT 1`, [id]);
       const oldKey = old.rows?.[0]?.[keyCol] || null;
 
       const key = `tenants/${id}/branding/banner-${slot}/${Date.now()}-${safeName(
@@ -969,10 +831,10 @@ router.post(
         await deleteFromR2(oldKey).catch(() => {});
       }
 
-            // also keep branding.assets.banners.<slot> in sync
+      // also keep branding.assets.banners.<slot> in sync
       await setBrandingAsset(id, ["assets", "banners", slot], result.rows[0][urlCol]);
       return res.json(result.rows[0]);
-} catch (err) {
+    } catch (err) {
       console.error("Tenant banner upload error:", err);
       return res.status(500).json({ error: "Upload failed" });
     } finally {
