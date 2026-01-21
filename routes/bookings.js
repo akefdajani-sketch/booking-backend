@@ -7,6 +7,44 @@ const db = pool;
 const { requireTenant } = require("../middleware/requireTenant");
 const { checkConflicts, loadJoinedBookingById } = require("../utils/bookings");
 
+// Blackout windows (closures)
+async function checkBlackoutOverlap({
+  tenantId,
+  startTime,
+  endTime,
+  resourceId,
+  staffId,
+  serviceId,
+}) {
+  const tid = Number(tenantId);
+  if (!Number.isFinite(tid) || tid <= 0) return null;
+
+  const startIso = typeof startTime === "string" ? startTime : new Date(startTime).toISOString();
+  const endIso = typeof endTime === "string" ? endTime : new Date(endTime).toISOString();
+
+  const rid = resourceId != null && resourceId !== "" ? Number(resourceId) : null;
+  const sid = staffId != null && staffId !== "" ? Number(staffId) : null;
+  const svc = serviceId != null && serviceId !== "" ? Number(serviceId) : null;
+
+  const r = await db.query(
+    `
+    SELECT id, starts_at, ends_at, reason, resource_id, staff_id, service_id
+    FROM tenant_blackouts
+    WHERE tenant_id = $1
+      AND is_active = TRUE
+      AND tstzrange(starts_at, ends_at, '[)') && tstzrange($2::timestamptz, $3::timestamptz, '[)')
+      AND (resource_id IS NULL OR resource_id = $4)
+      AND (staff_id IS NULL OR staff_id = $5)
+      AND (service_id IS NULL OR service_id = $6)
+    ORDER BY starts_at ASC
+    LIMIT 1
+    `,
+    [tid, startIso, endIso, rid, sid, svc]
+  );
+
+  return r.rows?.[0] || null;
+}
+
 // ---------------------------------------------------------------------------
 // Phase 0 safety helpers
 // ---------------------------------------------------------------------------
@@ -623,6 +661,24 @@ router.post("/", async (req, res) => {
         return res
           .status(400)
           .json({ error: "resourceId not valid for tenant." });
+    }
+
+    // ✅ Enforce blackout windows (closures) before running conflict checks.
+    // This ensures that even if no bookings exist, closed windows remain unbookable.
+    const end = new Date(start.getTime() + Number(duration) * 60 * 1000);
+    const blackout = await checkBlackoutOverlap({
+      tenantId: resolvedTenantId,
+      startTime: start.toISOString(),
+      endTime: end.toISOString(),
+      resourceId: resource_id,
+      staffId: staff_id,
+      serviceId: resolvedServiceId,
+    });
+    if (blackout) {
+      return res.status(409).json({
+        error: "This time window is blocked.",
+        blackout,
+      });
     }
 
     const conflicts = await checkConflicts({
