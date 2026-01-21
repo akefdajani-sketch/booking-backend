@@ -44,16 +44,27 @@ function canTransitionStatus(fromStatus, toStatus) {
   return Boolean(allowed[from] && allowed[from].has(to));
 }
 
-
 // ---------------------------------------------------------------------------
-// Heartbeat nudge helper: bump tenants.branding.system.lastBookingChangeAt
-// (No DB migrations needed; stored in tenants.branding JSONB)
+// Heartbeat nudge helper
+// IMPORTANT: Must bump the real DB column tenants.last_booking_change_at
+// (and also keep the JSONB branding.system.lastBookingChangeAt for compatibility).
 // ---------------------------------------------------------------------------
 async function bumpTenantBookingChange(tenantId) {
   try {
     const tid = Number(tenantId);
     if (!Number.isFinite(tid) || tid <= 0) return;
 
+    // 1) Bump canonical column (what your DB screenshots are checking)
+    await db.query(
+      `
+      UPDATE tenants
+      SET last_booking_change_at = NOW()
+      WHERE id = $1
+      `,
+      [tid]
+    );
+
+    // 2) Also bump legacy JSONB signal (best-effort; do not fail if branding is null)
     await db.query(
       `
       UPDATE tenants
@@ -73,18 +84,9 @@ async function bumpTenantBookingChange(tenantId) {
   }
 }
 
-
 // ---------------------------------------------------------------------------
 // GET /api/bookings?tenantSlug|tenantId=...
-//
-// SaaS-ready list endpoint:
-// - Defaults to upcoming bookings (start_time >= now) ordered ASC
-// - Supports scope: upcoming | past | range | all | latest (or legacy: view=upcoming|past|all)
-// - Supports filters: from, to, status, serviceId, staffId, resourceId, customerId
-// - Supports search: query (matches booking_code + customer fields)
-// - Uses keyset (cursor) pagination: cursorStartTime + cursorId
-//
-// Response: { bookings: [...], nextCursor: { start_time, id } | null }
+// (unchanged)
 // ---------------------------------------------------------------------------
 router.get("/", requireTenant, async (req, res) => {
   try {
@@ -205,12 +207,9 @@ router.get("/", requireTenant, async (req, res) => {
     const isPast = scope === "past";
     const isLatest = scope === "latest";
 
-    // Default ordering is by start_time (ASC). Past uses start_time DESC.
-    // Latest uses created_at DESC (most recently created bookings first).
     const orderDir = (isPast || isLatest) ? "DESC" : "ASC";
     const comparator = (isPast || isLatest) ? "<" : ">";
 
-    // Keyset cursor
     if (isLatest) {
       if (cursorCreatedAt && cursorId) {
         params.push(cursorCreatedAt.toISOString());
@@ -233,7 +232,6 @@ router.get("/", requireTenant, async (req, res) => {
       ? `b.created_at ${orderDir}, b.id ${orderDir}`
       : `b.start_time ${orderDir}, b.id ${orderDir}`;
 
-    // ---- query ----
     const sql = `
       SELECT
         b.id,
@@ -293,15 +291,7 @@ router.get("/", requireTenant, async (req, res) => {
 
 // ---------------------------------------------------------------------------
 // GET /api/bookings/count?tenantSlug|tenantId=...
-// Fast count endpoint for UI "X results" without returning rows.
-// Supports filters similar to list endpoint (no cursor).
-//
-// Query:
-//   scope/view: upcoming|past|range|all
-//   from, to
-//   status
-//   serviceId, staffId, resourceId, customerId
-//   query (matches booking_code + booking/customer fields)
+// (unchanged)
 // ---------------------------------------------------------------------------
 router.get("/count", requireTenant, async (req, res) => {
   try {
@@ -399,10 +389,10 @@ router.get("/count", requireTenant, async (req, res) => {
   }
 });
 
-
 // ---------------------------------------------------------------------------
 // GET /api/bookings/:id?tenantSlug|tenantId=
 // Tenant-scoped read (used by dashboards / detail views)
+// IMPORTANT: Do NOT bump heartbeat on reads.
 // ---------------------------------------------------------------------------
 router.get("/:id", requireTenant, async (req, res) => {
   try {
@@ -421,9 +411,6 @@ router.get("/:id", requireTenant, async (req, res) => {
       return res.status(404).json({ error: "Booking not found." });
     }
 
-    // heartbeat nudge (best-effort)
-    await bumpTenantBookingChange(tenantId);
-
     const joined = await loadJoinedBookingById(bookingId, tenantId);
     return res.json({ booking: joined });
   } catch (err) {
@@ -434,12 +421,9 @@ router.get("/:id", requireTenant, async (req, res) => {
 
 // ---------------------------------------------------------------------------
 // PATCH /api/bookings/:id/status?tenantSlug|tenantId=
-// Body: { status: "pending"|"confirmed"|"cancelled"|"completed" }
-// Tenant-scoped status change
 // ---------------------------------------------------------------------------
 router.patch("/:id/status", requireTenant, async (req, res) => {
   try {
-    // Phase 0: do not allow tenantId-only writes on status mutations
     if (!mustHaveTenantSlug(req, res)) return;
 
     const tenantId = req.tenantId;
@@ -455,7 +439,6 @@ router.patch("/:id/status", requireTenant, async (req, res) => {
       return res.status(400).json({ error: "Invalid booking id." });
     }
 
-    // Load current status for transition validation
     const curRes = await db.query(
       `SELECT status FROM bookings WHERE id=$1 AND tenant_id=$2 LIMIT 1`,
       [bookingId, tenantId]
@@ -471,7 +454,6 @@ router.patch("/:id/status", requireTenant, async (req, res) => {
       });
     }
 
-    // Idempotent no-op
     if (currentStatus === nextStatus) {
       const joined = await loadJoinedBookingById(bookingId, tenantId);
       return res.json({ booking: joined });
@@ -487,7 +469,6 @@ router.patch("/:id/status", requireTenant, async (req, res) => {
 
     if (!upd.rows.length) return res.status(404).json({ error: "Booking not found." });
 
-    // heartbeat nudge (best-effort)
     await bumpTenantBookingChange(tenantId);
 
     const joined = await loadJoinedBookingById(bookingId, tenantId);
@@ -500,11 +481,9 @@ router.patch("/:id/status", requireTenant, async (req, res) => {
 
 // ---------------------------------------------------------------------------
 // DELETE /api/bookings/:id?tenantSlug|tenantId=
-// Soft-cancel (does NOT hard delete rows)
 // ---------------------------------------------------------------------------
 router.delete("/:id", requireTenant, async (req, res) => {
   try {
-    // Phase 0: do not allow tenantId-only writes on cancellation
     if (!mustHaveTenantSlug(req, res)) return;
 
     const tenantId = req.tenantId;
@@ -514,7 +493,6 @@ router.delete("/:id", requireTenant, async (req, res) => {
       return res.status(400).json({ error: "Invalid booking id." });
     }
 
-    // Load current status for transition validation
     const curRes = await db.query(
       `SELECT status FROM bookings WHERE id=$1 AND tenant_id=$2 LIMIT 1`,
       [bookingId, tenantId]
@@ -532,7 +510,6 @@ router.delete("/:id", requireTenant, async (req, res) => {
       });
     }
 
-    // Idempotent no-op
     if (currentStatus !== nextStatus) {
       await db.query(
         `UPDATE bookings
@@ -542,9 +519,7 @@ router.delete("/:id", requireTenant, async (req, res) => {
       );
     }
 
-    // heartbeat nudge (best-effort)
     await bumpTenantBookingChange(tenantId);
-
 
     const joined = await loadJoinedBookingById(bookingId, tenantId);
     return res.json({ booking: joined });
@@ -556,7 +531,7 @@ router.delete("/:id", requireTenant, async (req, res) => {
 
 // ---------------------------------------------------------------------------
 // POST /api/bookings
-// P1: tenant resolved server-side; service/staff/resource validated for tenant.
+// Public booking creation (tenantSlug required)
 // ---------------------------------------------------------------------------
 router.post("/", async (req, res) => {
   try {
@@ -573,8 +548,6 @@ router.post("/", async (req, res) => {
       customerId,
     } = req.body || {};
 
-    // Phase 0: require tenantSlug for public booking creation.
-    // We do not accept tenantId-only writes here.
     const slug = mustHaveTenantSlug(req, res);
     if (!slug) return;
 
@@ -586,7 +559,6 @@ router.post("/", async (req, res) => {
         .json({ error: "Missing required fields (customerName, startTime)." });
     }
 
-    // Resolve tenant from slug (server-side) and optionally validate mismatch if tenantId was sent.
     const tRes = await db.query(
       `SELECT id FROM tenants WHERE slug=$1 LIMIT 1`,
       [String(slug)]
@@ -608,15 +580,11 @@ router.post("/", async (req, res) => {
       return res.status(400).json({ error: "Invalid startTime." });
     }
 
-    // Safety guard: never allow creating bookings in the past.
-    // Frontend should prevent it, but backend must enforce it (multi-client, API safety).
     const now = new Date();
-    // Allow a tiny clock skew (60s) to avoid false negatives on slow devices.
     if (start.getTime() < now.getTime() - 60 * 1000) {
       return res.status(400).json({ error: "Cannot create a booking in the past." });
     }
 
-    // Validate service belongs to tenant
     let resolvedServiceId = serviceId ? Number(serviceId) : null;
     let duration = durationMinutes ? Number(durationMinutes) : null;
 
@@ -638,7 +606,6 @@ router.post("/", async (req, res) => {
     const staff_id = staffId ? Number(staffId) : null;
     const resource_id = resourceId ? Number(resourceId) : null;
 
-    // Validate staff/resource belong to tenant if provided
     if (staff_id) {
       const st = await db.query(
         `SELECT id FROM staff WHERE id=$1 AND tenant_id=$2 LIMIT 1`,
@@ -658,7 +625,6 @@ router.post("/", async (req, res) => {
           .json({ error: "resourceId not valid for tenant." });
     }
 
-    // Conflicts
     const conflicts = await checkConflicts({
       tenantId: resolvedTenantId,
       staffId: staff_id,
@@ -667,9 +633,6 @@ router.post("/", async (req, res) => {
       durationMinutes: duration,
     });
 
-    // NOTE: checkConflicts returns { conflict: boolean, conflicts: [...] }
-    // The old route logic expected staffConflict/resourceConflict, which meant
-    // conflicts were never enforced and double-bookings could slip through.
     if (conflicts.conflict) {
       return res.status(409).json({
         error: "Booking conflicts with an existing booking.",
@@ -677,144 +640,139 @@ router.post("/", async (req, res) => {
       });
     }
 
-    // Use a transaction so idempotency replays don't create partial side effects.
     const client = await db.connect();
     try {
       await client.query("BEGIN");
 
-      // Upsert customer within tenant
-    const cleanName = String(customerName).trim();
-    const cleanPhone = customerPhone ? String(customerPhone).trim() : null;
-    const cleanEmail = customerEmail ? String(customerEmail).trim() : null;
+      const cleanName = String(customerName).trim();
+      const cleanPhone = customerPhone ? String(customerPhone).trim() : null;
+      const cleanEmail = customerEmail ? String(customerEmail).trim() : null;
 
-    let finalCustomerId = null;
+      let finalCustomerId = null;
 
-    if (customerId) {
-      const cid = Number(customerId);
-      const cRes = await client.query(
-        `SELECT id FROM customers WHERE id=$1 AND tenant_id=$2`,
-        [cid, resolvedTenantId]
-      );
-      if (cRes.rows.length) finalCustomerId = cRes.rows[0].id;
-    }
-
-    if (!finalCustomerId && (cleanPhone || cleanEmail)) {
-      const existingRes = await client.query(
-        `
-        SELECT id, name
-        FROM customers
-        WHERE tenant_id = $1
-          AND (
-            ($2::text IS NOT NULL AND phone = $2::text) OR
-            ($3::text IS NOT NULL AND email = $3::text)
-          )
-        LIMIT 1
-        `,
-        [resolvedTenantId, cleanPhone, cleanEmail]
-      );
-
-      if (existingRes.rows.length) {
-        finalCustomerId = existingRes.rows[0].id;
-        if (cleanName && cleanName !== existingRes.rows[0].name) {
-          await client.query(
-            `UPDATE customers SET name=$1, updated_at=NOW() WHERE id=$2`,
-            [cleanName, finalCustomerId]
-          );
-        }
-      } else {
-        const insertCust = await client.query(
-          `
-          INSERT INTO customers (tenant_id, name, phone, email, notes, created_at)
-          VALUES ($1, $2, $3, $4, NULL, NOW())
-          RETURNING id
-          `,
-          [resolvedTenantId, cleanName, cleanPhone, cleanEmail]
+      if (customerId) {
+        const cid = Number(customerId);
+        const cRes = await client.query(
+          `SELECT id FROM customers WHERE id=$1 AND tenant_id=$2`,
+          [cid, resolvedTenantId]
         );
-        finalCustomerId = insertCust.rows[0].id;
+        if (cRes.rows.length) finalCustomerId = cRes.rows[0].id;
       }
-    }
 
-    // Insert booking (idempotent)
-    let bookingId;
-    let created = true;
-    try {
-      const insert = await client.query(
-        `
-        INSERT INTO bookings
-          (tenant_id, service_id, staff_id, resource_id, start_time, duration_minutes,
-           customer_id, customer_name, customer_phone, customer_email, status, idempotency_key)
-        VALUES
-          ($1, $2, $3, $4, $5, $6,
-           $7, $8, $9, $10, 'pending', $11)
-        RETURNING id;
-        `,
-        [
-          resolvedTenantId,
-          resolvedServiceId,
-          staff_id,
-          resource_id,
-          start.toISOString(),
-          duration,
-          finalCustomerId,
-          cleanName,
-          cleanPhone,
-          cleanEmail,
-          idemKey,
-        ]
-      );
-      bookingId = insert.rows[0].id;
-    } catch (err) {
-      // If we get a unique violation on (tenant_id, idempotency_key), return the original booking.
-      if (idemKey && err && err.code === "23505") {
-        const existing = await client.query(
-          `SELECT id FROM bookings WHERE tenant_id=$1 AND idempotency_key=$2 LIMIT 1`,
-          [resolvedTenantId, idemKey]
+      if (!finalCustomerId && (cleanPhone || cleanEmail)) {
+        const existingRes = await client.query(
+          `
+          SELECT id, name
+          FROM customers
+          WHERE tenant_id = $1
+            AND (
+              ($2::text IS NOT NULL AND phone = $2::text) OR
+              ($3::text IS NOT NULL AND email = $3::text)
+            )
+          LIMIT 1
+          `,
+          [resolvedTenantId, cleanPhone, cleanEmail]
         );
-        if (existing.rows.length) {
-          bookingId = existing.rows[0].id;
-          created = false;
+
+        if (existingRes.rows.length) {
+          finalCustomerId = existingRes.rows[0].id;
+          if (cleanName && cleanName !== existingRes.rows[0].name) {
+            await client.query(
+              `UPDATE customers SET name=$1, updated_at=NOW() WHERE id=$2`,
+              [cleanName, finalCustomerId]
+            );
+          }
+        } else {
+          const insertCust = await client.query(
+            `
+            INSERT INTO customers (tenant_id, name, phone, email, notes, created_at)
+            VALUES ($1, $2, $3, $4, NULL, NOW())
+            RETURNING id
+            `,
+            [resolvedTenantId, cleanName, cleanPhone, cleanEmail]
+          );
+          finalCustomerId = insertCust.rows[0].id;
+        }
+      }
+
+      // Insert booking (idempotent)
+      let bookingId;
+      let created = true;
+      try {
+        const insert = await client.query(
+          `
+          INSERT INTO bookings
+            (tenant_id, service_id, staff_id, resource_id, start_time, duration_minutes,
+             customer_id, customer_name, customer_phone, customer_email, status, idempotency_key)
+          VALUES
+            ($1, $2, $3, $4, $5, $6,
+             $7, $8, $9, $10, 'pending', $11)
+          RETURNING id;
+          `,
+          [
+            resolvedTenantId,
+            resolvedServiceId,
+            staff_id,
+            resource_id,
+            start.toISOString(),
+            duration,
+            finalCustomerId,
+            cleanName,
+            cleanPhone,
+            cleanEmail,
+            idemKey,
+          ]
+        );
+        bookingId = insert.rows[0].id;
+      } catch (err) {
+        if (idemKey && err && err.code === "23505") {
+          const existing = await client.query(
+            `SELECT id FROM bookings WHERE tenant_id=$1 AND idempotency_key=$2 LIMIT 1`,
+            [resolvedTenantId, idemKey]
+          );
+          if (existing.rows.length) {
+            bookingId = existing.rows[0].id;
+            created = false;
+          } else {
+            throw err;
+          }
         } else {
           throw err;
         }
-      } else {
-        throw err;
       }
-    }
 
-    const firstLetter = cleanName.charAt(0).toUpperCase() || "X";
-    const ymd = new Date().toISOString().slice(0, 10).replaceAll("-", "");
-    const bookingCode = `${firstLetter}-${resolvedTenantId}-${resolvedServiceId || 0}-${ymd}-${bookingId}`;
+      const firstLetter = cleanName.charAt(0).toUpperCase() || "X";
+      const ymd = new Date().toISOString().slice(0, 10).replaceAll("-", "");
+      const bookingCode = `${firstLetter}-${resolvedTenantId}-${resolvedServiceId || 0}-${ymd}-${bookingId}`;
 
-    // Only set booking_code if not already set (important for idempotent replays)
-    await client.query(
-      `UPDATE bookings
-       SET booking_code = COALESCE(booking_code, $1)
-       WHERE id = $2 AND tenant_id = $3`,
-      [bookingCode, bookingId, resolvedTenantId]
-    );
+      await client.query(
+        `UPDATE bookings
+         SET booking_code = COALESCE(booking_code, $1)
+         WHERE id = $2 AND tenant_id = $3`,
+        [bookingCode, bookingId, resolvedTenantId]
+      );
 
-    await client.query("COMMIT");
+      await client.query("COMMIT");
 
-    // heartbeat nudge (best-effort)
-    await bumpTenantBookingChange(resolvedTenantId);
+      // 🔥 This is the critical bump used by heartbeat + UI refresh
+      await bumpTenantBookingChange(resolvedTenantId);
 
-    // Use the resolved tenantId (not the raw body tenantId which might be empty/mismatched)
-    const joined = await loadJoinedBookingById(bookingId, resolvedTenantId);
-    return res.status(created ? 201 : 200).json({
-      booking: joined,
-      replay: !created,
-      debug: {
-        service: process.env.RENDER_SERVICE_NAME || process.env.SERVICE_NAME || null,
-        dbName: (() => {
-          try {
-            const u = new URL(String(process.env.DATABASE_URL || ""));
-            return u.pathname ? u.pathname.replace(/^\//, "") : null;
-          } catch {
-            return null;
-          }
-        })(),
-      },
-    });
+      const joined = await loadJoinedBookingById(bookingId, resolvedTenantId);
+      return res.status(created ? 201 : 200).json({
+        booking: joined,
+        replay: !created,
+        debug: {
+          service: process.env.RENDER_SERVICE_NAME || process.env.SERVICE_NAME || null,
+          dbName: (() => {
+            try {
+              const u = new URL(String(process.env.DATABASE_URL || ""));
+              return u.pathname ? u.pathname.replace(/^\//, "") : null;
+            } catch {
+              return null;
+            }
+          })(),
+        },
+      });
     } catch (err) {
       try { await client.query("ROLLBACK"); } catch (_) {}
       throw err;
