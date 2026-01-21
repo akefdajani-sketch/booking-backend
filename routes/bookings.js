@@ -608,6 +608,14 @@ router.post("/", async (req, res) => {
       return res.status(400).json({ error: "Invalid startTime." });
     }
 
+    // Safety guard: never allow creating bookings in the past.
+    // Frontend should prevent it, but backend must enforce it (multi-client, API safety).
+    const now = new Date();
+    // Allow a tiny clock skew (60s) to avoid false negatives on slow devices.
+    if (start.getTime() < now.getTime() - 60 * 1000) {
+      return res.status(400).json({ error: "Cannot create a booking in the past." });
+    }
+
     // Validate service belongs to tenant
     let resolvedServiceId = serviceId ? Number(serviceId) : null;
     let duration = durationMinutes ? Number(durationMinutes) : null;
