@@ -625,21 +625,42 @@ router.post("/", async (req, res) => {
 
     let resolvedServiceId = serviceId ? Number(serviceId) : null;
     let duration = durationMinutes ? Number(durationMinutes) : null;
+    let requiresConfirmation = false;
 
     if (resolvedServiceId) {
+      // Service-level confirmation mode:
+      // - requires_confirmation = true  -> bookings start as 'pending'
+      // - requires_confirmation = false -> bookings start as 'confirmed'
+      // Backwards compatibility: if the column doesn't exist yet, default to 'pending' (existing behavior).
+      const hasReqConfRes = await db.query(
+        `SELECT 1 FROM information_schema.columns
+         WHERE table_schema='public' AND table_name='services' AND column_name='requires_confirmation'
+         LIMIT 1`
+      );
+      const hasReqConf = hasReqConfRes.rowCount > 0;
+
       const sRes = await db.query(
-        `SELECT id, tenant_id, duration_minutes FROM services WHERE id=$1 AND tenant_id=$2 LIMIT 1`,
+        `SELECT id, tenant_id, duration_minutes${hasReqConf ? ", COALESCE(requires_confirmation,false) AS requires_confirmation" : ""}
+         FROM services WHERE id=$1 AND tenant_id=$2 LIMIT 1`,
         [resolvedServiceId, resolvedTenantId]
       );
       if (!sRes.rows.length)
         return res.status(400).json({ error: "Unknown serviceId for tenant." });
 
+      if (hasReqConf) {
+        requiresConfirmation = !!sRes.rows[0].requires_confirmation;
+      }
+
       if (!duration) {
         duration = Number(sRes.rows[0].duration_minutes || 60) || 60;
       }
+
+      requiresConfirmation = hasReqConf ? !!sRes.rows[0].requires_confirmation : true;
     } else {
       duration = duration || 60;
     }
+
+    const bookingStatus = requiresConfirmation ? "pending" : "confirmed";
 
     const staff_id = staffId ? Number(staffId) : null;
     const resource_id = resourceId ? Number(resourceId) : null;
@@ -752,6 +773,7 @@ router.post("/", async (req, res) => {
       }
 
       // Insert booking (idempotent)
+      const initialStatus = requiresConfirmation ? "pending" : "confirmed";
       let bookingId;
       let created = true;
       try {
@@ -762,7 +784,7 @@ router.post("/", async (req, res) => {
              customer_id, customer_name, customer_phone, customer_email, status, idempotency_key)
           VALUES
             ($1, $2, $3, $4, $5, $6,
-             $7, $8, $9, $10, 'pending', $11)
+             $7, $8, $9, $10, $11, $12)
           RETURNING id;
           `,
           [
@@ -776,6 +798,7 @@ router.post("/", async (req, res) => {
             cleanName,
             cleanPhone,
             cleanEmail,
+            initialStatus,
             idemKey,
           ]
         );
