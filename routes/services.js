@@ -117,6 +117,10 @@ router.get("/", async (req, res) => {
       ? "t.currency_code AS currency_code"
       : "NULL::text AS currency_code";
 
+    const requiresConfirmationExpr = svcCols.has("requires_confirmation")
+      ? "COALESCE(s.requires_confirmation, false) AS requires_confirmation"
+      : "false::boolean AS requires_confirmation";
+
     const q = `
       SELECT
         s.id,
@@ -130,6 +134,7 @@ router.get("/", async (req, res) => {
         ${maxParallelExpr},
         COALESCE(s.requires_staff, false)    AS requires_staff,
         COALESCE(s.requires_resource, false) AS requires_resource,
+        ${requiresConfirmationExpr},
         s.availability_basis                AS availability_basis,
         COALESCE(s.is_active, true)         AS is_active,
         ${imageExpr},
@@ -172,6 +177,7 @@ router.post("/", requireAdmin, async (req, res) => {
       max_parallel_bookings,
       requires_staff,
       requires_resource,
+      requires_confirmation,
       availability_basis,
       is_active,
     } = req.body || {};
@@ -234,6 +240,9 @@ router.post("/", requireAdmin, async (req, res) => {
 
     if (svcCols.has("requires_staff")) add("requires_staff", !!requires_staff);
     if (svcCols.has("requires_resource")) add("requires_resource", !!requires_resource);
+    if (svcCols.has("requires_confirmation")) {
+      add("requires_confirmation", requires_confirmation == null ? false : !!requires_confirmation);
+    }
     if (svcCols.has("availability_basis")) add("availability_basis", ab);
     if (svcCols.has("is_active")) add("is_active", is_active == null ? true : !!is_active);
 
@@ -275,6 +284,7 @@ router.patch("/:id", requireAdmin, async (req, res) => {
       max_parallel_bookings,
       requires_staff,
       requires_resource,
+      requires_confirmation,
       availability_basis,
       is_active,
     } = req.body || {};
@@ -319,6 +329,9 @@ router.patch("/:id", requireAdmin, async (req, res) => {
 
     if (requires_staff !== undefined && svcCols.has("requires_staff")) add("requires_staff", !!requires_staff);
     if (requires_resource !== undefined && svcCols.has("requires_resource")) add("requires_resource", !!requires_resource);
+    if (requires_confirmation !== undefined && svcCols.has("requires_confirmation")) {
+      add("requires_confirmation", !!requires_confirmation);
+    }
     if (availability_basis !== undefined && svcCols.has("availability_basis")) add("availability_basis", ab);
     if (is_active !== undefined && svcCols.has("is_active")) add("is_active", !!is_active);
 
