@@ -584,6 +584,7 @@ router.post("/", async (req, res) => {
       staffId,
       resourceId,
       customerId,
+      customerMembershipId,
     } = req.body || {};
 
     const slug = mustHaveTenantSlug(req, res);
@@ -772,6 +773,69 @@ router.post("/", async (req, res) => {
         }
       }
 
+
+      // Optional: apply customer membership (atomic debit in the same transaction)
+      let finalCustomerMembershipId = null;
+      let debitMinutes = 0;
+      let debitUses = 0;
+
+      if (customerMembershipId != null && String(customerMembershipId).trim() !== "") {
+        const cmid = Number(customerMembershipId);
+        if (!Number.isFinite(cmid) || cmid <= 0) {
+          await client.query("ROLLBACK");
+          return res.status(400).json({ error: "Invalid customerMembershipId." });
+        }
+
+        // Lock the membership row to prevent concurrent double-spend.
+        const cmRes = await client.query(
+          `
+          SELECT id, customer_id, status, end_at, minutes_remaining, uses_remaining
+          FROM customer_memberships
+          WHERE id=$1 AND tenant_id=$2
+          FOR UPDATE
+          `,
+          [cmid, resolvedTenantId]
+        );
+
+        if (!cmRes.rows.length) {
+          await client.query("ROLLBACK");
+          return res.status(400).json({ error: "Unknown customerMembershipId for tenant." });
+        }
+
+        const cm = cmRes.rows[0];
+
+        // If booking is linked to a customer, enforce membership belongs to same customer.
+        if (finalCustomerId && Number(cm.customer_id) !== Number(finalCustomerId)) {
+          await client.query("ROLLBACK");
+          return res.status(400).json({ error: "Membership does not belong to this customer." });
+        }
+
+        if (String(cm.status) !== "active" || (cm.end_at && new Date(cm.end_at).getTime() <= Date.now())) {
+          await client.query("ROLLBACK");
+          return res.status(400).json({ error: "Membership is not active or is expired." });
+        }
+
+        const minsRemaining = Number(cm.minutes_remaining || 0);
+        const usesRemaining = Number(cm.uses_remaining || 0);
+
+        // Default debit policy:
+        // - If membership has enough minutes, debit booking duration minutes.
+        // - Otherwise, if it has uses, debit 1 use.
+        // (You can make this service-specific later.)
+        if (minsRemaining >= Number(duration)) {
+          debitMinutes = -Number(duration);
+          debitUses = 0;
+        } else if (usesRemaining >= 1) {
+          debitMinutes = 0;
+          debitUses = -1;
+        } else {
+          await client.query("ROLLBACK");
+          return res.status(409).json({ error: "Insufficient membership balance." });
+        }
+
+        finalCustomerMembershipId = cm.id;
+      }
+
       // Insert booking (idempotent)
       const initialStatus = requiresConfirmation ? "pending" : "confirmed";
       let bookingId;
@@ -781,10 +845,10 @@ router.post("/", async (req, res) => {
           `
           INSERT INTO bookings
             (tenant_id, service_id, staff_id, resource_id, start_time, duration_minutes,
-             customer_id, customer_name, customer_phone, customer_email, status, idempotency_key)
+             customer_id, customer_name, customer_phone, customer_email, status, idempotency_key, customer_membership_id)
           VALUES
             ($1, $2, $3, $4, $5, $6,
-             $7, $8, $9, $10, $11, $12)
+             $7, $8, $9, $10, $11, $12, $13)
           RETURNING id;
           `,
           [
@@ -800,6 +864,7 @@ router.post("/", async (req, res) => {
             cleanEmail,
             initialStatus,
             idemKey,
+            finalCustomerMembershipId,
           ]
         );
         bookingId = insert.rows[0].id;
@@ -830,6 +895,32 @@ router.post("/", async (req, res) => {
          WHERE id = $2 AND tenant_id = $3`,
         [bookingCode, bookingId, resolvedTenantId]
       );
+
+
+      // If a membership was provided, debit it once per booking (idempotent by unique constraint).
+      if (finalCustomerMembershipId) {
+        try {
+          await client.query(
+            `
+            INSERT INTO membership_ledger
+              (tenant_id, customer_membership_id, booking_id, type, minutes_delta, uses_delta, note)
+            VALUES
+              ($1, $2, $3, 'debit', $4, $5, $6)
+            `,
+            [
+              resolvedTenantId,
+              finalCustomerMembershipId,
+              bookingId,
+              debitMinutes || null,
+              debitUses || null,
+              `Debit for booking ${bookingId}`,
+            ]
+          );
+        } catch (e) {
+          // If this is a replay, the ledger row may already exist. Ignore unique-violation.
+          if (!(e && e.code === "23505")) throw e;
+        }
+      }
 
       await client.query("COMMIT");
 
