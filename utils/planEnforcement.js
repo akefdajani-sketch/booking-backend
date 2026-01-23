@@ -69,6 +69,32 @@ const PLAN_SEED = [
 
 let _ensured = false;
 
+async function seedPlansAndFeatures() {
+  // Seed plans + features (idempotent upsert)
+  for (const p of PLAN_SEED) {
+    const planRes = await db.query(
+      `INSERT INTO saas_plans (code, name)
+       VALUES ($1, $2)
+       ON CONFLICT (code) DO UPDATE SET name = EXCLUDED.name
+       RETURNING id`,
+      [p.code, p.name]
+    );
+    const planId = planRes.rows[0].id;
+
+    for (const [featureKey, v] of Object.entries(p.features)) {
+      const enabled = typeof v === "boolean" ? v : true;
+      const limitValue = typeof v === "number" ? v : null;
+      await db.query(
+        `INSERT INTO saas_plan_features (plan_id, feature_key, enabled, limit_value)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (plan_id, feature_key)
+         DO UPDATE SET enabled = EXCLUDED.enabled, limit_value = EXCLUDED.limit_value`,
+        [planId, featureKey, enabled, limitValue]
+      );
+    }
+  }
+}
+
 async function ensurePlanTables() {
   if (_ensured) return;
 
@@ -106,29 +132,7 @@ async function ensurePlanTables() {
     );
   `);
 
-  // Seed plans + features (idempotent upsert)
-  for (const p of PLAN_SEED) {
-    const planRes = await db.query(
-      `INSERT INTO saas_plans (code, name)
-       VALUES ($1, $2)
-       ON CONFLICT (code) DO UPDATE SET name = EXCLUDED.name
-       RETURNING id`,
-      [p.code, p.name]
-    );
-    const planId = planRes.rows[0].id;
-
-    for (const [featureKey, v] of Object.entries(p.features)) {
-      const enabled = typeof v === "boolean" ? v : true;
-      const limitValue = typeof v === "number" ? v : null;
-      await db.query(
-        `INSERT INTO saas_plan_features (plan_id, feature_key, enabled, limit_value)
-         VALUES ($1, $2, $3, $4)
-         ON CONFLICT (plan_id, feature_key)
-         DO UPDATE SET enabled = EXCLUDED.enabled, limit_value = EXCLUDED.limit_value`,
-        [planId, featureKey, enabled, limitValue]
-      );
-    }
-  }
+  await seedPlansAndFeatures();
 
   _ensured = true;
 }
@@ -149,8 +153,19 @@ async function getLatestSubscription(tenantId) {
   if (subRes.rows.length) return subRes.rows[0];
 
   // Create default subscription (Starter trial) for new tenants.
-  const planIdRes = await db.query(`SELECT id FROM saas_plans WHERE code = $1 LIMIT 1`, [PLAN_CODES.starter]);
-  const planId = planIdRes.rows[0]?.id;
+  let planIdRes = await db.query(`SELECT id FROM saas_plans WHERE code = $1 LIMIT 1`, [PLAN_CODES.starter]);
+  let planId = planIdRes.rows[0]?.id;
+
+  // Defensive: if the seed didn't run or tables existed but were empty, seed again.
+  if (!planId) {
+    await seedPlansAndFeatures();
+    planIdRes = await db.query(`SELECT id FROM saas_plans WHERE code = $1 LIMIT 1`, [PLAN_CODES.starter]);
+    planId = planIdRes.rows[0]?.id;
+  }
+
+  if (!planId) {
+    throw new Error("Plan system not initialized: missing starter plan");
+  }
   const trialEndsAtRes = await db.query(`SELECT NOW() + ($1 || ' days')::interval AS trial_ends_at`, [DEFAULT_TRIAL_DAYS]);
   const trialEndsAt = trialEndsAtRes.rows[0]?.trial_ends_at;
 
