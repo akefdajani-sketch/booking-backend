@@ -9,6 +9,7 @@
 //   router.get(..., requireGoogleAuth, ensureUser, requireTenantRole('viewer'), handler)
 
 const db = require("../db");
+const { ensureRbacTables, ensureBootstrapOwner } = require("../utils/rbac");
 
 const ROLE_RANK = {
   viewer: 1,
@@ -23,6 +24,7 @@ function normalizeRole(role) {
 }
 
 async function fetchTenantRole(tenantId, userId) {
+  await ensureRbacTables();
   const q = await db.query(
     `SELECT role FROM tenant_users WHERE tenant_id = $1 AND user_id = $2 LIMIT 1`,
     [tenantId, userId]
@@ -49,7 +51,13 @@ function requireTenantRole(minRole) {
       }
 
       const role = await fetchTenantRole(tenantId, userId);
-      const normalized = normalizeRole(role);
+      // Bootstrap: if no membership exists yet for this tenant, first user becomes owner.
+      if (!role) {
+        await ensureBootstrapOwner({ tenantId, userId });
+      }
+
+      const role2 = role || (await fetchTenantRole(tenantId, userId));
+      const normalized = normalizeRole(role2);
 
       if (!normalized) {
         return res.status(403).json({ error: "No access to this tenant." });
