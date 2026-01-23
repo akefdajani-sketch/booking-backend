@@ -141,7 +141,7 @@ async function getLatestSubscription(tenantId) {
        FROM tenant_subscriptions s
        JOIN saas_plans p ON p.id = s.plan_id
       WHERE s.tenant_id = $1
-      ORDER BY COALESCE(s.started_at, s.id::text::timestamptz, NOW()) DESC, s.id DESC
+      ORDER BY COALESCE(s.started_at, NOW()) DESC, s.id DESC
       LIMIT 1`,
     [tenantId]
   );
