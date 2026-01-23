@@ -63,6 +63,7 @@ function isSafeValue(key, val) {
     key.includes("border") ||
     key.includes("brand") ||
     key.includes("text") ||
+    key.includes("ring") ||
     key === "--bf-page-bg" ||
     key === "--bf-modal-backdrop"
   ) {
