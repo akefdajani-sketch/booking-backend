@@ -136,6 +136,7 @@ async function loadJoinedBookingById(bookingId, tenantId) {
       b.customer_name,
       b.customer_phone,
       b.customer_email,
+      b.customer_membership_id,
 
       b.start_time,
       b.duration_minutes,

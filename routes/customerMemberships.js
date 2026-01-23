@@ -128,18 +128,20 @@ router.post("/subscribe", requireTenant, async (req, res) => {
     const minutesRemaining = Number(plan.included_minutes || 0);
     const usesRemaining = Number(plan.included_uses || 0);
     const validityDays = Number(plan.validity_days || 30);
-    
+
     const startAt = new Date();
     const endAt = new Date(startAt);
     endAt.setDate(endAt.getDate() + validityDays);
-    
-    // Insert membership (NOTE: plan_id + minutes_remaining + uses_remaining)
+
+    // Insert membership with zero balances.
+    // Balances are now ledger-driven (PR A2): the AFTER INSERT trigger on customer_memberships
+    // will automatically create a CREDIT row in membership_ledger and apply it to balances.
     const ins = await db.query(
       `
       INSERT INTO customer_memberships
         (tenant_id, customer_id, plan_id, status, start_at, end_at, minutes_remaining, uses_remaining)
       VALUES
-        ($1, $2, $3, 'active', $4, $5, $6, $7)
+        ($1, $2, $3, 'active', $4, $5, 0, 0)
       RETURNING *
       `,
       [
@@ -148,25 +150,11 @@ router.post("/subscribe", requireTenant, async (req, res) => {
         membershipPlanId,
         startAt.toISOString(),
         endAt.toISOString(),
-        minutesRemaining,
-        usesRemaining,
       ]
     );
 
     const membership = ins.rows[0];
-
-    // Ledger entry (matches your table: customer_membership_id, minutes_delta, uses_delta)
-    await db.query(
-      `
-      INSERT INTO membership_ledger
-        (tenant_id, customer_membership_id, booking_id, type, minutes_delta, uses_delta, note)
-      VALUES
-        ($1, $2, NULL, 'grant', $3, $4, $5)
-      `,
-      [tenantId, membership.id, minutesRemaining, usesRemaining, `Initial grant for ${plan.name}`]
-    );
-
-    return res.json({ membership });
+    return res.json({ membership, credited: { minutes: minutesRemaining, uses: usesRemaining } });
   } catch (err) {
     console.error("POST /api/customer-memberships/subscribe error:", err);
     return res.status(500).json({ error: "Failed to subscribe." });
