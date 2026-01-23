@@ -79,6 +79,8 @@ const BRAND_OVERRIDE_KEYS = new Set([
   // Brand
   "--bf-brand-primary",
   "--bf-brand-primary-dark",
+  // Focus ring (used by booking + owner UI)
+  "--bf-focus-ring",
 
   // Typography / page
   "--bf-font-family",
@@ -108,6 +110,9 @@ const BRAND_OVERRIDE_KEYS = new Set([
   "--bf-pill-selected-bg",
   "--bf-pill-selected-border",
   "--bf-pill-selected-text",
+  "--bf-pill-selected-shadow",
+  // Selected pill glow/shadow
+  "--bf-pill-selected-shadow",
 
   // Disabled pill tokens (Premium theme)
   "--bf-pill-disabled-bg",
