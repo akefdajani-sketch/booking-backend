@@ -98,13 +98,17 @@ const BRAND_OVERRIDE_KEYS = new Set([
 
   // Controls
   "--bf-control-bg",
+  "--bf-control-text",
   "--bf-control-border",
+  "--bf-control-focus-border",
+  "--bf-control-focus-bg",
   "--bf-label-weight",
   "--bf-value-weight",
   "--bf-rich-select",
 
   // Pills
   "--bf-pill-bg",
+  "--bf-pill-hover-bg",
   "--bf-pill-border",
   "--bf-pill-text",
   "--bf-pill-selected-bg",
@@ -123,8 +127,20 @@ const BRAND_OVERRIDE_KEYS = new Set([
   "--bf-btn-bg",
   "--bf-btn-border",
   "--bf-btn-text",
+  "--bf-btn-active-bg",
+  "--bf-btn-active-text",
+  "--bf-btn-secondary-bg",
+  "--bf-btn-secondary-text",
+  "--bf-btn-ghost-text",
+  "--bf-btn-ghost-hover-bg",
   "--bf-btn-bg-disabled",
   "--bf-btn-text-disabled",
+
+  // Navigation (Owner/Tenant side drawer)
+  "--bf-nav-item-text",
+  "--bf-nav-hover-bg",
+  "--bf-nav-active-bg",
+  "--bf-nav-active-text",
 
   // Semantic colors
   "--bf-danger",
@@ -133,6 +149,12 @@ const BRAND_OVERRIDE_KEYS = new Set([
   "--bf-success",
   "--bf-success-bg",
   "--bf-success-border",
+  "--bf-warning",
+  "--bf-warning-bg",
+  "--bf-warning-border",
+  "--bf-info",
+  "--bf-info-bg",
+  "--bf-info-border",
   "--bf-hero-text",
 
   // Density vars used for pill sizing on booking pages
