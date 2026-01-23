@@ -1,11 +1,21 @@
-
 // routes/adminTenantsTheme.js
-import express from "express";
-import db from "../db.js";
+// Phase C Step 4: Draft / Publish / Rollback hardening for tenant theme schema
 
+const express = require("express");
 const router = express.Router();
 
-// Ensure changelog table exists
+const db = require("../db");
+const requireAdmin = require("../middleware/requireAdmin");
+
+async function ensureColumns() {
+  // Idempotent schema hardening (no separate migration required).
+  // NOTE: This assumes a Postgres backend (Render), which supports ADD COLUMN IF NOT EXISTS.
+  await db.query(`ALTER TABLE tenants ADD COLUMN IF NOT EXISTS theme_schema_draft_json JSONB;`);
+  await db.query(`ALTER TABLE tenants ADD COLUMN IF NOT EXISTS theme_schema_published_json JSONB;`);
+  await db.query(`ALTER TABLE tenants ADD COLUMN IF NOT EXISTS theme_schema_draft_saved_at TIMESTAMP;`);
+  await db.query(`ALTER TABLE tenants ADD COLUMN IF NOT EXISTS theme_schema_published_at TIMESTAMP;`);
+}
+
 async function ensureChangelog() {
   await db.query(`
     CREATE TABLE IF NOT EXISTS tenant_theme_schema_changelog (
@@ -17,60 +27,142 @@ async function ensureChangelog() {
       created_at TIMESTAMP DEFAULT NOW()
     );
   `);
+  await db.query(
+    `CREATE INDEX IF NOT EXISTS idx_theme_schema_changelog_tenant_time
+     ON tenant_theme_schema_changelog (tenant_id, created_at DESC);`
+  );
 }
 
-router.post("/:tenantId/theme-schema/save-draft", async (req, res) => {
-  const { tenantId } = req.params;
-  const actor = req.headers["x-admin-actor"] || null;
+async function logChange(tenantId, action, actor, metadata) {
   await ensureChangelog();
   await db.query(
-    "UPDATE tenants SET theme_schema_draft_json=$1, theme_schema_draft_saved_at=NOW() WHERE id=$2",
-    [req.body.schema, tenantId]
+    "INSERT INTO tenant_theme_schema_changelog (tenant_id, action, actor, metadata) VALUES ($1, $2, $3, $4::jsonb)",
+    [tenantId, action, actor || null, JSON.stringify(metadata || {})]
   );
-  await db.query(
-    "INSERT INTO tenant_theme_schema_changelog (tenant_id, action, actor) VALUES ($1,'SAVE_DRAFT',$2)",
-    [tenantId, actor]
-  );
-  res.json({ ok: true });
-});
+}
 
-router.post("/:tenantId/theme-schema/publish", async (req, res) => {
-  const { tenantId } = req.params;
-  const actor = req.headers["x-admin-actor"] || null;
-  await ensureChangelog();
-  await db.query(
-    "UPDATE tenants SET theme_schema_published_json=theme_schema_draft_json, theme_schema_published_at=NOW() WHERE id=$1",
-    [tenantId]
-  );
-  await db.query(
-    "INSERT INTO tenant_theme_schema_changelog (tenant_id, action, actor) VALUES ($1,'PUBLISH',$2)",
-    [tenantId, actor]
-  );
-  res.json({ ok: true });
-});
+// Read current draft/published info (used for status indicators)
+router.get("/:tenantId/theme-schema", requireAdmin, async (req, res) => {
+  const tenantId = Number(req.params.tenantId);
+  if (!tenantId) return res.status(400).json({ error: "Invalid tenantId" });
 
-router.post("/:tenantId/theme-schema/rollback", async (req, res) => {
-  const { tenantId } = req.params;
-  const actor = req.headers["x-admin-actor"] || null;
-  await ensureChangelog();
-  await db.query(
-    "UPDATE tenants SET theme_schema_draft_json=theme_schema_published_json WHERE id=$1",
-    [tenantId]
-  );
-  await db.query(
-    "INSERT INTO tenant_theme_schema_changelog (tenant_id, action, actor) VALUES ($1,'ROLLBACK',$2)",
-    [tenantId, actor]
-  );
-  res.json({ ok: true });
-});
+  await ensureColumns();
 
-router.get("/:tenantId/theme-schema/changelog", async (req, res) => {
-  const { tenantId } = req.params;
   const { rows } = await db.query(
-    "SELECT * FROM tenant_theme_schema_changelog WHERE tenant_id=$1 ORDER BY created_at DESC LIMIT 20",
+    `SELECT id,
+            theme_schema_draft_json,
+            theme_schema_published_json,
+            theme_schema_draft_saved_at,
+            theme_schema_published_at
+     FROM tenants
+     WHERE id = $1`,
     [tenantId]
   );
-  res.json(rows);
+
+  if (!rows[0]) return res.status(404).json({ error: "Tenant not found" });
+
+  res.json({
+    tenant_id: rows[0].id,
+    draft: rows[0].theme_schema_draft_json || null,
+    published: rows[0].theme_schema_published_json || null,
+    draft_saved_at: rows[0].theme_schema_draft_saved_at || null,
+    published_at: rows[0].theme_schema_published_at || null,
+  });
 });
 
-export default router;
+// Save draft
+router.post("/:tenantId/theme-schema/save-draft", requireAdmin, async (req, res) => {
+  const tenantId = Number(req.params.tenantId);
+  if (!tenantId) return res.status(400).json({ error: "Invalid tenantId" });
+
+  await ensureColumns();
+
+  // Accept either { schema: ... } or { draft: ... }
+  const schema = (req.body && (req.body.schema ?? req.body.draft ?? req.body)) || null;
+  if (!schema) return res.status(400).json({ error: "Missing draft schema" });
+
+  const actor = String(req.headers["x-admin-actor"] || "").trim() || null;
+
+  await db.query(
+    `UPDATE tenants
+     SET theme_schema_draft_json = $1::jsonb,
+         theme_schema_draft_saved_at = NOW()
+     WHERE id = $2`,
+    [JSON.stringify(schema), tenantId]
+  );
+
+  await logChange(tenantId, "SAVE_DRAFT", actor, { bytes: JSON.stringify(schema).length });
+
+  res.json({ ok: true });
+});
+
+// Publish: copies draft -> published
+router.post("/:tenantId/theme-schema/publish", requireAdmin, async (req, res) => {
+  const tenantId = Number(req.params.tenantId);
+  if (!tenantId) return res.status(400).json({ error: "Invalid tenantId" });
+
+  await ensureColumns();
+
+  const actor = String(req.headers["x-admin-actor"] || "").trim() || null;
+
+  const { rows } = await db.query(
+    `UPDATE tenants
+     SET theme_schema_published_json = theme_schema_draft_json,
+         theme_schema_published_at = NOW()
+     WHERE id = $1
+     RETURNING theme_schema_published_at`,
+    [tenantId]
+  );
+  if (!rows[0]) return res.status(404).json({ error: "Tenant not found" });
+
+  await logChange(tenantId, "PUBLISH", actor, {});
+
+  res.json({ ok: true, published_at: rows[0].theme_schema_published_at });
+});
+
+// Rollback: restore draft from last published (does not change live published unless you republish)
+router.post("/:tenantId/theme-schema/rollback", requireAdmin, async (req, res) => {
+  const tenantId = Number(req.params.tenantId);
+  if (!tenantId) return res.status(400).json({ error: "Invalid tenantId" });
+
+  await ensureColumns();
+
+  const actor = String(req.headers["x-admin-actor"] || "").trim() || null;
+
+  const { rows } = await db.query(
+    `UPDATE tenants
+     SET theme_schema_draft_json = theme_schema_published_json,
+         theme_schema_draft_saved_at = NOW()
+     WHERE id = $1
+     RETURNING theme_schema_published_json IS NOT NULL AS has_published`,
+    [tenantId]
+  );
+  if (!rows[0]) return res.status(404).json({ error: "Tenant not found" });
+  if (!rows[0].has_published) {
+    return res.status(400).json({ error: "Nothing published yet" });
+  }
+
+  await logChange(tenantId, "ROLLBACK", actor, {});
+
+  res.json({ ok: true });
+});
+
+// Changelog: last 25 entries
+router.get("/:tenantId/theme-schema/changelog", requireAdmin, async (req, res) => {
+  const tenantId = Number(req.params.tenantId);
+  if (!tenantId) return res.status(400).json({ error: "Invalid tenantId" });
+
+  await ensureChangelog();
+
+  const { rows } = await db.query(
+    `SELECT id, tenant_id, action, actor, metadata, created_at
+     FROM tenant_theme_schema_changelog
+     WHERE tenant_id = $1
+     ORDER BY created_at DESC
+     LIMIT 25`,
+    [tenantId]
+  );
+  res.json({ entries: rows });
+});
+
+module.exports = router;
