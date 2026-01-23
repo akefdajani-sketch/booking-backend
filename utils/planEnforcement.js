@@ -99,7 +99,8 @@ async function ensurePlanTables() {
       id SERIAL PRIMARY KEY,
       tenant_id INTEGER NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
       plan_id INTEGER NOT NULL REFERENCES saas_plans(id) ON DELETE RESTRICT,
-      status TEXT NOT NULL DEFAULT 'trial',
+      -- Align to prod constraint (trialing/active/past_due/paused/canceled)
+      status TEXT NOT NULL DEFAULT 'trialing',
       trial_ends_at TIMESTAMPTZ,
       started_at TIMESTAMPTZ DEFAULT NOW(),
       cancelled_at TIMESTAMPTZ
@@ -109,7 +110,7 @@ async function ensurePlanTables() {
   // IMPORTANT: CREATE TABLE IF NOT EXISTS does not add missing columns.
   // Production DBs may have an older tenant_subscriptions schema.
   // These ALTERs are safe/idempotent and prevent runtime 500s.
-  await db.query(`ALTER TABLE tenant_subscriptions ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'trial';`);
+  await db.query(`ALTER TABLE tenant_subscriptions ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'trialing';`);
   await db.query(`ALTER TABLE tenant_subscriptions ADD COLUMN IF NOT EXISTS trial_ends_at TIMESTAMPTZ;`);
   await db.query(`ALTER TABLE tenant_subscriptions ADD COLUMN IF NOT EXISTS started_at TIMESTAMPTZ DEFAULT NOW();`);
   await db.query(`ALTER TABLE tenant_subscriptions ADD COLUMN IF NOT EXISTS cancelled_at TIMESTAMPTZ;`);
@@ -164,7 +165,7 @@ async function getLatestSubscription(tenantId) {
 
   const ins = await db.query(
     `INSERT INTO tenant_subscriptions (tenant_id, plan_id, status, trial_ends_at)
-     VALUES ($1, $2, 'trial', $3)
+     VALUES ($1, $2, 'trialing', $3)
      RETURNING id`,
     [tenantId, planId, trialEndsAt]
   );
@@ -198,7 +199,8 @@ async function getPlanFeatures(planId) {
 function isTrialActive(sub) {
   if (!sub) return false;
   const status = String(sub.status || "").toLowerCase();
-  if (status !== "trial" && status !== "trialing") return false;
+  // Back-compat: some early environments may have used 'trial'
+  if (status !== "trialing" && status !== "trial") return false;
   if (!sub.trial_ends_at) return true;
   const d = new Date(sub.trial_ends_at);
   if (Number.isNaN(d.getTime())) return true;
