@@ -6,6 +6,7 @@ const { pool } = require("../db");
 const db = pool;
 
 const requireAdmin = require("../middleware/requireAdmin");
+const { assertWithinPlanLimit } = require("../utils/planEnforcement");
 
 // Upload middleware (multer) + error handler
 const { upload, uploadErrorHandler } = require("../middleware/upload");
@@ -200,6 +201,20 @@ router.post("/", requireAdmin, async (req, res) => {
 
     if (!tenant_id) {
       return res.status(400).json({ error: "tenantId or tenantSlug is required" });
+    }
+
+    // Phase D1: enforce plan limits (creation guard)
+    try {
+      await assertWithinPlanLimit(tenant_id, "services");
+    } catch (e) {
+      return res.status(e.status || 403).json({
+        error: e.message || "Plan limit reached",
+        code: e.code || "PLAN_LIMIT_REACHED",
+        kind: e.kind || "services",
+        limit: e.limit,
+        current: e.current,
+        plan_code: e.plan_code,
+      });
     }
 
     const svcCols = await getServicesColumns();
