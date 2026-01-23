@@ -6,6 +6,7 @@ const router = express.Router();
 
 const db = require("../db");
 const requireAdmin = require("../middleware/requireAdmin");
+const { getPlanSummaryForTenant } = require("../utils/planEnforcement");
 
 async function ensureColumns() {
   // Idempotent schema hardening (no separate migration required).
@@ -163,6 +164,26 @@ router.get("/:tenantId/theme-schema/changelog", requireAdmin, async (req, res) =
     [tenantId]
   );
   res.json({ entries: rows });
+});
+
+// ---------------------------------------------------------------------------
+// Phase D1: Admin Plan Summary (read-only)
+// GET /api/admin/tenants/:tenantId/plan-summary
+// - Used by Owner/Tenant setup UI to show plan, limits, usage, and trial state.
+// ---------------------------------------------------------------------------
+router.get("/:tenantId/plan-summary", requireAdmin, async (req, res) => {
+  try {
+    const tenantId = Number(req.params.tenantId);
+    if (!Number.isFinite(tenantId) || tenantId <= 0) {
+      return res.status(400).json({ error: "Invalid tenant id" });
+    }
+
+    const summary = await getPlanSummaryForTenant(tenantId);
+    return res.json(summary);
+  } catch (e) {
+    console.error("GET /api/admin/tenants/:tenantId/plan-summary error:", e);
+    return res.status(500).json({ error: "Failed to load plan summary" });
+  }
 });
 
 module.exports = router;

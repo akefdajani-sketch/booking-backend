@@ -5,6 +5,7 @@ const { pool } = require("../db");
 const db = pool;
 
 const requireAdmin = require("../middleware/requireAdmin");
+const { assertWithinPlanLimit } = require("../utils/planEnforcement");
 const requireGoogleAuth = require("../middleware/requireGoogleAuth");
 const { upload, uploadErrorHandler } = require("../middleware/upload");
 const { uploadFileToR2, safeName } = require("../utils/r2");
@@ -62,6 +63,20 @@ router.post("/", requireAdmin, async (req, res) => {
 
     if (!tenant_id || !name) {
       return res.status(400).json({ error: "tenant_id and name are required" });
+    }
+
+    // Phase D1: enforce plan limits (creation guard)
+    try {
+      await assertWithinPlanLimit(Number(tenant_id), "staff");
+    } catch (e) {
+      return res.status(e.status || 403).json({
+        error: e.message || "Plan limit reached",
+        code: e.code || "PLAN_LIMIT_REACHED",
+        kind: e.kind || "staff",
+        limit: e.limit,
+        current: e.current,
+        plan_code: e.plan_code,
+      });
     }
 
     const roleValue = (role ?? title ?? "").toString();
