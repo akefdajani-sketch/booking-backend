@@ -174,52 +174,71 @@ function schemaToCssVars(schema) {
   const btnActiveText = resolveRefs(editable?.buttons?.active?.text, ctx);
   const focusRingColor = resolveRefs(editable?.buttons?.focus?.ringColor, ctx);
 
-  const css = {
-    // Core semantic
-    "--color-primary": String(primary),
-    "--color-accent": String(accent),
-    "--surface-page": String(background),
-    "--surface-panel": String(surface),
-    "--surface-card": String(surface),
-    "--text-primary": String(text),
-    "--text-muted": String(mutedText),
-    "--border-default": String(border),
+  // IMPORTANT:
+  // The schema is published by writing a sanitized set of CSS vars into tenants.brand_overrides_json.
+  // Therefore, we MUST output BookFlow's allowlisted "--bf-*" variables here (not raw canonical tokens).
+  // Canonical tokens still exist in /app/tokens.css, but tenant overrides are applied via --bf-*.
 
-    // States
-    "--state-selected-bg": String(pillActiveBg),
-    "--state-selected-text": String(pillActiveText),
-    "--state-hover-bg": String(pillHoverBg),
-    "--state-focus-ring": String(focusRingColor),
+  const inputBg = resolveRefs(editable?.inputs?.bg, ctx);
+  const inputBorder = resolveRefs(editable?.inputs?.border, ctx);
+  const focusRing = resolveRefs(editable?.buttons?.focus?.ringColor, ctx);
+
+  const btnDisabledBg = resolveRefs(editable?.buttons?.primary?.disabledBg, ctx) ?? "#9ca3af";
+  const btnDisabledText = resolveRefs(editable?.buttons?.primary?.disabledText, ctx) ?? String(mutedText);
+
+  const css = {
+    // Brand
+    "--bf-brand-primary": String(primary),
+    "--bf-brand-primary-dark": String(derived.primaryShade),
+    "--bf-focus-ring": String(focusRing),
+
+    // Page & typography
+    "--bf-page-bg": String(background),
+    "--bf-text-main": String(text),
+    "--bf-text-muted": String(mutedText),
+    // A softer helper text color (fallback to muted)
+    "--bf-text-soft": String(mutedText),
+
+    // Card
+    "--bf-card-bg": String(surface),
+    "--bf-card-border": String(border),
+
+    // Controls / inputs
+    "--bf-control-bg": String(inputBg),
+    "--bf-control-border": String(inputBorder),
 
     // Pills
-    "--pill-bg": String(pillBg),
-    "--pill-text": String(pillText),
-    "--pill-hover-bg": String(pillHoverBg),
-    "--pill-active-bg": String(pillActiveBg),
-    "--pill-active-text": String(pillActiveText),
-    "--pill-border": String(pillBorder),
+    "--bf-pill-bg": String(pillBg),
+    "--bf-pill-border": String(pillBorder),
+    "--bf-pill-text": String(pillText),
+    "--bf-pill-selected-bg": String(pillActiveBg),
+    "--bf-pill-selected-border": String(pillBorder),
+    "--bf-pill-selected-text": String(pillActiveText),
+    // Use computed glow math as the consistent selected shadow
+    "--bf-pill-selected-shadow": String(derived.glowShadow),
 
-    // Buttons
-    "--btn-primary-bg": String(btnPrimaryBg),
-    "--btn-primary-text": String(btnPrimaryText),
-    "--btn-active-bg": String(btnActiveBg),
-    "--btn-active-text": String(btnActiveText),
-    "--focus-ring": String(derived.glowColor),
-    "--glow-shadow": String(derived.glowShadow),
+    // Buttons (generic)
+    "--bf-btn-bg": String(btnPrimaryBg),
+    "--bf-btn-border": String(border),
+    "--bf-btn-text": String(btnPrimaryText),
+    "--bf-btn-bg-disabled": String(btnDisabledBg),
+    "--bf-btn-text-disabled": String(btnDisabledText),
 
-    // Status (soft/text/border)
-    "--status-success-bg": resolveRefs(editable?.status?.success?.bg, { ...ctx, derived }),
-    "--status-success-text": resolveRefs(editable?.status?.success?.text, { ...ctx, derived }),
-    "--status-success-border": resolveRefs(editable?.status?.success?.border, { ...ctx, derived }),
-    "--status-warning-bg": resolveRefs(editable?.status?.warning?.bg, { ...ctx, derived }),
-    "--status-warning-text": resolveRefs(editable?.status?.warning?.text, { ...ctx, derived }),
-    "--status-warning-border": resolveRefs(editable?.status?.warning?.border, { ...ctx, derived }),
-    "--status-error-bg": resolveRefs(editable?.status?.error?.bg, { ...ctx, derived }),
-    "--status-error-text": resolveRefs(editable?.status?.error?.text, { ...ctx, derived }),
-    "--status-error-border": resolveRefs(editable?.status?.error?.border, { ...ctx, derived }),
-    "--status-info-bg": resolveRefs(editable?.status?.info?.bg, { ...ctx, derived }),
-    "--status-info-text": resolveRefs(editable?.status?.info?.text, { ...ctx, derived }),
-    "--status-info-border": resolveRefs(editable?.status?.info?.border, { ...ctx, derived }),
+    // Semantic colors (map schema status -> BookFlow legacy semantics)
+    // success
+    "--bf-success": String(resolveRefs(editable?.status?.success?.text, ctx) ?? derived.successText),
+    "--bf-success-bg": String(resolveRefs(editable?.status?.success?.bg, ctx) ?? derived.successSoft),
+    "--bf-success-border": String(resolveRefs(editable?.status?.success?.border, ctx) ?? derived.successBorder),
+    // error is used as "danger" in many components
+    "--bf-danger": String(resolveRefs(editable?.status?.error?.text, ctx) ?? derived.errorText),
+    "--bf-danger-bg": String(resolveRefs(editable?.status?.error?.bg, ctx) ?? derived.errorSoft),
+    "--bf-danger-border": String(resolveRefs(editable?.status?.error?.border, ctx) ?? derived.errorBorder),
+
+    // Back-compat aliases
+    "--bf-text": String(text),
+    "--bf-muted": String(mutedText),
+    "--bf-surface": String(surface),
+    "--bf-border": String(border),
   };
 
   // Sanitize to the existing allowlist contract, so we never write unsafe vars.
