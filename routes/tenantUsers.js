@@ -89,6 +89,17 @@ router.get(
   resolveTenantIdFromParam,
   requireTenantRole("viewer"),
   async (req, res) => {
+    const role = req.tenantRole;
+    const can = {
+      bookings_read: true,
+      bookings_write: role === "owner" || role === "manager",
+      customers_read: true,
+      customers_write: role === "owner" || role === "manager",
+      setup_write: role === "owner" || role === "manager",
+      appearance_write: role === "owner" || role === "manager",
+      plan_billing_write: role === "owner",
+      users_roles_write: role === "owner",
+    };
     return res.json({
       tenant: { id: req.tenantId, slug: req.tenantSlug },
       user: {
@@ -96,7 +107,8 @@ router.get(
         email: req.user.email,
         full_name: req.user.full_name,
       },
-      role: req.tenantRole,
+      role,
+      can,
     });
   }
 );

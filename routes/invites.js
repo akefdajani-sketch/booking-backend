@@ -13,6 +13,7 @@ const crypto = require("crypto");
 const db = require("../db");
 const requireGoogleAuth = require("../middleware/requireGoogleAuth");
 const ensureUser = require("../middleware/ensureUser");
+const { ensureRbacTables } = require("../utils/rbac");
 
 function sha256Hex(input) {
   return crypto.createHash("sha256").update(String(input)).digest("hex");
@@ -23,6 +24,7 @@ function sha256Hex(input) {
 // -----------------------------------------------------------------------------
 router.post("/accept", requireGoogleAuth, ensureUser, async (req, res) => {
   try {
+    await ensureRbacTables();
     const token = String(req.body?.token || req.query?.token || "").trim();
     if (!token) return res.status(400).json({ error: "Missing token." });
 
