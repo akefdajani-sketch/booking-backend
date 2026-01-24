@@ -4,11 +4,13 @@ const { upload, uploadErrorHandler } = require("../middleware/upload");
 const { uploadFileToR2, safeName } = require("../utils/r2");
 const path = require("path");
 const db = require("../db");
+const requireAdmin = require("../middleware/requireAdmin");
 
 const router = express.Router();
 
 router.post(
   "/tenant-logo",
+  requireAdmin,
   upload.single("file"),
   uploadErrorHandler,
   async (req, res) => {

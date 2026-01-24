@@ -4,6 +4,7 @@ const router = express.Router();
 const { pool } = require("../db");
 const db = pool;
 
+const requireAdmin = require("../middleware/requireAdmin");
 const { requireTenant } = require("../middleware/requireTenant");
 const { checkConflicts, loadJoinedBookingById } = require("../utils/bookings");
 
@@ -126,7 +127,8 @@ async function bumpTenantBookingChange(tenantId) {
 // GET /api/bookings?tenantSlug|tenantId=...
 // (unchanged)
 // ---------------------------------------------------------------------------
-router.get("/", requireTenant, async (req, res) => {
+// ADMIN: bookings list (owner dashboard)
+router.get("/", requireAdmin, requireTenant, async (req, res) => {
   try {
     const tenantId = req.tenantId;
 
@@ -331,7 +333,8 @@ router.get("/", requireTenant, async (req, res) => {
 // GET /api/bookings/count?tenantSlug|tenantId=...
 // (unchanged)
 // ---------------------------------------------------------------------------
-router.get("/count", requireTenant, async (req, res) => {
+// ADMIN: bookings count (owner dashboard)
+router.get("/count", requireAdmin, requireTenant, async (req, res) => {
   try {
     const tenantId = req.tenantId;
 
@@ -432,7 +435,8 @@ router.get("/count", requireTenant, async (req, res) => {
 // Tenant-scoped read (used by dashboards / detail views)
 // IMPORTANT: Do NOT bump heartbeat on reads.
 // ---------------------------------------------------------------------------
-router.get("/:id", requireTenant, async (req, res) => {
+// ADMIN: booking detail (owner dashboard)
+router.get("/:id", requireAdmin, requireTenant, async (req, res) => {
   try {
     const tenantId = req.tenantId;
     const bookingId = Number(req.params.id);
@@ -460,7 +464,8 @@ router.get("/:id", requireTenant, async (req, res) => {
 // ---------------------------------------------------------------------------
 // PATCH /api/bookings/:id/status?tenantSlug|tenantId=
 // ---------------------------------------------------------------------------
-router.patch("/:id/status", requireTenant, async (req, res) => {
+// ADMIN: change booking status
+router.patch("/:id/status", requireAdmin, requireTenant, async (req, res) => {
   try {
     if (!mustHaveTenantSlug(req, res)) return;
 
@@ -520,7 +525,8 @@ router.patch("/:id/status", requireTenant, async (req, res) => {
 // ---------------------------------------------------------------------------
 // DELETE /api/bookings/:id?tenantSlug|tenantId=
 // ---------------------------------------------------------------------------
-router.delete("/:id", requireTenant, async (req, res) => {
+// ADMIN: cancel booking (DELETE used as cancel)
+router.delete("/:id", requireAdmin, requireTenant, async (req, res) => {
   try {
     if (!mustHaveTenantSlug(req, res)) return;
 
