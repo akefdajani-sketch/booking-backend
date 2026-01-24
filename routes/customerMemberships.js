@@ -352,8 +352,8 @@ router.post("/consume-next", requireTenant, async (req, res) => {
             `SELECT * FROM customer_memberships WHERE tenant_id = $1 AND id = $2 LIMIT 1`,
             [tenantId, cmId]
           );
-          return res.json({ membership: cm.rows[0], alreadyDebited: true });
-        }
+          return res.json({ membership: cm.rows[0], alreadyDebited: true, alreadyDebitted: true, bookingId, customerMembershipId: cmId });
+}
       } catch (_) {
         // fall through
       }
