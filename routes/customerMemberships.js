@@ -12,6 +12,12 @@ router.get("/", requireTenant, async (req, res) => {
     const tenantId = req.tenantId;
     const customerId = Number(req.query.customerId);
 
+    // Optional filters
+    // includeExpired=true   -> include memberships with end_at <= now()
+    // includeArchived=true  -> include status='archived'
+    const includeExpired = String(req.query.includeExpired || "").toLowerCase() === "true";
+    const includeArchived = String(req.query.includeArchived || "").toLowerCase() === "true";
+
     if (!Number.isFinite(customerId) || customerId <= 0) {
       return res.json({ memberships: [] });
     }
@@ -41,22 +47,67 @@ router.get("/", requireTenant, async (req, res) => {
         mp.currency AS plan_currency,
         mp.included_minutes,
         mp.included_uses,
-        mp.validity_days
+        mp.validity_days,
+        CASE
+          WHEN cm.status = 'archived' THEN 'archived'
+          WHEN cm.end_at IS NOT NULL AND cm.end_at <= NOW() THEN 'expired'
+          WHEN cm.start_at IS NOT NULL AND cm.start_at > NOW() THEN 'scheduled'
+          WHEN cm.status = 'active' THEN 'active'
+          ELSE cm.status
+        END AS lifecycle_state,
+        (
+          cm.status = 'active'
+          AND (cm.start_at IS NULL OR cm.start_at <= NOW())
+          AND (cm.end_at IS NULL OR cm.end_at > NOW())
+        ) AS is_currently_active
       FROM customer_memberships cm
       JOIN membership_plans mp
         ON mp.id = cm.plan_id
        AND mp.tenant_id = $1
       WHERE cm.tenant_id = $1
         AND cm.customer_id = $2
+        AND ($3::boolean OR cm.end_at IS NULL OR cm.end_at > NOW())
+        AND ($4::boolean OR cm.status <> 'archived')
       ORDER BY cm.start_at DESC NULLS LAST, cm.created_at DESC NULLS LAST
       `,
-      [tenantId, customerId]
+      [tenantId, customerId, includeExpired, includeArchived]
     );
 
     return res.json({ memberships: r.rows });
   } catch (err) {
     console.error("GET /api/customer-memberships error:", err);
     return res.status(500).json({ error: "Failed to load memberships." });
+  }
+});
+
+// Manually archive a membership (keeps the record but hides it from default lists)
+// PATCH /api/customer-memberships/:id/archive?tenantSlug=...
+router.patch("/:id/archive", requireTenant, async (req, res) => {
+  try {
+    const tenantId = req.tenantId;
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id) || id <= 0) {
+      return res.status(400).json({ error: "invalid membership id" });
+    }
+
+    const result = await db.query(
+      `
+      UPDATE customer_memberships
+      SET status = 'archived'
+      WHERE tenant_id = $1 AND id = $2
+      RETURNING id, tenant_id, customer_id, status, start_at, end_at, minutes_remaining, uses_remaining, plan_id
+      `,
+      [tenantId, id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: "membership not found" });
+    }
+
+    return res.json({ membership: result.rows[0] });
+  } catch (err) {
+    console.error("archive membership error", err);
+    return res.status(500).json({ error: "internal error" });
   }
 });
 
@@ -128,20 +179,18 @@ router.post("/subscribe", requireTenant, async (req, res) => {
     const minutesRemaining = Number(plan.included_minutes || 0);
     const usesRemaining = Number(plan.included_uses || 0);
     const validityDays = Number(plan.validity_days || 30);
-
+    
     const startAt = new Date();
     const endAt = new Date(startAt);
     endAt.setDate(endAt.getDate() + validityDays);
-
-    // Insert membership with zero balances.
-    // Balances are now ledger-driven (PR A2): the AFTER INSERT trigger on customer_memberships
-    // will automatically create a CREDIT row in membership_ledger and apply it to balances.
+    
+    // Insert membership (NOTE: plan_id + minutes_remaining + uses_remaining)
     const ins = await db.query(
       `
       INSERT INTO customer_memberships
         (tenant_id, customer_id, plan_id, status, start_at, end_at, minutes_remaining, uses_remaining)
       VALUES
-        ($1, $2, $3, 'active', $4, $5, 0, 0)
+        ($1, $2, $3, 'active', $4, $5, $6, $7)
       RETURNING *
       `,
       [
@@ -150,14 +199,172 @@ router.post("/subscribe", requireTenant, async (req, res) => {
         membershipPlanId,
         startAt.toISOString(),
         endAt.toISOString(),
+        minutesRemaining,
+        usesRemaining,
       ]
     );
 
     const membership = ins.rows[0];
-    return res.json({ membership, credited: { minutes: minutesRemaining, uses: usesRemaining } });
+
+    // Ledger entry (matches your table: customer_membership_id, minutes_delta, uses_delta)
+    await db.query(
+      `
+      INSERT INTO membership_ledger
+        (tenant_id, customer_membership_id, booking_id, type, minutes_delta, uses_delta, note)
+      VALUES
+        ($1, $2, NULL, 'grant', $3, $4, $5)
+      `,
+      [tenantId, membership.id, minutesRemaining, usesRemaining, `Initial grant for ${plan.name}`]
+    );
+
+    return res.json({ membership });
   } catch (err) {
     console.error("POST /api/customer-memberships/subscribe error:", err);
     return res.status(500).json({ error: "Failed to subscribe." });
+  }
+});
+
+// POST /api/customer-memberships/consume-next?tenantSlug=...
+// Body: { customerId, bookingId, minutesToDebit, usesToDebit, note? }
+//
+// Deterministically chooses ONE eligible active membership and debits it, with:
+// - row locks (FOR UPDATE) to prevent race conditions
+// - idempotency via uq_membership_ledger_booking_debit
+// - DB check constraints for non-negative balances (cm_non_negative_balances)
+router.post("/consume-next", requireTenant, async (req, res) => {
+  const tenantId = req.tenantId;
+  const customerId = Number(req.body?.customerId);
+  const bookingId = req.body?.bookingId ? Number(req.body.bookingId) : null;
+  const minutesToDebit = Number(req.body?.minutesToDebit || 0);
+  const usesToDebit = Number(req.body?.usesToDebit || 0);
+  const note = (req.body?.note || "").toString().trim() || null;
+
+  if (!Number.isFinite(customerId) || customerId <= 0) {
+    return res.status(400).json({ error: "Invalid customerId." });
+  }
+  if (bookingId != null && (!Number.isFinite(bookingId) || bookingId <= 0)) {
+    return res.status(400).json({ error: "Invalid bookingId." });
+  }
+  if ((!Number.isFinite(minutesToDebit) || minutesToDebit < 0) || (!Number.isFinite(usesToDebit) || usesToDebit < 0)) {
+    return res.status(400).json({ error: "Invalid debit values." });
+  }
+  if (minutesToDebit === 0 && usesToDebit === 0) {
+    return res.status(400).json({ error: "minutesToDebit or usesToDebit is required." });
+  }
+
+  const client = await db.connect();
+  try {
+    await client.query("BEGIN");
+
+    // Pick ONE eligible membership. Ordering is deterministic:
+    // 1) earliest end_at (NULLs last)
+    // 2) oldest created_at
+    // 3) id tie-breaker
+    const pick = await client.query(
+      `
+      SELECT
+        id,
+        minutes_remaining,
+        uses_remaining
+      FROM customer_memberships
+      WHERE tenant_id = $1
+        AND customer_id = $2
+        AND status = 'active'
+        AND (start_at IS NULL OR start_at <= NOW())
+        AND (end_at IS NULL OR end_at > NOW())
+        AND (
+          ($3::int > 0 AND COALESCE(minutes_remaining, 0) >= $3::int)
+          OR
+          ($4::int > 0 AND COALESCE(uses_remaining, 0) >= $4::int)
+        )
+      ORDER BY (end_at IS NULL) ASC, end_at ASC NULLS LAST, created_at ASC, id ASC
+      FOR UPDATE
+      LIMIT 1
+      `,
+      [tenantId, customerId, minutesToDebit, usesToDebit]
+    );
+
+    if (!pick.rows.length) {
+      await client.query("ROLLBACK");
+      return res.status(409).json({ error: "No eligible membership entitlement found." });
+    }
+
+    const cmId = pick.rows[0].id;
+
+    // Insert ledger debit (idempotency per booking)
+    // NOTE: Your ledger 'type' values are 'grant' and 'debit'.
+    if (bookingId != null) {
+      await client.query(
+        `
+        INSERT INTO membership_ledger
+          (tenant_id, customer_membership_id, booking_id, type, minutes_delta, uses_delta, note)
+        VALUES
+          ($1, $2, $3, 'debit', $4, $5, $6)
+        `,
+        [tenantId, cmId, bookingId, -minutesToDebit, -usesToDebit, note]
+      );
+    } else {
+      // Allow manual debit without bookingId (no idempotency guard needed)
+      await client.query(
+        `
+        INSERT INTO membership_ledger
+          (tenant_id, customer_membership_id, booking_id, type, minutes_delta, uses_delta, note)
+        VALUES
+          ($1, $2, NULL, 'debit', $3, $4, $5)
+        `,
+        [tenantId, cmId, -minutesToDebit, -usesToDebit, note]
+      );
+    }
+
+    // Apply balance changes (DB constraint prevents negative balances)
+    const upd = await client.query(
+      `
+      UPDATE customer_memberships
+      SET
+        minutes_remaining = COALESCE(minutes_remaining, 0) - $1::int,
+        uses_remaining = COALESCE(uses_remaining, 0) - $2::int
+      WHERE id = $3 AND tenant_id = $4
+      RETURNING id, tenant_id, customer_id, plan_id, status, start_at, end_at, minutes_remaining, uses_remaining
+      `,
+      [minutesToDebit, usesToDebit, cmId, tenantId]
+    );
+
+    await client.query("COMMIT");
+    return res.json({ membership: upd.rows[0] });
+  } catch (err) {
+    // Idempotency: if this booking was already debited, return the current membership state.
+    if (err && err.code === "23505" && bookingId != null) {
+      await client.query("ROLLBACK");
+      try {
+        const existing = await db.query(
+          `
+          SELECT customer_membership_id
+          FROM membership_ledger
+          WHERE tenant_id = $1 AND booking_id = $2 AND type = 'debit'
+          ORDER BY created_at DESC
+          LIMIT 1
+          `,
+          [tenantId, bookingId]
+        );
+        const cmId = existing.rows?.[0]?.customer_membership_id;
+        if (cmId) {
+          const cm = await db.query(
+            `SELECT * FROM customer_memberships WHERE tenant_id = $1 AND id = $2 LIMIT 1`,
+            [tenantId, cmId]
+          );
+          return res.json({ membership: cm.rows[0], alreadyDebited: true });
+        }
+      } catch (_) {
+        // fall through
+      }
+      return res.status(409).json({ error: "Booking already debited." });
+    }
+
+    await client.query("ROLLBACK");
+    console.error("POST /api/customer-memberships/consume-next error:", err);
+    return res.status(500).json({ error: "Failed to consume membership entitlement." });
+  } finally {
+    client.release();
   }
 });
 
