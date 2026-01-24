@@ -242,9 +242,9 @@ router.post("/consume-next", requireTenant, async (req, res) => {
   if (!Number.isFinite(customerId) || customerId <= 0) {
     return res.status(400).json({ error: "Invalid customerId." });
   }
-  if (bookingId != null && (!Number.isFinite(bookingId) || bookingId <= 0)) {
-    return res.status(400).json({ error: "Invalid bookingId." });
-  }
+  if (!Number.isFinite(bookingId) || bookingId <= 0) {
+  return res.status(400).json({ error: "bookingId is required (must be a real booking id)." });
+  }  
   if ((!Number.isFinite(minutesToDebit) || minutesToDebit < 0) || (!Number.isFinite(usesToDebit) || usesToDebit < 0)) {
     return res.status(400).json({ error: "Invalid debit values." });
   }
