@@ -4,10 +4,12 @@ const router = express.Router();
 const { pool } = require("../db");
 const db = pool;
 
+const requireAdmin = require("../middleware/requireAdmin");
 const { requireTenant } = require("../middleware/requireTenant");
 
 // GET /api/customer-memberships?tenantSlug|tenantId&customerId=
-router.get("/", requireTenant, async (req, res) => {
+// ADMIN: customer memberships are private tenant data
+router.get("/", requireAdmin, requireTenant, async (req, res) => {
   try {
     const tenantId = req.tenantId;
     const customerId = Number(req.query.customerId);
@@ -82,7 +84,7 @@ router.get("/", requireTenant, async (req, res) => {
 
 // Manually archive a membership (keeps the record but hides it from default lists)
 // PATCH /api/customer-memberships/:id/archive?tenantSlug=...
-router.patch("/:id/archive", requireTenant, async (req, res) => {
+router.patch("/:id/archive", requireAdmin, requireTenant, async (req, res) => {
   try {
     const tenantId = req.tenantId;
     const id = Number(req.params.id);
@@ -113,7 +115,7 @@ router.patch("/:id/archive", requireTenant, async (req, res) => {
 
 // POST /api/customer-memberships/subscribe?tenantSlug=...
 // Body: { customerId, membershipPlanId }
-router.post("/subscribe", requireTenant, async (req, res) => {
+router.post("/subscribe", requireAdmin, requireTenant, async (req, res) => {
   try {
     const tenantId = req.tenantId;
     const customerId = Number(req.body?.customerId);
@@ -231,7 +233,7 @@ router.post("/subscribe", requireTenant, async (req, res) => {
 // - row locks (FOR UPDATE) to prevent race conditions
 // - idempotency via uq_membership_ledger_booking_debit
 // - DB check constraints for non-negative balances (cm_non_negative_balances)
-router.post("/consume-next", requireTenant, async (req, res) => {
+router.post("/consume-next", requireAdmin, requireTenant, async (req, res) => {
   const tenantId = req.tenantId;
   const customerId = Number(req.body?.customerId);
   const bookingId = req.body?.bookingId ? Number(req.body.bookingId) : null;
@@ -369,7 +371,7 @@ router.post("/consume-next", requireTenant, async (req, res) => {
 });
 
 // GET /api/customer-memberships/:id/ledger?tenantSlug=...
-router.get("/:id/ledger", requireTenant, async (req, res) => {
+router.get("/:id/ledger", requireAdmin, requireTenant, async (req, res) => {
   try {
     const tenantId = req.tenantId;
     const membershipId = Number(req.params.id);
