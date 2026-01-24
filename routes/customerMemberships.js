@@ -5,10 +5,104 @@ const { pool } = require("../db");
 const db = pool;
 
 const requireAdmin = require("../middleware/requireAdmin");
+const requireGoogleAuth = require("../middleware/requireGoogleAuth");
 const { requireTenant } = require("../middleware/requireTenant");
+
+function shouldUseCustomerView(req) {
+  const q = req.query || {};
+  return Boolean(q.customerId || q.customerEmail);
+}
 
 // GET /api/customer-memberships?tenantSlug|tenantId&customerId=
 // ADMIN: customer memberships are private tenant data
+
+// CUSTOMER: return memberships for the signed-in Google user
+// (backward compatible with the public booking UI which calls this endpoint)
+router.get(
+  "/",
+  (req, res, next) => {
+    if (shouldUseCustomerView(req)) return next();
+    return next("route");
+  },
+  requireGoogleAuth,
+  requireTenant,
+  async (req, res) => {
+    try {
+      const tenantId = req.tenantId;
+      const googleEmail = String(req.googleUser?.email || "").toLowerCase();
+      const customerEmail = String(req.query.customerEmail || "").toLowerCase();
+
+      // If the caller provided customerEmail, ensure it matches the signed-in user
+      if (customerEmail && googleEmail && customerEmail !== googleEmail) {
+        return res.status(403).json({ error: "Forbidden" });
+      }
+
+      let customerId = Number(req.query.customerId);
+
+      // Resolve customerId by email if needed
+      if ((!Number.isFinite(customerId) || customerId <= 0) && googleEmail) {
+        const c = await db.query(
+          `SELECT id FROM customers WHERE tenant_id=$1 AND lower(email)=lower($2) LIMIT 1`,
+          [tenantId, googleEmail]
+        );
+        customerId = c.rows?.[0]?.id ? Number(c.rows[0].id) : NaN;
+      }
+
+      // Validate the customer belongs to this tenant and matches the signed-in email
+      if (Number.isFinite(customerId) && customerId > 0) {
+        const c2 = await db.query(
+          `SELECT id, email FROM customers WHERE id=$1 AND tenant_id=$2 LIMIT 1`,
+          [customerId, tenantId]
+        );
+        if (!c2.rows[0]) return res.json({ memberships: [] });
+        const dbEmail = String(c2.rows[0].email || "").toLowerCase();
+        if (googleEmail && dbEmail && dbEmail !== googleEmail) {
+          return res.status(403).json({ error: "Forbidden" });
+        }
+      } else {
+        return res.json({ memberships: [] });
+      }
+
+      // Same filters as admin endpoint
+      const includeExpired = String(req.query.includeExpired || "").toLowerCase() === "true";
+      const includeArchived = String(req.query.includeArchived || "").toLowerCase() === "true";
+
+      const where = ["cm.tenant_id=$1", "cm.customer_id=$2"];
+      const params = [tenantId, customerId];
+
+      if (!includeExpired) where.push("(cm.end_at IS NULL OR cm.end_at > NOW())");
+      if (!includeArchived) where.push("cm.status <> 'archived'");
+
+      const q = `
+        SELECT
+          cm.id,
+          cm.customer_id,
+          cm.membership_plan_id,
+          cm.status,
+          cm.start_at,
+          cm.end_at,
+          cm.minutes_total,
+          cm.minutes_used,
+          cm.created_at,
+          mp.name AS plan_name,
+          mp.price AS plan_price,
+          mp.valid_days AS plan_valid_days
+        FROM customer_memberships cm
+        LEFT JOIN membership_plans mp ON mp.id = cm.membership_plan_id
+        WHERE ${where.join(" AND ")}
+        ORDER BY cm.created_at DESC
+        LIMIT 100
+      `;
+
+      const r = await db.query(q, params);
+      return res.json({ memberships: r.rows || [] });
+    } catch (e) {
+      console.error("customer-memberships(customer) error", e);
+      return res.status(500).json({ error: "Server error" });
+    }
+  }
+);
+
 router.get("/", requireAdmin, requireTenant, async (req, res) => {
   try {
     const tenantId = req.tenantId;
