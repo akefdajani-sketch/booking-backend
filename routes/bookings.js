@@ -5,8 +5,17 @@ const { pool } = require("../db");
 const db = pool;
 
 const requireAdmin = require("../middleware/requireAdmin");
+const requireGoogleAuth = require("../middleware/requireGoogleAuth");
 const { requireTenant } = require("../middleware/requireTenant");
 const { checkConflicts, loadJoinedBookingById } = require("../utils/bookings");
+
+function shouldUseCustomerHistory(req) {
+  // Frontend booking page currently calls /api/bookings with customerId/customerEmail.
+  // We treat that as a customer-history request (Google-authenticated), otherwise this
+  // remains the admin bookings endpoint.
+  const q = req.query || {};
+  return Boolean(q.customerId || q.customerEmail);
+}
 
 // Blackout windows (closures)
 async function checkBlackoutOverlap({
@@ -127,6 +136,86 @@ async function bumpTenantBookingChange(tenantId) {
 // GET /api/bookings?tenantSlug|tenantId=...
 // (unchanged)
 // ---------------------------------------------------------------------------
+
+// CUSTOMER: booking history (backward compatible with the public booking UI)
+//
+// The booking UI uses NEXTAUTH (Google) and calls the backend through /api/proxy
+// with an Authorization: Bearer <googleIdToken> header. Previously it incorrectly
+// hit the admin-only /api/bookings route, which caused 401s. This handler detects
+// customer history requests (customerId/customerEmail) and authorizes them via
+// requireGoogleAuth instead.
+router.get(
+  "/",
+  (req, _res, next) => {
+    if (shouldUseCustomerHistory(req)) return next();
+    return next("route");
+  },
+  requireGoogleAuth,
+  requireTenant,
+  async (req, res) => {
+    try {
+      const tenantId = req.tenantId;
+      const googleEmail = String(req.googleUser?.email || "").trim().toLowerCase();
+
+      const qEmailRaw =
+        (req.query.customerEmail ? String(req.query.customerEmail) : "") ||
+        (req.query.customerEmailOrPhone ? String(req.query.customerEmailOrPhone) : "");
+      const qEmail = String(qEmailRaw).trim().toLowerCase();
+
+      if (!googleEmail) return res.status(401).json({ error: "Unauthorized" });
+      if (qEmail && qEmail !== googleEmail) {
+        return res.status(403).json({ error: "Forbidden" });
+      }
+
+      let customerId = req.query.customerId ? Number(req.query.customerId) : null;
+
+      // If customerId provided, ensure it belongs to the signed-in Google email.
+      if (customerId && Number.isFinite(customerId)) {
+        const c = await db.query(
+          `SELECT id, email FROM customers WHERE tenant_id = $1 AND id = $2 LIMIT 1`,
+          [tenantId, customerId]
+        );
+        if (c.rows.length === 0) return res.json({ bookings: [] });
+        const rowEmail = String(c.rows[0].email || "").trim().toLowerCase();
+        if (rowEmail !== googleEmail) return res.status(403).json({ error: "Forbidden" });
+      } else {
+        // Resolve customerId by email (preferred)
+        const c = await db.query(
+          `SELECT id FROM customers WHERE tenant_id = $1 AND lower(email) = $2 LIMIT 1`,
+          [tenantId, googleEmail]
+        );
+        customerId = c.rows[0]?.id ?? null;
+      }
+
+      if (!customerId) return res.json({ bookings: [] });
+
+      const result = await db.query(
+        `
+        SELECT
+          b.id,
+          b.start_at,
+          b.end_at,
+          b.status,
+          s.name AS service_name,
+          r.name AS resource_name
+        FROM bookings b
+        LEFT JOIN services s ON s.id = b.service_id
+        LEFT JOIN resources r ON r.id = b.resource_id
+        WHERE b.tenant_id = $1 AND b.customer_id = $2
+        ORDER BY b.start_at DESC
+        LIMIT 200
+        `,
+        [tenantId, customerId]
+      );
+
+      return res.json({ bookings: result.rows || [] });
+    } catch (err) {
+      console.error("Customer bookings history error:", err);
+      return res.status(500).json({ error: "Failed to load bookings" });
+    }
+  }
+);
+
 // ADMIN: bookings list (owner dashboard)
 router.get("/", requireAdmin, requireTenant, async (req, res) => {
   try {
