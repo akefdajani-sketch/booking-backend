@@ -1,3 +1,7 @@
+> **Soft delete note:** BookFlow uses soft delete for business-critical entities.
+> CASCADE FKs are treated as “purge-only” behavior and must be explicitly justified.
+> Any CASCADE that would destroy audit history under normal operations must be changed to RESTRICT.
+
 # BookFlow Foreign Key Inventory (Critical Tables)
 
 **Last audited:** 2026-01-26  
