@@ -415,6 +415,67 @@ router.get("/me/memberships", requireGoogleAuth, requireTenant, async (req, res)
   }
 });
 
+// -----------------------------------------------------------------------------
+// GET /customers/me/memberships/:id/ledger
+// Customer self-service ledger/usage history for a specific membership.
+// Returns { ledger: [...] }
+// -----------------------------------------------------------------------------
+router.get(
+  "/me/memberships/:id/ledger",
+  requireGoogleAuth,
+  requireTenant,
+  async (req, res) => {
+    try {
+      const tenantId = req.tenantId;
+      const email = req.user?.email;
+      const membershipId = Number(req.params.id);
+
+      if (!tenantId) return res.status(400).json({ error: "Missing tenant" });
+      if (!email) return res.status(401).json({ error: "Missing user" });
+      if (!Number.isFinite(membershipId)) {
+        return res.status(400).json({ error: "Invalid membership id" });
+      }
+
+      // Resolve the customer record for this tenant + Google user
+      const customerRes = await db.query(
+        `SELECT id FROM customers WHERE tenant_id=$1 AND email=$2 LIMIT 1`,
+        [tenantId, email]
+      );
+      const customerId = customerRes.rows?.[0]?.id;
+      if (!customerId) {
+        // User has no customer record for this tenant yet
+        return res.json({ ledger: [] });
+      }
+
+      // Ensure the membership belongs to this customer + tenant
+      const cmRes = await db.query(
+        `SELECT id FROM customer_memberships
+         WHERE id=$1 AND tenant_id=$2 AND customer_id=$3
+         LIMIT 1`,
+        [membershipId, tenantId, customerId]
+      );
+      if (!cmRes.rows?.[0]?.id) {
+        return res.json({ ledger: [] });
+      }
+
+      // Ledger rows (keep shape consistent with memberships.js)
+      const ledgerRes = await db.query(
+        `SELECT id, customer_membership_id, type, minutes_delta, uses_delta, note, created_at
+         FROM membership_ledger
+         WHERE customer_membership_id=$1
+         ORDER BY created_at DESC
+         LIMIT 200`,
+        [membershipId]
+      );
+
+      return res.json({ ledger: ledgerRes.rows || [] });
+    } catch (err) {
+      console.error("GET /customers/me/memberships/:id/ledger error:", err);
+      return res.status(500).json({ error: "Server error" });
+    }
+  }
+);
+
 // Subscribe/purchase a membership plan as the signed-in customer
 router.post("/me/memberships/subscribe", requireGoogleAuth, requireTenant, async (req, res) => {
   try {
