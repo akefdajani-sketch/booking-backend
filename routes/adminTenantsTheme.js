@@ -186,4 +186,86 @@ router.get("/:tenantId/plan-summary", requireAdmin, async (req, res) => {
   }
 });
 
+
+// ---------------------------------------------------------------------------
+// Phase C Step 5: Tenant Theme Key / Layout override (platform theme selection)
+// GET  /api/admin/tenants/:tenantId/theme
+// PUT  /api/admin/tenants/:tenantId/theme   body: { theme_key?: string|null, layout_key?: "classic"|"premium"|null }
+// ---------------------------------------------------------------------------
+router.get("/:tenantId/theme", requireAdmin, async (req, res) => {
+  try {
+    const tenantId = Number(req.params.tenantId);
+    if (!Number.isFinite(tenantId) || tenantId <= 0) return res.status(400).json({ error: "Invalid tenantId" });
+
+    const { rows } = await db.query(
+      "SELECT id, slug, name, theme_key, brand_overrides_json FROM tenants WHERE id = $1",
+      [tenantId]
+    );
+    if (!rows[0]) return res.status(404).json({ error: "Tenant not found" });
+
+    const overrides = rows[0].brand_overrides_json || null;
+    const layout_key =
+      (overrides && (overrides.layout_key || overrides.layout || overrides.booking_layout)) || null;
+
+    return res.json({
+      tenant_id: rows[0].id,
+      slug: rows[0].slug,
+      name: rows[0].name,
+      theme_key: rows[0].theme_key || null,
+      layout_key: layout_key || null,
+      brand_overrides_json: overrides,
+    });
+  } catch (e) {
+    console.error("GET /api/admin/tenants/:tenantId/theme error:", e);
+    return res.status(500).json({ error: "Failed to load tenant theme" });
+  }
+});
+
+router.put("/:tenantId/theme", requireAdmin, async (req, res) => {
+  try {
+    const tenantId = Number(req.params.tenantId);
+    if (!Number.isFinite(tenantId) || tenantId <= 0) return res.status(400).json({ error: "Invalid tenantId" });
+
+    const theme_key_raw = req.body?.theme_key;
+    const layout_raw = req.body?.layout_key;
+
+    const theme_key =
+      theme_key_raw === null || theme_key_raw === "" || typeof theme_key_raw === "undefined"
+        ? null
+        : String(theme_key_raw).trim();
+
+    const layout_key =
+      layout_raw === null || layout_raw === "" || typeof layout_raw === "undefined"
+        ? null
+        : String(layout_raw).trim().toLowerCase();
+
+    if (layout_key && !["classic", "premium"].includes(layout_key)) {
+      return res.status(400).json({ error: "layout_key must be classic or premium" });
+    }
+
+    // Update theme_key and brand_overrides_json.layout_key (if provided)
+    // - If layout_key is null, we remove layout_key from overrides (fallback to theme default).
+    // - If theme_key is null, public endpoint falls back to default_v1.
+    const { rows } = await db.query(
+      `
+      UPDATE tenants
+      SET theme_key = $2,
+          brand_overrides_json = CASE
+            WHEN $3::text IS NULL THEN COALESCE(brand_overrides_json, '{}'::jsonb) - 'layout_key' - 'layout' - 'booking_layout'
+            ELSE jsonb_set(COALESCE(brand_overrides_json, '{}'::jsonb), '{layout_key}', to_jsonb($3::text), true)
+          END
+      WHERE id = $1
+      RETURNING id, slug, name, theme_key, brand_overrides_json
+      `,
+      [tenantId, theme_key, layout_key]
+    );
+    if (!rows[0]) return res.status(404).json({ error: "Tenant not found" });
+
+    return res.json({ ok: true, tenant: rows[0] });
+  } catch (e) {
+    console.error("PUT /api/admin/tenants/:tenantId/theme error:", e);
+    return res.status(500).json({ error: "Failed to update tenant theme" });
+  }
+});
+
 module.exports = router;
