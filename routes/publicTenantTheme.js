@@ -7,6 +7,7 @@ router.get("/:slug", async (req, res) => {
 
   const t = await db.query(
     `SELECT id, slug, theme_key, brand_overrides_json,
+            branding,
             banner_home_url, banner_book_url, banner_account_url, banner_reservations_url,
             logo_url
      FROM tenants
@@ -46,7 +47,8 @@ router.get("/:slug", async (req, res) => {
         account: tenant.banner_account_url,
         reservations: tenant.banner_reservations_url
       },
-      brand_overrides: tenant.brand_overrides_json || {}
+      brand_overrides: tenant.brand_overrides_json || {},
+      branding: tenant.branding || {}
     },
     theme: {
       key: theme.key,
