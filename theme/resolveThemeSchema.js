@@ -148,14 +148,6 @@ function computeDerived(editable) {
 // Map schema -> CSS vars used across the app.
 // Keep this minimal and extend safely over time.
 function schemaToCssVars(schema) {
-  // Some older rows may have been stored as TEXT; normalize to an object.
-  if (typeof schema === "string") {
-    try {
-      schema = JSON.parse(schema);
-    } catch (_) {
-      schema = {};
-    }
-  }
   const editable = schema?.editable || {};
   const derived = computeDerived(editable);
   const ctx = { colors: editable.colors || {}, derived, buttons: editable.buttons || {}, pills: editable.pills || {}, inputs: editable.inputs || {}, nav: editable.nav || {}, status: editable.status || {} };
