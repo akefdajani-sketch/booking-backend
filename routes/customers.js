@@ -175,40 +175,79 @@ router.get("/me/bookings", requireGoogleAuth, requireTenant, async (req, res) =>
 
     const customerId = cust.rows[0].id;
 
-    // IMPORTANT: booking time columns have evolved over time in this codebase.
-    // Some deployments have start_time/end_time + duration_minutes, others have start_at/end_at.
-    // We select using COALESCE so this endpoint works across DB variants.
-    const q = await pool.query(
-      `
-      SELECT
-        b.id,
-        b.tenant_id,
-        b.customer_id,
-        b.service_id,
-        b.resource_id,
-        COALESCE(b.start_time, b.start_at) AS start_time,
-        COALESCE(b.end_time, b.end_at) AS end_time,
-        CASE
-          WHEN b.duration_minutes IS NOT NULL THEN b.duration_minutes
-          WHEN COALESCE(b.end_time, b.end_at) IS NOT NULL AND COALESCE(b.start_time, b.start_at) IS NOT NULL
-            THEN ROUND(EXTRACT(EPOCH FROM (COALESCE(b.end_time, b.end_at) - COALESCE(b.start_time, b.start_at))) / 60.0)::int
-          ELSE NULL
-        END AS duration_minutes,
-        b.status,
-        b.notes,
-        b.created_at,
-        COALESCE(s.name, b.service_name) AS service_name,
-        COALESCE(r.name, b.resource_name) AS resource_name
-      FROM bookings b
-      LEFT JOIN services s ON s.id = b.service_id
-      LEFT JOIN resources r ON r.id = b.resource_id
-      WHERE b.tenant_id = $1
-        AND b.customer_id = $2
-      ORDER BY COALESCE(b.start_time, b.start_at) DESC
-      LIMIT 200
-      `,
-      [tenantId, customerId]
-    );
+    // Booking time columns have evolved across deployments.
+    // Your current DB schema (used by routes/bookings.js) stores `start_time` + `duration_minutes`
+    // and does NOT require an `end_time` column. Referencing a non-existent column causes a 500.
+    //
+    // Strategy:
+    // 1) Prefer the current schema: start_time + duration_minutes (compute end_time).
+    // 2) Fallback to legacy schema: start_at/end_at.
+    let q;
+    try {
+      q = await pool.query(
+        `
+        SELECT
+          b.id,
+          b.tenant_id,
+          b.customer_id,
+          b.service_id,
+          b.resource_id,
+          b.start_time AS start_time,
+          (b.start_time + ((COALESCE(b.duration_minutes, 0))::text || ' minutes')::interval) AS end_time,
+          b.duration_minutes,
+          b.status,
+          b.notes,
+          b.created_at,
+          COALESCE(s.name, b.service_name) AS service_name,
+          COALESCE(r.name, b.resource_name) AS resource_name
+        FROM bookings b
+        LEFT JOIN services s ON s.id = b.service_id
+        LEFT JOIN resources r ON r.id = b.resource_id
+        WHERE b.tenant_id = $1
+          AND b.customer_id = $2
+        ORDER BY b.start_time DESC
+        LIMIT 200
+        `,
+        [tenantId, customerId]
+      );
+    } catch (err) {
+      const msg = String(err?.message || "");
+      // If this deployment doesn't have `start_time`/`duration_minutes`, try legacy columns.
+      if (msg.toLowerCase().includes("start_time") || msg.toLowerCase().includes("duration_minutes")) {
+        q = await pool.query(
+          `
+          SELECT
+            b.id,
+            b.tenant_id,
+            b.customer_id,
+            b.service_id,
+            b.resource_id,
+            b.start_at AS start_time,
+            b.end_at AS end_time,
+            CASE
+              WHEN b.end_at IS NOT NULL AND b.start_at IS NOT NULL
+                THEN ROUND(EXTRACT(EPOCH FROM (b.end_at - b.start_at)) / 60.0)::int
+              ELSE NULL
+            END AS duration_minutes,
+            b.status,
+            b.notes,
+            b.created_at,
+            COALESCE(s.name, b.service_name) AS service_name,
+            COALESCE(r.name, b.resource_name) AS resource_name
+          FROM bookings b
+          LEFT JOIN services s ON s.id = b.service_id
+          LEFT JOIN resources r ON r.id = b.resource_id
+          WHERE b.tenant_id = $1
+            AND b.customer_id = $2
+          ORDER BY b.start_at DESC
+          LIMIT 200
+          `,
+          [tenantId, customerId]
+        );
+      } else {
+        throw err;
+      }
+    }
 
     return res.json({ bookings: q.rows });
   } catch (e) {

@@ -122,6 +122,10 @@ module.exports = async function requireGoogleAuth(req, res, next) {
       };
     }
 
+    // Backwards-compat: many routes historically used `req.user`.
+    // Keep both in sync.
+    req.user = req.googleUser;
+
     return next();
   } catch (err) {
     const msg = String(err?.message || err);
