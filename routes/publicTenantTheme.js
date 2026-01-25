@@ -32,6 +32,9 @@ router.get("/:slug", async (req, res) => {
 
   const theme = th.rows[0] || { key: "default_v1", tokens_json: {}, layout_key: "classic" };
 
+  // Cache theme payload briefly (themes change rarely, but reduce flicker + load).
+  res.set("Cache-Control", "public, max-age=60, stale-while-revalidate=300");
+
   res.json({
     tenant: {
       id: tenant.id,
