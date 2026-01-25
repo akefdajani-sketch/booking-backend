@@ -175,27 +175,36 @@ router.get("/me/bookings", requireGoogleAuth, requireTenant, async (req, res) =>
 
     const customerId = cust.rows[0].id;
 
+    // IMPORTANT: booking time columns have evolved over time in this codebase.
+    // Some deployments have start_time/end_time + duration_minutes, others have start_at/end_at.
+    // We select using COALESCE so this endpoint works across DB variants.
     const q = await pool.query(
       `
-      SELECT 
+      SELECT
         b.id,
         b.tenant_id,
         b.customer_id,
         b.service_id,
         b.resource_id,
-        b.start_time,
-        b.end_time,
+        COALESCE(b.start_time, b.start_at) AS start_time,
+        COALESCE(b.end_time, b.end_at) AS end_time,
+        CASE
+          WHEN b.duration_minutes IS NOT NULL THEN b.duration_minutes
+          WHEN COALESCE(b.end_time, b.end_at) IS NOT NULL AND COALESCE(b.start_time, b.start_at) IS NOT NULL
+            THEN ROUND(EXTRACT(EPOCH FROM (COALESCE(b.end_time, b.end_at) - COALESCE(b.start_time, b.start_at))) / 60.0)::int
+          ELSE NULL
+        END AS duration_minutes,
         b.status,
         b.notes,
         b.created_at,
-        s.name AS service_name,
-        r.name AS resource_name
+        COALESCE(s.name, b.service_name) AS service_name,
+        COALESCE(r.name, b.resource_name) AS resource_name
       FROM bookings b
       LEFT JOIN services s ON s.id = b.service_id
       LEFT JOIN resources r ON r.id = b.resource_id
       WHERE b.tenant_id = $1
         AND b.customer_id = $2
-      ORDER BY b.start_time DESC
+      ORDER BY COALESCE(b.start_time, b.start_at) DESC
       LIMIT 200
       `,
       [tenantId, customerId]
@@ -211,7 +220,7 @@ router.get("/me/bookings", requireGoogleAuth, requireTenant, async (req, res) =>
 // Cancel one of my bookings (soft-cancel)
 router.delete("/me/bookings/:id", requireGoogleAuth, requireTenant, async (req, res) => {
   try {
-    const tenantId = req.tenantId || req.tenant?.id;
+    const tenantId = req.tenant?.id;
     const email = (req.googleUser?.email || "").toLowerCase();
     const bookingId = Number(req.params.id);
     if (!tenantId) return res.status(400).json({ error: "Missing tenant" });
@@ -296,7 +305,7 @@ router.get("/me/memberships", requireGoogleAuth, requireTenant, async (req, res)
 // Subscribe/purchase a membership plan as the signed-in customer
 router.post("/me/memberships/subscribe", requireGoogleAuth, requireTenant, async (req, res) => {
   try {
-    const tenantId = req.tenantId || req.tenant?.id;
+    const tenantId = req.tenant?.id;
     const email = (req.googleUser?.email || "").toLowerCase();
     const { planId } = req.body || {};
     const planIdNum = Number(planId);
