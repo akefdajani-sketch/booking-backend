@@ -158,7 +158,7 @@ router.post("/me", requireGoogleAuth, async (req, res) => {
 // Get my booking history for a tenant
 router.get("/me/bookings", requireGoogleAuth, requireTenant, async (req, res) => {
   try {
-    const tenantId = req.tenant?.id;
+    const tenantId = req.tenantId || req.tenant?.id;
     const email = (req.googleUser?.email || "").toLowerCase();
     if (!tenantId) return res.status(400).json({ error: "Missing tenant" });
     if (!email) return res.status(401).json({ error: "Unauthorized" });
@@ -211,7 +211,7 @@ router.get("/me/bookings", requireGoogleAuth, requireTenant, async (req, res) =>
 // Cancel one of my bookings (soft-cancel)
 router.delete("/me/bookings/:id", requireGoogleAuth, requireTenant, async (req, res) => {
   try {
-    const tenantId = req.tenant?.id;
+    const tenantId = req.tenantId || req.tenant?.id;
     const email = (req.googleUser?.email || "").toLowerCase();
     const bookingId = Number(req.params.id);
     if (!tenantId) return res.status(400).json({ error: "Missing tenant" });
@@ -251,7 +251,7 @@ router.delete("/me/bookings/:id", requireGoogleAuth, requireTenant, async (req, 
 // Get my memberships for a tenant
 router.get("/me/memberships", requireGoogleAuth, requireTenant, async (req, res) => {
   try {
-    const tenantId = req.tenant?.id;
+    const tenantId = req.tenantId || req.tenant?.id;
     const email = (req.googleUser?.email || "").toLowerCase();
     if (!tenantId) return res.status(400).json({ error: "Missing tenant" });
     if (!email) return res.status(401).json({ error: "Unauthorized" });
@@ -296,7 +296,7 @@ router.get("/me/memberships", requireGoogleAuth, requireTenant, async (req, res)
 // Subscribe/purchase a membership plan as the signed-in customer
 router.post("/me/memberships/subscribe", requireGoogleAuth, requireTenant, async (req, res) => {
   try {
-    const tenantId = req.tenant?.id;
+    const tenantId = req.tenantId || req.tenant?.id;
     const email = (req.googleUser?.email || "").toLowerCase();
     const { planId } = req.body || {};
     const planIdNum = Number(planId);
