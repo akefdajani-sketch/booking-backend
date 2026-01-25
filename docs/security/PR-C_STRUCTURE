@@ -1,0 +1,30 @@
+booking-backend/
+  docs/
+    db/
+      RELATIONSHIP_POLICY.md
+      FK_INVENTORY.md
+      CASCADE_REVIEW_VERDICT.md
+      APPROVED_EXCEPTIONS.md
+      generated/
+        fk_inventory_2026-01-26.csv
+    ops/
+      BACKUP_POLICY.md
+      BACKUP_EVIDENCE.md
+      INCIDENT_RESPONSE_POLICY.md
+      INCIDENT_EVIDENCE.md
+    security/
+      ACCESS_CONTROL_POLICY.md
+      ACCESS_EVIDENCE.md
+      DATA_RETENTION_POLICY.md
+      DATA_RETENTION_EVIDENCE.md
+    CODE_OWNERSHIP.md
+
+## PR-C Go-Live Gate — BookFlow
+
+Database Governance: PASS  
+Backup & Restore: PASS  
+Access & Role Control: PASS  
+Incident Response & Monitoring: PASS  
+Data Retention & Compliance: PASS  
+
+Overall PR-C Status: APPROVED
