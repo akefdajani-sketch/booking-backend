@@ -33,7 +33,9 @@ router.get("/:slug", async (req, res) => {
   const overrideLayoutRaw =
     brandOverrides.layout_key || brandOverrides.layout || brandOverrides.booking_layout;
   const overrideLayout =
-    typeof overrideLayoutRaw === "string" ? overrideLayoutRaw.toLowerCase() : null;
+    typeof overrideLayoutRaw === "string"
+      ? overrideLayoutRaw.trim().toLowerCase()
+      : null;
 
   let th = await db.query(
     "SELECT key, tokens_json, layout_key FROM platform_themes WHERE key = $1 AND is_published = TRUE",
