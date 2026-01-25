@@ -9,6 +9,67 @@ const requireGoogleAuth = require("../middleware/requireGoogleAuth");
 const { requireTenant } = require("../middleware/requireTenant");
 
 // ------------------------------------------------------------
+// Schema discovery
+//
+// Your DB schema has evolved (e.g. bookings.start_time vs start_at,
+// membership_plans without a `type` column, etc.).
+// If we reference a missing column in SQL, Postgres throws 42703.
+// So we detect the live columns once and build safe queries.
+// ------------------------------------------------------------
+let _schemaCache = null;
+
+async function loadTableColumns(table) {
+  const r = await db.query(
+    `
+    SELECT column_name
+    FROM information_schema.columns
+    WHERE table_schema = 'public' AND table_name = $1
+    `,
+    [table]
+  );
+  return new Set(r.rows.map((x) => x.column_name));
+}
+
+async function getSchema() {
+  if (_schemaCache) return _schemaCache;
+  const [bookings, customer_memberships, membership_plans] = await Promise.all([
+    loadTableColumns('bookings'),
+    loadTableColumns('customer_memberships'),
+    loadTableColumns('membership_plans'),
+  ]);
+
+  const pick = (set, candidates) => candidates.find((c) => set.has(c)) || null;
+
+  _schemaCache = {
+    bookings: {
+      start: pick(bookings, ['start_at', 'start_time']),
+      end: pick(bookings, ['end_at', 'end_time']),
+      notes: pick(bookings, ['notes', 'customer_notes', 'note']),
+    },
+    customer_memberships: {
+      planId: pick(customer_memberships, ['membership_plan_id', 'plan_id']),
+      remaining: pick(customer_memberships, ['remaining_minutes', 'minutes_remaining', 'minutes_left']),
+      remainingUses: pick(customer_memberships, ['remaining_uses', 'uses_remaining', 'uses_left']),
+      status: pick(customer_memberships, ['status']),
+      startedAt: pick(customer_memberships, ['started_at', 'start_at', 'created_at']),
+      expiresAt: pick(customer_memberships, ['expires_at', 'end_at']),
+    },
+    membership_plans: {
+      type: pick(membership_plans, ['type', 'plan_type', 'kind']),
+      hours: pick(membership_plans, ['hours', 'total_hours']),
+      validDays: pick(membership_plans, ['valid_days', 'validity_days']),
+    },
+  };
+
+  return _schemaCache;
+}
+
+function colOrNull(alias, colName, asName) {
+  if (!colName) return `NULL AS ${asName}`;
+  return `${alias}.${colName} AS ${asName}`;
+}
+
+// ------------------------------------------------------------
 // ADMIN: GET /api/customers/search?tenantSlug|tenantId&q=&limit=
 // Lightweight search endpoint for autocomplete.
 // ------------------------------------------------------------
@@ -175,79 +236,38 @@ router.get("/me/bookings", requireGoogleAuth, requireTenant, async (req, res) =>
 
     const customerId = cust.rows[0].id;
 
-    // Booking time columns have evolved across deployments.
-    // Your current DB schema (used by routes/bookings.js) stores `start_time` + `duration_minutes`
-    // and does NOT require an `end_time` column. Referencing a non-existent column causes a 500.
-    //
-    // Strategy:
-    // 1) Prefer the current schema: start_time + duration_minutes (compute end_time).
-    // 2) Fallback to legacy schema: start_at/end_at.
-    let q;
-    try {
-      q = await pool.query(
-        `
-        SELECT
-          b.id,
-          b.tenant_id,
-          b.customer_id,
-          b.service_id,
-          b.resource_id,
-          b.start_time AS start_time,
-          (b.start_time + ((COALESCE(b.duration_minutes, 0))::text || ' minutes')::interval) AS end_time,
-          b.duration_minutes,
-          b.status,
-          b.notes,
-          b.created_at,
-          COALESCE(s.name, b.service_name) AS service_name,
-          COALESCE(r.name, b.resource_name) AS resource_name
-        FROM bookings b
-        LEFT JOIN services s ON s.id = b.service_id
-        LEFT JOIN resources r ON r.id = b.resource_id
-        WHERE b.tenant_id = $1
-          AND b.customer_id = $2
-        ORDER BY b.start_time DESC
-        LIMIT 200
-        `,
-        [tenantId, customerId]
-      );
-    } catch (err) {
-      const msg = String(err?.message || "");
-      // If this deployment doesn't have `start_time`/`duration_minutes`, try legacy columns.
-      if (msg.toLowerCase().includes("start_time") || msg.toLowerCase().includes("duration_minutes")) {
-        q = await pool.query(
-          `
-          SELECT
-            b.id,
-            b.tenant_id,
-            b.customer_id,
-            b.service_id,
-            b.resource_id,
-            b.start_at AS start_time,
-            b.end_at AS end_time,
-            CASE
-              WHEN b.end_at IS NOT NULL AND b.start_at IS NOT NULL
-                THEN ROUND(EXTRACT(EPOCH FROM (b.end_at - b.start_at)) / 60.0)::int
-              ELSE NULL
-            END AS duration_minutes,
-            b.status,
-            b.notes,
-            b.created_at,
-            COALESCE(s.name, b.service_name) AS service_name,
-            COALESCE(r.name, b.resource_name) AS resource_name
-          FROM bookings b
-          LEFT JOIN services s ON s.id = b.service_id
-          LEFT JOIN resources r ON r.id = b.resource_id
-          WHERE b.tenant_id = $1
-            AND b.customer_id = $2
-          ORDER BY b.start_at DESC
-          LIMIT 200
-          `,
-          [tenantId, customerId]
-        );
-      } else {
-        throw err;
-      }
-    }
+    // IMPORTANT: DO NOT reference columns that may not exist.
+    // Postgres will fail the whole query even if the missing col is inside COALESCE().
+    const schema = await getSchema();
+    const startCol = schema.bookings_start;
+    const endCol = schema.bookings_end;
+
+    const q = await pool.query(
+      `
+      SELECT
+        b.id,
+        b.tenant_id,
+        b.customer_id,
+        b.service_id,
+        b.resource_id,
+        b.${startCol} AS start_time,
+        b.${endCol} AS end_time,
+        ${schema.bookings_duration ? "b.duration_minutes" : "CASE WHEN b." + endCol + " IS NOT NULL AND b." + startCol + " IS NOT NULL THEN ROUND(EXTRACT(EPOCH FROM (b." + endCol + " - b." + startCol + ")) / 60.0)::int ELSE NULL END"} AS duration_minutes,
+        b.status,
+        ${schema.bookings_notes ? "b.notes" : "NULL"} AS notes,
+        b.created_at,
+        COALESCE(s.name, b.service_name) AS service_name,
+        COALESCE(r.name, b.resource_name) AS resource_name
+      FROM bookings b
+      LEFT JOIN services s ON s.id = b.service_id
+      LEFT JOIN resources r ON r.id = b.resource_id
+      WHERE b.tenant_id = $1
+        AND b.customer_id = $2
+      ORDER BY b.${startCol} DESC
+      LIMIT 200
+      `,
+      [tenantId, customerId]
+    );
 
     return res.json({ bookings: q.rows });
   } catch (e) {
@@ -315,15 +335,14 @@ router.get("/me/memberships", requireGoogleAuth, requireTenant, async (req, res)
 
     const customerId = cust.rows[0].id;
 
+    // membership_plans columns vary across deployments.
+    // We only select stable columns to avoid 500s from missing columns.
     const q = await pool.query(
       `
-      SELECT 
+      SELECT
         cm.*,
-        mp.name AS plan_name,
-        mp.type AS plan_type,
-        mp.included_minutes,
-        mp.included_uses,
-        mp.validity_days
+        mp.name  AS plan_name,
+        mp.price AS plan_price
       FROM customer_memberships cm
       JOIN membership_plans mp ON mp.id = cm.plan_id
       WHERE cm.tenant_id = $1
@@ -359,32 +378,71 @@ router.post("/me/memberships/subscribe", requireGoogleAuth, requireTenant, async
     if (cust.rows.length === 0) return res.status(404).json({ error: "Customer not found" });
     const customerId = cust.rows[0].id;
 
+    // Select * to tolerate older/newer plan schemas (no mp.type in prod)
     const plan = await pool.query(
-      `SELECT id, type, included_minutes, included_uses, validity_days FROM membership_plans WHERE id=$1 AND tenant_id=$2 LIMIT 1`,
+      `SELECT * FROM membership_plans WHERE id=$1 AND tenant_id=$2 LIMIT 1`,
       [planIdNum, tenantId]
     );
     if (plan.rows.length === 0) return res.status(404).json({ error: "Plan not found" });
 
     const p = plan.rows[0];
     const now = new Date();
-    const expiresAt = new Date(now.getTime() + (Number(p.validity_days || 0) * 24 * 60 * 60 * 1000));
+    const validityDays = Number(p.validity_days ?? p.valid_days ?? 0);
+    const expiresAt = new Date(now.getTime() + (validityDays * 24 * 60 * 60 * 1000));
+
+    const schema = await getSchema();
+    const cm = schema.customer_memberships;
+
+    const remainingMinutesVal =
+      p.included_minutes != null
+        ? Number(p.included_minutes || 0)
+        : (p.hours != null ? Number(p.hours || 0) * 60 : null);
+    const remainingUsesVal = p.included_uses != null ? Number(p.included_uses || 0) : null;
+
+    // Build an INSERT that matches the actual columns present.
+    const cols = [
+      'tenant_id',
+      'customer_id',
+      cm.planId || 'plan_id',
+      cm.startedAt || 'started_at',
+      cm.expiresAt || 'expires_at',
+      cm.status || 'status',
+    ];
+    const vals = [tenantId, customerId, planIdNum, 'NOW()', '$expiresAt', 'active'];
+
+    if (cm.remaining) {
+      cols.splice(3, 0, cm.remaining);
+      vals.splice(3, 0, '$remainingMinutes');
+    }
+    if (cm.remainingUses) {
+      // insert after remaining minutes if present, otherwise after planId
+      const idx = cm.remaining ? 4 : 3;
+      cols.splice(idx, 0, cm.remainingUses);
+      vals.splice(idx, 0, '$remainingUses');
+    }
+
+    // Convert our placeholder tokens into $1..$N params safely
+    const params = [];
+    const sqlParts = [];
+    const pushParam = (v) => {
+      params.push(v);
+      return `$${params.length}`;
+    };
+
+    const valueSql = vals
+      .map((v) => {
+        if (v === 'NOW()') return 'NOW()';
+        if (v === '$expiresAt') return pushParam(expiresAt);
+        if (v === '$remainingMinutes') return pushParam(remainingMinutesVal);
+        if (v === '$remainingUses') return pushParam(remainingUsesVal);
+        if (v === 'active') return pushParam('active');
+        return pushParam(v);
+      })
+      .join(', ');
 
     const ins = await pool.query(
-      `
-      INSERT INTO customer_memberships
-        (tenant_id, customer_id, plan_id, remaining_minutes, remaining_uses, started_at, expires_at, status)
-      VALUES
-        ($1, $2, $3, $4, $5, NOW(), $6, 'active')
-      RETURNING *
-      `,
-      [
-        tenantId,
-        customerId,
-        planIdNum,
-        p.type === "hours" ? Number(p.included_minutes || 0) : null,
-        p.type === "uses" ? Number(p.included_uses || 0) : null,
-        expiresAt,
-      ]
+      `INSERT INTO customer_memberships (${cols.join(', ')}) VALUES (${valueSql}) RETURNING *`,
+      params
     );
 
     return res.json({ ok: true, membership: ins.rows[0] });
