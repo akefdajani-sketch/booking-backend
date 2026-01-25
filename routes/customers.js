@@ -1,40 +1,57 @@
 // routes/customers.js
 const express = require("express");
 const router = express.Router();
-
-// ---- DB column compatibility helpers (handles schema drift safely) ----
-// Some deployments have different column names (e.g. bookings.start_time vs bookings.start_at,
-// membership_plans.plan_type vs membership_plans.type). Referencing a missing column causes
-// a Postgres error at parse-time, so we first discover which columns exist and
-// then build SQL using only real columns.
-
-const __columnCache = new Map();
-
-async function getExistingColumns(client, tableName) {
-  if (__columnCache.has(tableName)) return __columnCache.get(tableName);
-  const res = await client.query(
-    `SELECT column_name FROM information_schema.columns
-     WHERE table_schema = 'public' AND table_name = $1`,
-    [tableName]
-  );
-  const set = new Set(res.rows.map((r) => r.column_name));
-  __columnCache.set(tableName, set);
-  return set;
-}
-
-async function pickColumn(client, tableName, candidates) {
-  const cols = await getExistingColumns(client, tableName);
-  for (const c of candidates) {
-    if (c && cols.has(c)) return c;
-  }
-  return null;
-}
 const { pool } = require("../db");
 const db = pool;
 
 const requireAdmin = require("../middleware/requireAdmin");
 const requireGoogleAuth = require("../middleware/requireGoogleAuth");
 const { requireTenant } = require("../middleware/requireTenant");
+
+// -----------------------------------------------------------------------------
+// Schema compatibility helpers
+//
+// Postgres throws an error if a query references a column that doesn't exist,
+// even inside COALESCE(). Since this codebase has had a few schema iterations
+// (start_time vs start_at, billing_type vs type, etc.), we detect available
+// columns at runtime and build SELECT clauses safely.
+//
+// This removes the "guessing" and prevents 500s when a column is missing.
+// -----------------------------------------------------------------------------
+
+const _columnsCache = new Map(); // tableName -> Set(column_name)
+
+async function getExistingColumns(tableName) {
+  if (_columnsCache.has(tableName)) return _columnsCache.get(tableName);
+  const res = await db.query(
+    `SELECT column_name
+       FROM information_schema.columns
+      WHERE table_schema = 'public'
+        AND table_name = $1`,
+    [tableName]
+  );
+  const set = new Set(res.rows.map((r) => r.column_name));
+  _columnsCache.set(tableName, set);
+  return set;
+}
+
+function firstExisting(colSet, candidates) {
+  for (const c of candidates) {
+    if (c && colSet.has(c)) return c;
+  }
+  return null;
+}
+
+async function pickCol(tableName, alias, candidates, fallbackSql = "NULL") {
+  const cols = await getExistingColumns(tableName);
+  const col = firstExisting(cols, candidates);
+  return col ? `${alias}.${col}` : fallbackSql;
+}
+
+function safeIntExpr(sql) {
+  // Ensure numeric-ish expressions don't break JSON consumers
+  return `COALESCE((${sql})::int, 0)`;
+}
 
 // ------------------------------------------------------------
 // ADMIN: GET /api/customers/search?tenantSlug|tenantId&q=&limit=
@@ -203,68 +220,52 @@ router.get("/me/bookings", requireGoogleAuth, requireTenant, async (req, res) =>
 
     const customerId = cust.rows[0].id;
 
-    // IMPORTANT: booking/membership schemas have drifted across deployments.
-    // We MUST NOT reference columns that might not exist (Postgres throws at parse-time).
-    // So we discover the best-fit column names first and then build a safe query.
+    // IMPORTANT: Postgres will ERROR if we reference a column that doesn't exist
+    // (even inside COALESCE). So we dynamically pick the right columns at runtime.
+    const startTime = await pickCol("bookings", "b", ["start_time", "start_at", "start_datetime"], "NULL");
+    const endTime = await pickCol("bookings", "b", ["end_time", "end_at", "end_datetime"], "NULL");
+    const duration = await pickCol(
+      "bookings",
+      "b",
+      ["duration_minutes", "duration_mins", "duration"],
+      `CASE
+        WHEN ${endTime} IS NOT NULL AND ${startTime} IS NOT NULL
+          THEN ROUND(EXTRACT(EPOCH FROM (${endTime} - ${startTime})) / 60.0)::int
+        ELSE NULL
+      END`
+    );
+    const status = await pickCol("bookings", "b", ["status"], "NULL");
+    const createdAt = await pickCol("bookings", "b", ["created_at"], "NOW()");
+    // Some DBs don't have notes; keep the response shape stable.
+    const notes = await pickCol("bookings", "b", ["notes", "customer_notes"], "NULL");
+    const serviceName = await pickCol("bookings", "b", ["service_name"], "NULL");
+    const resourceName = await pickCol("bookings", "b", ["resource_name"], "NULL");
 
-    const startCol = await pickExistingColumn(pool, "bookings", [
-      "start_time",
-      "start_at",
-      "start_ts",
-      "starts_at",
-    ]);
-    const endCol = await pickExistingColumn(pool, "bookings", [
-      "end_time",
-      "end_at",
-      "end_ts",
-      "ends_at",
-    ]);
-    const notesCol = await pickExistingColumn(pool, "bookings", [
-      "notes",
-      "note",
-      "customer_notes",
-    ]);
-    const durationCol = await pickExistingColumn(pool, "bookings", ["duration_minutes", "duration"]);
-
-    // If we cannot find start/end columns, return empty history rather than 500.
-    if (!startCol) return res.json({ bookings: [] });
-
-    const startExpr = `b.${startCol}`;
-    const endExpr = endCol ? `b.${endCol}` : "NULL";
-    const notesExpr = notesCol ? `b.${notesCol}` : "NULL";
-    const durationExpr = durationCol
-      ? `b.${durationCol}`
-      : endCol
-        ? `CASE WHEN ${endExpr} IS NOT NULL AND ${startExpr} IS NOT NULL
-              THEN ROUND(EXTRACT(EPOCH FROM (${endExpr} - ${startExpr})) / 60.0)::int
-              ELSE NULL END`
-        : "NULL";
-
-    const sql = `
+    const q = await pool.query(
+      `
       SELECT
         b.id,
         b.tenant_id,
         b.customer_id,
         b.service_id,
         b.resource_id,
-        ${startExpr} AS start_time,
-        ${endExpr} AS end_time,
-        ${durationExpr} AS duration_minutes,
-        b.status,
-        ${notesExpr} AS notes,
-        b.created_at,
-        COALESCE(s.name, b.service_name) AS service_name,
-        COALESCE(r.name, b.resource_name) AS resource_name
+        ${startTime} AS start_time,
+        ${duration} AS duration_minutes,
+        ${status} AS status,
+        ${notes} AS notes,
+        ${createdAt} AS created_at,
+        COALESCE(s.name, ${serviceName}) AS service_name,
+        COALESCE(r.name, ${resourceName}) AS resource_name
       FROM bookings b
       LEFT JOIN services s ON s.id = b.service_id
       LEFT JOIN resources r ON r.id = b.resource_id
       WHERE b.tenant_id = $1
         AND b.customer_id = $2
-      ORDER BY ${startExpr} DESC
+      ORDER BY ${startTime} DESC
       LIMIT 200
-    `;
-
-    const q = await pool.query(sql, [tenantId, customerId]);
+      `,
+      [tenantId, customerId]
+    );
 
     return res.json({ bookings: q.rows });
   } catch (e) {
@@ -332,26 +333,76 @@ router.get("/me/memberships", requireGoogleAuth, requireTenant, async (req, res)
 
     const customerId = cust.rows[0].id;
 
-    // membership_plans schema can vary (type/plan_type/kind, included_minutes/minutes_included, etc.)
-    const planTypeCol = await pickColumn("membership_plans", ["type", "plan_type", "kind", "category"]);
-    const inclMinutesCol = await pickColumn("membership_plans", ["included_minutes", "minutes_included", "included_mins"]);
-    const inclUsesCol = await pickColumn("membership_plans", ["included_uses", "uses_included", "included_sessions"]);
-    const validityCol = await pickColumn("membership_plans", ["validity_days", "valid_days", "duration_days"]);
+    // Column names in customer_memberships / membership_plans have changed over
+    // time. Build a query that only references columns that exist.
+    const cmPlanId = await pickCol("customer_memberships", "cm", [
+      "plan_id",
+      "membership_plan_id",
+    ]);
+    const cmStatus = await pickCol("customer_memberships", "cm", ["status"], "NULL");
+    const cmStarted = await pickCol("customer_memberships", "cm", [
+      "started_at",
+      "start_at",
+      "created_at",
+    ], "NULL");
+    const cmExpires = await pickCol("customer_memberships", "cm", [
+      "expires_at",
+      "end_at",
+      "valid_until",
+    ], "NULL");
+    const cmUsed = await pickCol("customer_memberships", "cm", [
+      "used_minutes",
+      "minutes_used",
+    ], "NULL");
+    const cmIncluded = await pickCol("customer_memberships", "cm", [
+      "included_minutes",
+      "minutes_total",
+      "minutes_included",
+    ], "NULL");
+
+    const mpName = await pickCol("membership_plans", "mp", ["name", "title"], "NULL");
+    const mpDesc = await pickCol(
+      "membership_plans",
+      "mp",
+      ["description", "subtitle"],
+      "NULL"
+    );
+    const mpIncluded = await pickCol("membership_plans", "mp", [
+      "included_minutes",
+      "minutes_total",
+      "minutes_included",
+    ], "NULL");
+
+    const includedExpr = `COALESCE(${mpIncluded}, ${cmIncluded})`;
+    const usedExpr = `COALESCE(${cmUsed}, 0)`;
+    const remainingExpr = `CASE WHEN ${includedExpr} IS NOT NULL THEN GREATEST(${includedExpr} - ${usedExpr}, 0) ELSE NULL END`;
+    const orderCol = await pickCol(
+      "customer_memberships",
+      "cm",
+      ["created_at", "started_at", "start_at"],
+      "cm.id"
+    );
 
     const q = await pool.query(
       `
       SELECT
-        cm.*,
-        mp.name AS plan_name,
-        ${planTypeCol ? `mp.${planTypeCol}` : "NULL"} AS plan_type,
-        ${inclMinutesCol ? `mp.${inclMinutesCol}` : "NULL"} AS included_minutes,
-        ${inclUsesCol ? `mp.${inclUsesCol}` : "NULL"} AS included_uses,
-        ${validityCol ? `mp.${validityCol}` : "NULL"} AS validity_days
+        cm.id,
+        cm.tenant_id,
+        cm.customer_id,
+        ${cmPlanId} AS plan_id,
+        ${cmStatus} AS status,
+        ${cmStarted} AS started_at,
+        ${cmExpires} AS expires_at,
+        ${includedExpr} AS included_minutes,
+        ${usedExpr} AS used_minutes,
+        ${remainingExpr} AS remaining_minutes,
+        ${mpName} AS plan_name,
+        ${mpDesc} AS plan_description
       FROM customer_memberships cm
-      JOIN membership_plans mp ON mp.id = cm.plan_id
+      LEFT JOIN membership_plans mp ON mp.id = ${cmPlanId}
       WHERE cm.tenant_id = $1
         AND cm.customer_id = $2
-      ORDER BY cm.created_at DESC
+      ORDER BY ${orderCol} DESC NULLS LAST, cm.id DESC
       LIMIT 200
       `,
       [tenantId, customerId]
@@ -382,22 +433,8 @@ router.post("/me/memberships/subscribe", requireGoogleAuth, requireTenant, async
     if (cust.rows.length === 0) return res.status(404).json({ error: "Customer not found" });
     const customerId = cust.rows[0].id;
 
-    const planTypeCol = await pickColumn("membership_plans", ["type", "plan_type", "kind", "category"]);
-    const inclMinutesCol = await pickColumn("membership_plans", ["included_minutes", "minutes_included", "included_mins"]);
-    const inclUsesCol = await pickColumn("membership_plans", ["included_uses", "uses_included", "included_sessions"]);
-    const validityCol = await pickColumn("membership_plans", ["validity_days", "valid_days", "duration_days"]);
-
-    // Normalize column names via aliases so downstream code can always read p.type, p.included_minutes, etc.
-    const selectCols = [
-      "id",
-      planTypeCol ? `${planTypeCol} AS type` : "NULL AS type",
-      inclMinutesCol ? `${inclMinutesCol} AS included_minutes` : "NULL AS included_minutes",
-      inclUsesCol ? `${inclUsesCol} AS included_uses` : "NULL AS included_uses",
-      validityCol ? `${validityCol} AS validity_days` : "NULL AS validity_days",
-    ].join(", ");
-
     const plan = await pool.query(
-      `SELECT ${selectCols} FROM membership_plans WHERE id=$1 AND tenant_id=$2 LIMIT 1`,
+      `SELECT id, type, included_minutes, included_uses, validity_days FROM membership_plans WHERE id=$1 AND tenant_id=$2 LIMIT 1`,
       [planIdNum, tenantId]
     );
     if (plan.rows.length === 0) return res.status(404).json({ error: "Plan not found" });
