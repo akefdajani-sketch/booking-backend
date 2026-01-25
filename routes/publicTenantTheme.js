@@ -19,6 +19,15 @@ router.get("/:slug", async (req, res) => {
   const tenant = t.rows[0];
   const themeKey = tenant.theme_key || "default_v1";
 
+  // Optional layout override stored in brand_overrides_json.
+  // This is useful when you want the tenant to force a booking UI layout
+  // (e.g. premium) without changing the theme key.
+  const brandOverrides = tenant.brand_overrides_json || {};
+  const overrideLayoutRaw =
+    brandOverrides.layout_key || brandOverrides.layout || brandOverrides.booking_layout;
+  const overrideLayout =
+    typeof overrideLayoutRaw === "string" ? overrideLayoutRaw.toLowerCase() : null;
+
   let th = await db.query(
     "SELECT key, tokens_json, layout_key FROM platform_themes WHERE key = $1 AND is_published = TRUE",
     [themeKey]
@@ -31,6 +40,10 @@ router.get("/:slug", async (req, res) => {
   }
 
   const theme = th.rows[0] || { key: "default_v1", tokens_json: {}, layout_key: "classic" };
+  const layout_key =
+    overrideLayout && ["classic", "premium"].includes(overrideLayout)
+      ? overrideLayout
+      : theme.layout_key || "classic";
 
   res.json({
     tenant: {
@@ -43,11 +56,11 @@ router.get("/:slug", async (req, res) => {
         account: tenant.banner_account_url,
         reservations: tenant.banner_reservations_url
       },
-      brand_overrides: tenant.brand_overrides_json || {}
+      brand_overrides: brandOverrides
     },
     theme: {
       key: theme.key,
-      layout_key: theme.layout_key || "classic",
+      layout_key,
       tokens: theme.tokens_json || {}
     }
   });
