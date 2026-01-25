@@ -1,0 +1,62 @@
+"table_name","column_name","foreign_table","foreign_column","delete_rule","update_rule","constraint_name"
+bookings,customer_id,customers,id,RESTRICT,NO ACTION,bookings_customer_tenant_fk
+bookings,customer_id,customers,tenant_id,RESTRICT,NO ACTION,bookings_customer_tenant_fk
+bookings,customer_membership_id,customer_memberships,id,SET NULL,NO ACTION,bookings_customer_membership_tenant_fk
+bookings,customer_membership_id,customer_memberships,tenant_id,SET NULL,NO ACTION,bookings_customer_membership_tenant_fk
+bookings,resource_id,resources,tenant_id,SET NULL,NO ACTION,bookings_resource_tenant_fk
+bookings,resource_id,resources,id,SET NULL,NO ACTION,bookings_resource_tenant_fk
+bookings,service_id,services,id,RESTRICT,NO ACTION,bookings_service_tenant_fk
+bookings,service_id,services,tenant_id,RESTRICT,NO ACTION,bookings_service_tenant_fk
+bookings,staff_id,staff,id,SET NULL,NO ACTION,bookings_staff_tenant_fk
+bookings,staff_id,staff,tenant_id,SET NULL,NO ACTION,bookings_staff_tenant_fk
+bookings,tenant_id,customers,tenant_id,RESTRICT,NO ACTION,bookings_customer_tenant_fk
+bookings,tenant_id,customer_memberships,id,SET NULL,NO ACTION,bookings_customer_membership_tenant_fk
+bookings,tenant_id,customer_memberships,tenant_id,SET NULL,NO ACTION,bookings_customer_membership_tenant_fk
+bookings,tenant_id,staff,id,SET NULL,NO ACTION,bookings_staff_tenant_fk
+bookings,tenant_id,staff,tenant_id,SET NULL,NO ACTION,bookings_staff_tenant_fk
+bookings,tenant_id,tenants,id,RESTRICT,NO ACTION,bookings_tenant_fk
+bookings,tenant_id,services,id,RESTRICT,NO ACTION,bookings_service_tenant_fk
+bookings,tenant_id,services,tenant_id,RESTRICT,NO ACTION,bookings_service_tenant_fk
+bookings,tenant_id,customers,id,RESTRICT,NO ACTION,bookings_customer_tenant_fk
+bookings,tenant_id,resources,id,SET NULL,NO ACTION,bookings_resource_tenant_fk
+bookings,tenant_id,resources,tenant_id,SET NULL,NO ACTION,bookings_resource_tenant_fk
+customer_memberships,customer_id,customers,id,RESTRICT,NO ACTION,cm_customer_tenant_fk
+customer_memberships,customer_id,customers,tenant_id,RESTRICT,NO ACTION,cm_customer_tenant_fk
+customer_memberships,plan_id,membership_plans,tenant_id,RESTRICT,NO ACTION,cm_plan_tenant_fk
+customer_memberships,plan_id,membership_plans,id,RESTRICT,NO ACTION,cm_plan_tenant_fk
+customer_memberships,tenant_id,membership_plans,tenant_id,RESTRICT,NO ACTION,cm_plan_tenant_fk
+customer_memberships,tenant_id,customers,id,RESTRICT,NO ACTION,cm_customer_tenant_fk
+customer_memberships,tenant_id,customers,tenant_id,RESTRICT,NO ACTION,cm_customer_tenant_fk
+customer_memberships,tenant_id,membership_plans,id,RESTRICT,NO ACTION,cm_plan_tenant_fk
+customers,tenant_id,tenants,id,CASCADE,NO ACTION,customers_tenant_id_fkey
+membership_ledger,booking_id,bookings,id,SET NULL,NO ACTION,ml_booking_tenant_fk
+membership_ledger,booking_id,bookings,tenant_id,SET NULL,NO ACTION,ml_booking_tenant_fk
+membership_ledger,customer_membership_id,customer_memberships,id,RESTRICT,NO ACTION,ml_cm_tenant_fk
+membership_ledger,customer_membership_id,customer_memberships,tenant_id,RESTRICT,NO ACTION,ml_cm_tenant_fk
+membership_ledger,tenant_id,bookings,id,SET NULL,NO ACTION,ml_booking_tenant_fk
+membership_ledger,tenant_id,customer_memberships,tenant_id,RESTRICT,NO ACTION,ml_cm_tenant_fk
+membership_ledger,tenant_id,bookings,tenant_id,SET NULL,NO ACTION,ml_booking_tenant_fk
+membership_ledger,tenant_id,customer_memberships,id,RESTRICT,NO ACTION,ml_cm_tenant_fk
+membership_plans,tenant_id,tenants,id,CASCADE,NO ACTION,membership_plans_tenant_id_fkey
+resources,tenant_id,tenants,id,CASCADE,NO ACTION,resources_tenant_id_fkey
+saas_plan_features,plan_id,saas_plans,id,CASCADE,NO ACTION,saas_plan_features_plan_id_fkey
+service_unavailability,service_id,services,id,CASCADE,NO ACTION,fk_service_unavailability_service
+service_unavailability,tenant_id,tenants,id,CASCADE,NO ACTION,fk_service_unavailability_tenant
+services,tenant_id,tenants,id,CASCADE,NO ACTION,services_tenant_id_fkey
+staff,tenant_id,tenants,id,CASCADE,NO ACTION,staff_tenant_id_fkey
+staff_weekly_schedule,staff_id,staff,id,CASCADE,NO ACTION,fk_staff_weekly_schedule_staff
+staff_weekly_schedule,tenant_id,tenants,id,CASCADE,NO ACTION,fk_staff_weekly_schedule_tenant
+tenant_blackouts,tenant_id,tenants,id,CASCADE,NO ACTION,tenant_blackouts_tenant_id_fkey
+tenant_entitlements,tenant_id,tenants,id,CASCADE,NO ACTION,tenant_entitlements_tenant_id_fkey
+tenant_hours,tenant_id,tenants,id,CASCADE,NO ACTION,tenant_hours_tenant_id_fkey
+tenant_invites,invited_by_user_id,users,id,SET NULL,NO ACTION,tenant_invites_invited_by_user_id_fkey
+tenant_invites,tenant_id,tenants,id,CASCADE,NO ACTION,tenant_invites_tenant_id_fkey
+tenant_invoice_lines,invoice_id,tenant_invoices,id,CASCADE,NO ACTION,tenant_invoice_lines_invoice_id_fkey
+tenant_invoices,subscription_id,tenant_subscriptions,id,SET NULL,NO ACTION,tenant_invoices_subscription_id_fkey
+tenant_invoices,tenant_id,tenants,id,CASCADE,NO ACTION,tenant_invoices_tenant_id_fkey
+tenant_payments,invoice_id,tenant_invoices,id,CASCADE,NO ACTION,tenant_payments_invoice_id_fkey
+tenant_payments,tenant_id,tenants,id,CASCADE,NO ACTION,tenant_payments_tenant_id_fkey
+tenant_subscriptions,plan_id,saas_plans,id,NO ACTION,NO ACTION,tenant_subscriptions_plan_id_fkey
+tenant_subscriptions,tenant_id,tenants,id,CASCADE,NO ACTION,tenant_subscriptions_tenant_id_fkey
+tenant_users,tenant_id,tenants,id,CASCADE,NO ACTION,tenant_users_tenant_id_fkey
+tenant_users,user_id,users,id,CASCADE,NO ACTION,tenant_users_user_id_fkey
