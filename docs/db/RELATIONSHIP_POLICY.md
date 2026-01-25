@@ -22,6 +22,30 @@ It prevents accidental data loss, enforces consistency across tenants, and suppo
 5. **Join tables exception**
    - `ON DELETE CASCADE` is allowed only for “pure join tables” with no business meaning on their own (e.g., mapping tables), and must be documented as an approved exception.
 
+## Soft Delete Policy (Authoritative)
+BookFlow uses **soft delete** for business-critical entities.
+
+### Rules
+1. **No CASCADE deletes for soft-deleted entities**
+   - If a parent is soft-deleted, children must remain intact.
+   - Therefore, FKs must **not rely on CASCADE** to maintain integrity.
+
+2. **Physical deletes are rare and controlled**
+   - Physical deletes are allowed only for:
+     - ephemeral/join data with no audit value
+     - test data in non-production environments
+     - an explicit “Tenant Purge” admin action (documented and gated)
+
+3. **User and tenant records are never physically deleted by default**
+   - Users and tenants are soft-deleted (e.g., `deleted_at`).
+   - Deactivation must not destroy historical relationships.
+
+### Implication
+Any FK using `ON DELETE CASCADE` must be explicitly justified as:
+- a pure join table with no audit value, or
+- part of a controlled “purge” workflow.
+Otherwise it should be changed to `RESTRICT` (preferred) or `SET NULL` (only if optional).
+
 ## Required Artifacts
 BookFlow must maintain:
 - `docs/db/generated/fk_inventory_<date>.csv` (raw snapshot from the DB)
