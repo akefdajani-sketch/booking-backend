@@ -1,3 +1,13 @@
+## PR-C Go-Live Gate — BookFlow
+
+Database Governance: PASS  
+Backup & Restore: PASS  
+Access & Role Control: PASS  
+Incident Response & Monitoring: PASS  
+Data Retention & Compliance: PASS  
+
+Overall PR-C Status: APPROVED
+
 booking-backend/
   docs/
     db/
@@ -18,13 +28,3 @@ booking-backend/
       DATA_RETENTION_POLICY.md
       DATA_RETENTION_EVIDENCE.md
     CODE_OWNERSHIP.md
-
-## PR-C Go-Live Gate — BookFlow
-
-Database Governance: PASS  
-Backup & Restore: PASS  
-Access & Role Control: PASS  
-Incident Response & Monitoring: PASS  
-Data Retention & Compliance: PASS  
-
-Overall PR-C Status: APPROVED
