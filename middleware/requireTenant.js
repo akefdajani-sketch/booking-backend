@@ -3,8 +3,30 @@ const { getTenantIdFromSlug } = require("../utils/tenants");
 
 async function requireTenant(req, res, next) {
   try {
+    // Primary: explicit tenantSlug/tenantId passed as query/body.
+    // Fallbacks (for the public booking UI routed at /book/:slug):
+    // - x-tenant-slug header injected by the Next.js proxy
+    // - derive slug from Referer path (/book/<slug>)
+    const headerTenantSlug = (req.headers["x-tenant-slug"] || "")
+      .toString()
+      .trim();
+
+    let refererTenantSlug = "";
+    const referer = (req.headers.referer || req.headers.referrer || "")
+      .toString()
+      .trim();
+    if (referer) {
+      try {
+        const u = new URL(referer);
+        const m = u.pathname.match(/^\/book\/([^/?#]+)/i);
+        if (m && m[1]) refererTenantSlug = decodeURIComponent(m[1]).trim();
+      } catch (_) {
+        // ignore invalid Referer
+      }
+    }
+
     const tenantSlug =
-      (req.query?.tenantSlug ?? req.body?.tenantSlug ?? "")
+      (req.query?.tenantSlug ?? req.body?.tenantSlug ?? headerTenantSlug ?? refererTenantSlug ?? "")
         .toString()
         .trim();
 
