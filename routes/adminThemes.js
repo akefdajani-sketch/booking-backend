@@ -7,7 +7,7 @@ const { sanitizeThemeTokens } = require("../theme/validateTokens");
 // List
 router.get("/", requireAdmin, async (req, res) => {
   const { rows } = await db.query(
-    "SELECT key, name, version, is_published, updated_at FROM platform_themes ORDER BY updated_at DESC"
+    "SELECT key, name, version, is_published, layout_key, updated_at FROM platform_themes ORDER BY updated_at DESC"
   );
   res.json({ themes: rows });
 });
@@ -16,7 +16,7 @@ router.get("/", requireAdmin, async (req, res) => {
 router.get("/:key", requireAdmin, async (req, res) => {
   const { key } = req.params;
   const { rows } = await db.query(
-    "SELECT key, name, version, is_published, tokens_json FROM platform_themes WHERE key = $1",
+    "SELECT key, name, version, is_published, layout_key, tokens_json FROM platform_themes WHERE key = $1",
     [key]
   );
   if (!rows[0]) return res.status(404).json({ error: "Theme not found" });

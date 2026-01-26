@@ -558,6 +558,42 @@ router.get("/:id/onboarding", requireAdmin, async (req, res) => {
   }
 });
 
+
+// -----------------------------------------------------------------------------
+// PATCH /api/tenants/:id/theme-key
+// Admin/Owner: set tenant.theme_key (drives booking page layout without ?layout=...)
+// Body: { theme_key: "default_v1" }
+// -----------------------------------------------------------------------------
+router.patch("/:id/theme-key", requireAdmin, async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id) || id <= 0) return res.status(400).json({ error: "Invalid tenant id" });
+
+    const themeKey = String(req.body?.theme_key || "").trim();
+    if (!themeKey) return res.status(400).json({ error: "theme_key is required" });
+
+    // Ensure theme exists and is published (or allow default_v1 even if missing).
+    if (themeKey !== "default_v1") {
+      const th = await db.query(
+        "SELECT key FROM platform_themes WHERE key = $1 AND is_published = TRUE LIMIT 1",
+        [themeKey]
+      );
+      if (!th.rows[0]) return res.status(400).json({ error: "Theme is not published or does not exist" });
+    }
+
+    const result = await db.query(
+      "UPDATE tenants SET theme_key = $2 WHERE id = $1 RETURNING id, slug, theme_key",
+      [id, themeKey]
+    );
+    if (!result.rows.length) return res.status(404).json({ error: "Tenant not found" });
+
+    return res.json({ tenant: result.rows[0] });
+  } catch (err) {
+    console.error("Error updating tenant theme_key:", err);
+    return res.status(500).json({ error: "Failed to update theme" });
+  }
+});
+
 // -----------------------------------------------------------------------------
 // PATCH /api/tenants/:id/branding
 // Admin/Owner: merge patch or replace branding
