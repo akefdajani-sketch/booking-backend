@@ -329,16 +329,6 @@ router.get("/", async (req, res) => {
         timezone,
         allow_pending,
         branding,
-        logo_url,
-        cover_image_url,
-        -- banners (may be null)
-        banner_book_url,
-        banner_reservations_url,
-        banner_account_url,
-        banner_home_url,
-        theme_key,
-        layout_key,
-        currency_code,
         created_at
       FROM tenants
       ORDER BY name ASC
