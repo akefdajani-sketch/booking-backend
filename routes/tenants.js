@@ -5,7 +5,7 @@ const { pool } = require("../db");
 const db = pool;
 
 const requireAdmin = require("../middleware/requireAdmin");
-const { requireTenant } = require("../middleware/requireTenant");
+const requireTenant = require("../middleware/requireTenant");
 
 // ✅ IMPORTANT: destructure these (do NOT do: const upload = require(...))
 const { upload, uploadErrorHandler } = require("../middleware/upload");
