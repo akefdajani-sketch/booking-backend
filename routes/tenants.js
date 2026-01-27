@@ -336,6 +336,9 @@ router.get("/", async (req, res) => {
         banner_reservations_url,
         banner_account_url,
         banner_home_url,
+        theme_key,
+        layout_key,
+        currency_code,
         created_at
       FROM tenants
       ORDER BY name ASC
@@ -417,6 +420,9 @@ router.post("/", requireAdmin, async (req, res) => {
         banner_reservations_url,
         banner_account_url,
         banner_home_url,
+        theme_key,
+        layout_key,
+        currency_code,
         created_at
       `,
       [slug, name, kind, timezone, JSON.stringify(branding)]
@@ -458,6 +464,9 @@ router.get("/by-slug/:slug", async (req, res) => {
         banner_reservations_url,
         banner_account_url,
         banner_home_url,
+        theme_key,
+        layout_key,
+        currency_code,
         created_at
       FROM tenants
       WHERE slug = $1
