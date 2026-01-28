@@ -704,6 +704,49 @@ router.post(
   }
 );
 
+
+
+// -----------------------------------------------------------------------------
+// DELETE /api/tenants/:id/logo
+// Admin: remove tenant logo (db + branding json) and delete R2 object (best-effort)
+// -----------------------------------------------------------------------------
+router.delete("/:id/logo", requireAdmin, async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id) || id <= 0) {
+      return res.status(400).json({ error: "Invalid tenant id" });
+    }
+
+    const old = await db.query(
+      "SELECT logo_key FROM tenants WHERE id=$1 LIMIT 1",
+      [id]
+    );
+    const oldKey = old.rows?.[0]?.logo_key || null;
+
+    const result = await db.query(
+      "UPDATE tenants SET logo_url=NULL, logo_key=NULL WHERE id=$1 RETURNING *",
+      [id]
+    );
+
+    if (!result.rows.length) {
+      return res.status(404).json({ error: "Tenant not found" });
+    }
+
+    // Delete from R2 (best-effort)
+    if (oldKey) {
+      await deleteFromR2(oldKey).catch(() => {});
+    }
+
+    // keep branding.assets.logoUrl in sync
+    await setBrandingAsset(id, ["assets", "logoUrl"], null);
+
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error("Tenant logo delete error:", err);
+    return res.status(500).json({ error: "Delete failed" });
+  }
+});
+
 // -----------------------------------------------------------------------------
 // POST /api/tenants/:id/favicon
 // Admin: upload tenant favicon to R2 and store in tenants.branding.assets.faviconUrl
@@ -882,5 +925,59 @@ router.post(
     }
   }
 );
+
+
+
+// -----------------------------------------------------------------------------
+// DELETE /api/tenants/:id/banner/:slot
+// Admin: remove a tenant banner for bottom tabs and delete R2 object (best-effort)
+// -----------------------------------------------------------------------------
+router.delete("/:id/banner/:slot", requireAdmin, async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const slot = String(req.params.slot || "").trim().toLowerCase();
+
+    if (!Number.isFinite(id) || id <= 0) {
+      return res.status(400).json({ error: "Invalid tenant id" });
+    }
+
+    const allowed = new Set(["book", "reservations", "account", "home"]);
+    if (!allowed.has(slot)) {
+      return res.status(400).json({
+        error: "Invalid slot. Must be one of: book, reservations, account, home",
+      });
+    }
+
+    const urlCol = `banner_${slot}_url`;
+    const keyCol = `banner_${slot}_key`;
+
+    const old = await db.query(
+      `SELECT ${keyCol} FROM tenants WHERE id=$1 LIMIT 1`,
+      [id]
+    );
+    const oldKey = old.rows?.[0]?.[keyCol] || null;
+
+    const result = await db.query(
+      `UPDATE tenants SET ${urlCol}=NULL, ${keyCol}=NULL WHERE id=$1 RETURNING *`,
+      [id]
+    );
+
+    if (!result.rows.length) {
+      return res.status(404).json({ error: "Tenant not found" });
+    }
+
+    if (oldKey) {
+      await deleteFromR2(oldKey).catch(() => {});
+    }
+
+    // keep branding.assets.banners.<slot> in sync
+    await setBrandingAsset(id, ["assets", "banners", slot], null);
+
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error("Tenant banner delete error:", err);
+    return res.status(500).json({ error: "Delete failed" });
+  }
+});
 
 module.exports = router;

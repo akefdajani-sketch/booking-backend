@@ -99,15 +99,32 @@ router.post("/", requireAdmin, async (req, res) => {
 
 // ---------------------------------------------------------------------------
 // DELETE /api/staff/:id (admin-only delete)
+// If blocked by FK (e.g. existing bookings), we soft-disable instead of hard delete.
 // ---------------------------------------------------------------------------
 router.delete("/:id", requireAdmin, async (req, res) => {
   try {
     const id = Number(req.params.id);
-    await db.query(`DELETE FROM staff WHERE id=$1`, [id]);
-    res.json({ ok: true });
+
+    try {
+      await db.query(`DELETE FROM staff WHERE id=$1`, [id]);
+      return res.json({ ok: true, deleted: true });
+    } catch (err) {
+      // 23503 = foreign_key_violation
+      if (err && err.code === "23503") {
+        const result = await db.query(
+          `UPDATE staff SET is_active=false WHERE id=$1 RETURNING id, is_active`,
+          [id]
+        );
+        if (!result.rows.length) {
+          return res.status(404).json({ error: "Staff not found" });
+        }
+        return res.json({ ok: true, deleted: false, deactivated: true });
+      }
+      throw err;
+    }
   } catch (err) {
     console.error("DELETE /api/staff/:id error:", err);
-    res.status(500).json({ error: "Failed to delete staff" });
+    return res.status(500).json({ error: "Failed to delete staff" });
   }
 });
 
@@ -168,5 +185,33 @@ router.post(
     }
   }
 );
+
+
+// ---------------------------------------------------------------------------
+// DELETE /api/staff/:id/image (admin-only)
+// Clears avatar_url + image_url. (R2 deletion is best-effort and depends on stored keys.)
+// ---------------------------------------------------------------------------
+router.delete("/:id/image", requireAdmin, async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id) || id <= 0) {
+      return res.status(400).json({ error: "Invalid staff id" });
+    }
+
+    const result = await db.query(
+      "UPDATE staff SET avatar_url=NULL, image_url=NULL WHERE id=$1 RETURNING *",
+      [id]
+    );
+
+    if (!result.rows.length) {
+      return res.status(404).json({ error: "Staff not found" });
+    }
+
+    return res.json({ ok: true, staff: result.rows[0] });
+  } catch (err) {
+    console.error("DELETE /api/staff/:id/image error:", err);
+    return res.status(500).json({ error: "Failed to delete staff image" });
+  }
+});
 
 module.exports = router;

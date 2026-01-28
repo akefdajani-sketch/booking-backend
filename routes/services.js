@@ -11,7 +11,7 @@ const { assertWithinPlanLimit } = require("../utils/planEnforcement");
 // Upload middleware (multer) + error handler
 const { upload, uploadErrorHandler } = require("../middleware/upload");
 // Cloudflare R2 helper
-const { uploadFileToR2, safeName } = require("../utils/r2");
+const { uploadFileToR2, deleteFromR2, safeName } = require("../utils/r2");
 
 const fsp = require("fs/promises");
 
@@ -464,4 +464,51 @@ router.post(
   }
 );
 
+
+// ---------------------------------------------------------------------------
+// DELETE /api/services/:id/image (admin-only)
+// Clears image_url/photo_url and deletes R2 object if image_key exists.
+// ---------------------------------------------------------------------------
+router.delete("/:id/image", requireAdmin, async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!id) return res.status(400).json({ error: "invalid id" });
+
+    const svcCols = await getServicesColumns();
+
+    // Decide which URL column to clear
+    let urlCol = null;
+    if (svcCols.has("image_url")) urlCol = "image_url";
+    else if (svcCols.has("photo_url")) urlCol = "photo_url";
+    else return res.status(500).json({ error: "DB misconfigured: no image_url/photo_url column" });
+
+    // Read old key if the column exists
+    let oldKey = null;
+    if (svcCols.has("image_key")) {
+      const old = await db.query(`SELECT image_key FROM services WHERE id=$1 LIMIT 1`, [id]);
+      oldKey = old.rows?.[0]?.image_key || null;
+    }
+
+    const sets = [`${urlCol}=NULL`];
+    if (svcCols.has("image_key")) sets.push("image_key=NULL");
+
+    const result = await db.query(
+      `UPDATE services SET ${sets.join(", ")} WHERE id=$1 RETURNING *`,
+      [id]
+    );
+
+    if (!result.rows.length) {
+      return res.status(404).json({ error: "not found" });
+    }
+
+    if (oldKey) {
+      await deleteFromR2(oldKey).catch(() => {});
+    }
+
+    return res.json({ ok: true, service: result.rows[0] });
+  } catch (err) {
+    console.error("Error deleting service image:", err);
+    return res.status(500).json({ error: "Failed to delete image" });
+  }
+});
 module.exports = router;
