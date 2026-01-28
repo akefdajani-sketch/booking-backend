@@ -89,6 +89,53 @@ function publicUrlForKey(key) {
   return `${endpoint}/${safePath}`;
 }
 
+function extractKeyFromPublicUrl(url) {
+  if (!url) return null;
+
+  const base = process.env.R2_PUBLIC_BASE_URL
+    ? String(process.env.R2_PUBLIC_BASE_URL).replace(/\/+$/g, "").trim()
+    : null;
+
+  try {
+    const u = new URL(String(url));
+    let path = u.pathname || "";
+    path = path.replace(/^\/+/, "");
+
+    // If base is set, and the host matches, strip any base pathname prefix.
+    if (base) {
+      try {
+        const b = new URL(base);
+        if (u.host === b.host) {
+          const basePath = (b.pathname || "")
+            .replace(/^\/+/, "")
+            .replace(/\/+$/g, "");
+          if (basePath && path.startsWith(basePath + "/")) {
+            path = path.slice(basePath.length + 1);
+          }
+        }
+      } catch {
+        // ignore base parsing errors
+      }
+    }
+
+    const key = path
+      .split("/")
+      .map((seg) => decodeURIComponent(seg))
+      .join("/");
+    return key || null;
+  } catch {
+    // Not a valid URL; attempt naive stripping if base matches
+    if (base && String(url).startsWith(base + "/")) {
+      const rest = String(url).slice((base + "/").length);
+      return rest
+        .split("/")
+        .map((seg) => decodeURIComponent(seg))
+        .join("/");
+    }
+    return null;
+  }
+}
+
 async function uploadFileToR2({ filePath, key, contentType }) {
   if (!filePath) throw new Error("uploadFileToR2: filePath is required");
   if (!key) throw new Error("uploadFileToR2: key is required");
@@ -134,6 +181,7 @@ module.exports = {
   uploadFileToR2,
   deleteFromR2,
   publicUrlForKey,
+  extractKeyFromPublicUrl,
   sanitizeEndpoint,
   safeName,
 };

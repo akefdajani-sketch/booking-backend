@@ -95,16 +95,32 @@ router.post("/", requireAdmin, async (req, res) => {
 
 // ---------------------------------------------------------------------------
 // DELETE /api/resources/:id (admin-only delete)
+// If blocked by FK (e.g. existing bookings), we soft-disable instead of hard delete.
 // ---------------------------------------------------------------------------
 router.delete("/:id", requireAdmin, async (req, res) => {
   try {
     const id = Number(req.params.id);
 
-    await db.query(`DELETE FROM resources WHERE id=$1`, [id]);
-    res.json({ ok: true });
+    try {
+      await db.query(`DELETE FROM resources WHERE id=$1`, [id]);
+      return res.json({ ok: true, deleted: true });
+    } catch (err) {
+      // 23503 = foreign_key_violation
+      if (err && err.code === "23503") {
+        const result = await db.query(
+          `UPDATE resources SET is_active=false WHERE id=$1 RETURNING id, is_active`,
+          [id]
+        );
+        if (!result.rows.length) {
+          return res.status(404).json({ error: "Resource not found" });
+        }
+        return res.json({ ok: true, deleted: false, deactivated: true });
+      }
+      throw err;
+    }
   } catch (err) {
     console.error("DELETE /api/resources/:id error:", err);
-    res.status(500).json({ error: "Failed to delete resource" });
+    return res.status(500).json({ error: "Failed to delete resource" });
   }
 });
 
@@ -160,5 +176,34 @@ router.post(
     }
   }
 );
+
+
+
+// ---------------------------------------------------------------------------
+// DELETE /api/resources/:id/image (admin-only)
+// Clears image_url. (R2 deletion is best-effort and depends on stored keys.)
+// ---------------------------------------------------------------------------
+router.delete("/:id/image", requireAdmin, async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id) || id <= 0) {
+      return res.status(400).json({ error: "Invalid resource id" });
+    }
+
+    const result = await db.query(
+      "UPDATE resources SET image_url=NULL WHERE id=$1 RETURNING *",
+      [id]
+    );
+
+    if (!result.rows.length) {
+      return res.status(404).json({ error: "Resource not found" });
+    }
+
+    return res.json({ ok: true, resource: result.rows[0] });
+  } catch (err) {
+    console.error("DELETE /api/resources/:id/image error:", err);
+    return res.status(500).json({ error: "Failed to delete resource image" });
+  }
+});
 
 module.exports = router;
