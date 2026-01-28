@@ -14,6 +14,62 @@ const { uploadFileToR2, deleteFromR2, safeName } = require("../utils/r2");
 const fs = require("fs/promises");
 
 // -----------------------------------------------------------------------------
+// Tenant column capability (schema-compat)
+// -----------------------------------------------------------------------------
+// The platform runs across environments that may not always have the latest
+// tenant columns. We must NEVER take down the owner dashboard because a SELECT
+// referenced a missing column.
+//
+// Protocol:
+//  - Probe information_schema once (cached) to learn which tenant columns exist.
+//  - Build SELECT lists using only existing columns.
+//  - If legacy columns exist (e.g. banner_*_url1), alias them to the canonical
+//    names so the frontend has a stable contract.
+
+let __tenantColsCache = null;
+async function getTenantColumnSet() {
+  if (__tenantColsCache) return __tenantColsCache;
+  const cols = [
+    "logo_url",
+    "cover_image_url",
+    "banner_book_url",
+    "banner_reservations_url",
+    "banner_account_url",
+    "banner_home_url",
+    "banner_book_url1",
+    "banner_reservations_url1",
+    "banner_account_url1",
+    "banner_home_url1",
+    "theme_key",
+    "layout_key",
+    "currency_code",
+  ];
+  const r = await db.query(
+    `
+    SELECT column_name
+    FROM information_schema.columns
+    WHERE table_schema = 'public'
+      AND table_name = 'tenants'
+      AND column_name = ANY($1::text[])
+    `,
+    [cols]
+  );
+  const set = new Set(r.rows.map((x) => x.column_name));
+  __tenantColsCache = set;
+  return set;
+}
+
+function tenantSelectExpr(colSet, canonical, legacy) {
+  // Return a SELECT expression that is safe for the current schema.
+  // If canonical exists, select it.
+  // Else if legacy exists, select legacy AS canonical.
+  // Else return NULL AS canonical.
+  if (colSet.has(canonical)) return canonical;
+  if (legacy && colSet.has(legacy)) return `${legacy} AS ${canonical}`;
+  return `NULL::text AS ${canonical}`;
+}
+
+// -----------------------------------------------------------------------------
 // Onboarding (computed state)
 // -----------------------------------------------------------------------------
 
@@ -319,63 +375,54 @@ router.get("/heartbeat/bump", requireAdmin, requireTenant, async (req, res) => {
 // -----------------------------------------------------------------------------
 router.get("/", async (req, res) => {
   try {
-    // NOTE:
-    // The platform is deployed across environments that may not always have the
-    // latest tenant columns (e.g. layout_key / currency_code / banner_* fields).
-    // If we SELECT a column that doesn't exist, Postgres throws 42703
-    // (undefined_column) and the owner dashboard loses tenants completely.
-    //
-    // Protocol: try the "full" select first; if the DB is older, fall back to a
-    // legacy select that only uses the guaranteed base columns.
-    const FULL_SELECT = `
+    const cols = await getTenantColumnSet();
+
+    const select = [
+      "id",
+      "slug",
+      "name",
+      "kind",
+      "timezone",
+      "allow_pending",
+      "branding",
+      cols.has("logo_url") ? "logo_url" : "NULL::text AS logo_url",
+      cols.has("cover_image_url") ? "cover_image_url" : "NULL::text AS cover_image_url",
+      // Banners (canonicalize legacy *_url1 into *_url)
+      cols.has("banner_book_url")
+        ? "banner_book_url"
+        : cols.has("banner_book_url1")
+          ? "banner_book_url1 AS banner_book_url"
+          : "NULL::text AS banner_book_url",
+      cols.has("banner_reservations_url")
+        ? "banner_reservations_url"
+        : cols.has("banner_reservations_url1")
+          ? "banner_reservations_url1 AS banner_reservations_url"
+          : "NULL::text AS banner_reservations_url",
+      cols.has("banner_account_url")
+        ? "banner_account_url"
+        : cols.has("banner_account_url1")
+          ? "banner_account_url1 AS banner_account_url"
+          : "NULL::text AS banner_account_url",
+      cols.has("banner_home_url")
+        ? "banner_home_url"
+        : cols.has("banner_home_url1")
+          ? "banner_home_url1 AS banner_home_url"
+          : "NULL::text AS banner_home_url",
+      cols.has("theme_key") ? "theme_key" : "NULL::text AS theme_key",
+      cols.has("layout_key") ? "layout_key" : "NULL::text AS layout_key",
+      cols.has("currency_code") ? "currency_code" : "NULL::text AS currency_code",
+      "created_at",
+    ].join(",\n        ");
+
+    const q = `
       SELECT
-        id,
-        slug,
-        name,
-        kind,
-        timezone,
-        allow_pending,
-        branding,
-        logo_url,
-        cover_image_url,
-        banner_book_url,
-        banner_reservations_url,
-        banner_account_url,
-        banner_home_url,
-        theme_key,
-        layout_key,
-        currency_code,
-        created_at
+        ${select}
       FROM tenants
       ORDER BY name ASC
     `;
 
-    const LEGACY_SELECT = `
-      SELECT
-        id,
-        slug,
-        name,
-        kind,
-        timezone,
-        allow_pending,
-        branding,
-        logo_url,
-        created_at
-      FROM tenants
-      ORDER BY name ASC
-    `;
-
-    try {
-      const result = await db.query(FULL_SELECT);
-      return res.json({ tenants: result.rows });
-    } catch (err) {
-      // 42703 = undefined_column
-      if (err && err.code === "42703") {
-        const fallback = await db.query(LEGACY_SELECT);
-        return res.json({ tenants: fallback.rows, legacy: true });
-      }
-      throw err;
-    }
+    const result = await db.query(q);
+    return res.json({ tenants: result.rows, schemaCompat: true });
   } catch (err) {
     console.error("Error loading tenants:", err);
     return res.status(500).json({ error: "Failed to load tenants" });
@@ -472,56 +519,52 @@ router.get("/by-slug/:slug", async (req, res) => {
     const slug = String(req.params.slug || "").trim();
     if (!slug) return res.status(400).json({ error: "Missing slug" });
 
-    const FULL_SELECT_BY_SLUG = `
+    const cols = await getTenantColumnSet();
+    const select = [
+      "id",
+      "slug",
+      "name",
+      "kind",
+      "timezone",
+      "allow_pending",
+      "branding",
+      cols.has("logo_url") ? "logo_url" : "NULL::text AS logo_url",
+      cols.has("cover_image_url") ? "cover_image_url" : "NULL::text AS cover_image_url",
+      cols.has("banner_book_url")
+        ? "banner_book_url"
+        : cols.has("banner_book_url1")
+          ? "banner_book_url1 AS banner_book_url"
+          : "NULL::text AS banner_book_url",
+      cols.has("banner_reservations_url")
+        ? "banner_reservations_url"
+        : cols.has("banner_reservations_url1")
+          ? "banner_reservations_url1 AS banner_reservations_url"
+          : "NULL::text AS banner_reservations_url",
+      cols.has("banner_account_url")
+        ? "banner_account_url"
+        : cols.has("banner_account_url1")
+          ? "banner_account_url1 AS banner_account_url"
+          : "NULL::text AS banner_account_url",
+      cols.has("banner_home_url")
+        ? "banner_home_url"
+        : cols.has("banner_home_url1")
+          ? "banner_home_url1 AS banner_home_url"
+          : "NULL::text AS banner_home_url",
+      cols.has("theme_key") ? "theme_key" : "NULL::text AS theme_key",
+      cols.has("layout_key") ? "layout_key" : "NULL::text AS layout_key",
+      cols.has("currency_code") ? "currency_code" : "NULL::text AS currency_code",
+      "created_at",
+    ].join(",\n        ");
+
+    const q = `
       SELECT
-        id,
-        slug,
-        name,
-        kind,
-        timezone,
-        allow_pending,
-        branding,
-        logo_url,
-        cover_image_url,
-        banner_book_url,
-        banner_reservations_url,
-        banner_account_url,
-        banner_home_url,
-        theme_key,
-        layout_key,
-        currency_code,
-        created_at
+        ${select}
       FROM tenants
       WHERE slug = $1
       LIMIT 1
     `;
 
-    const LEGACY_SELECT_BY_SLUG = `
-      SELECT
-        id,
-        slug,
-        name,
-        kind,
-        timezone,
-        allow_pending,
-        branding,
-        logo_url,
-        created_at
-      FROM tenants
-      WHERE slug = $1
-      LIMIT 1
-    `;
-
-    let result;
-    try {
-      result = await db.query(FULL_SELECT_BY_SLUG, [slug]);
-    } catch (err) {
-      if (err && err.code === "42703") {
-        result = await db.query(LEGACY_SELECT_BY_SLUG, [slug]);
-      } else {
-        throw err;
-      }
-    }
+    const result = await db.query(q, [slug]);
 
     if (!result.rows.length) {
       return res.status(404).json({ error: "Tenant not found" });
@@ -550,32 +593,52 @@ router.get("/:id", requireAdmin, async (req, res) => {
       return res.status(400).json({ error: "Invalid tenant id" });
     }
 
-    const result = await db.query(
-      `
-      SELECT
-        id,
-        slug,
-        name,
-        kind,
-        timezone,
-        allow_pending,
-        branding,
-        logo_url,
-        cover_image_url,
-        banner_book_url,
-        banner_reservations_url,
-        banner_account_url,
-        banner_home_url,
-        theme_key,
-        layout_key,
-        currency_code,
-        created_at
-      FROM tenants
-      WHERE id = $1
-      LIMIT 1
-      `,
-      [id]
-    );
+	  const cols = await getTenantColumnSet();
+	  const select = [
+	    "id",
+	    "slug",
+	    "name",
+	    "kind",
+	    "timezone",
+	    "allow_pending",
+	    "branding",
+	    cols.has("logo_url") ? "logo_url" : "NULL::text AS logo_url",
+	    cols.has("cover_image_url") ? "cover_image_url" : "NULL::text AS cover_image_url",
+	    cols.has("banner_book_url")
+	      ? "banner_book_url"
+	      : cols.has("banner_book_url1")
+	        ? "banner_book_url1 AS banner_book_url"
+	        : "NULL::text AS banner_book_url",
+	    cols.has("banner_reservations_url")
+	      ? "banner_reservations_url"
+	      : cols.has("banner_reservations_url1")
+	        ? "banner_reservations_url1 AS banner_reservations_url"
+	        : "NULL::text AS banner_reservations_url",
+	    cols.has("banner_account_url")
+	      ? "banner_account_url"
+	      : cols.has("banner_account_url1")
+	        ? "banner_account_url1 AS banner_account_url"
+	        : "NULL::text AS banner_account_url",
+	    cols.has("banner_home_url")
+	      ? "banner_home_url"
+	      : cols.has("banner_home_url1")
+	        ? "banner_home_url1 AS banner_home_url"
+	        : "NULL::text AS banner_home_url",
+	    cols.has("theme_key") ? "theme_key" : "NULL::text AS theme_key",
+	    cols.has("layout_key") ? "layout_key" : "NULL::text AS layout_key",
+	    cols.has("currency_code") ? "currency_code" : "NULL::text AS currency_code",
+	    "created_at",
+	  ].join(",\n        ");
+
+	  const q = `
+	    SELECT
+	      ${select}
+	    FROM tenants
+	    WHERE id = $1
+	    LIMIT 1
+	  `;
+
+	  const result = await db.query(q, [id]);
 
     if (!result.rows.length) {
       return res.status(404).json({ error: "Tenant not found" });
