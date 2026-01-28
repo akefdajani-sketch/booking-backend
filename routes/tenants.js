@@ -319,8 +319,15 @@ router.get("/heartbeat/bump", requireAdmin, requireTenant, async (req, res) => {
 // -----------------------------------------------------------------------------
 router.get("/", async (req, res) => {
   try {
-    const result = await db.query(
-      `
+    // NOTE:
+    // The platform is deployed across environments that may not always have the
+    // latest tenant columns (e.g. layout_key / currency_code / banner_* fields).
+    // If we SELECT a column that doesn't exist, Postgres throws 42703
+    // (undefined_column) and the owner dashboard loses tenants completely.
+    //
+    // Protocol: try the "full" select first; if the DB is older, fall back to a
+    // legacy select that only uses the guaranteed base columns.
+    const FULL_SELECT = `
       SELECT
         id,
         slug,
@@ -341,10 +348,34 @@ router.get("/", async (req, res) => {
         created_at
       FROM tenants
       ORDER BY name ASC
-      `
-    );
+    `;
 
-    return res.json({ tenants: result.rows });
+    const LEGACY_SELECT = `
+      SELECT
+        id,
+        slug,
+        name,
+        kind,
+        timezone,
+        allow_pending,
+        branding,
+        logo_url,
+        created_at
+      FROM tenants
+      ORDER BY name ASC
+    `;
+
+    try {
+      const result = await db.query(FULL_SELECT);
+      return res.json({ tenants: result.rows });
+    } catch (err) {
+      // 42703 = undefined_column
+      if (err && err.code === "42703") {
+        const fallback = await db.query(LEGACY_SELECT);
+        return res.json({ tenants: fallback.rows, legacy: true });
+      }
+      throw err;
+    }
   } catch (err) {
     console.error("Error loading tenants:", err);
     return res.status(500).json({ error: "Failed to load tenants" });
@@ -401,6 +432,8 @@ router.post("/", requireAdmin, async (req, res) => {
       return res.status(409).json({ error: "Slug already exists" });
     }
 
+    // Keep RETURNING to base columns only so tenant creation is compatible with
+    // older DB schemas (pre banner_* / layout_key / currency_code columns).
     const result = await db.query(
       `
       INSERT INTO tenants (slug, name, kind, timezone, branding)
@@ -414,14 +447,6 @@ router.post("/", requireAdmin, async (req, res) => {
         allow_pending,
         branding,
         logo_url,
-        cover_image_url,
-        banner_book_url,
-        banner_reservations_url,
-        banner_account_url,
-        banner_home_url,
-        theme_key,
-        layout_key,
-        currency_code,
         created_at
       `,
       [slug, name, kind, timezone, JSON.stringify(branding)]
@@ -447,8 +472,7 @@ router.get("/by-slug/:slug", async (req, res) => {
     const slug = String(req.params.slug || "").trim();
     if (!slug) return res.status(400).json({ error: "Missing slug" });
 
-    const result = await db.query(
-      `
+    const FULL_SELECT_BY_SLUG = `
       SELECT
         id,
         slug,
@@ -470,9 +494,34 @@ router.get("/by-slug/:slug", async (req, res) => {
       FROM tenants
       WHERE slug = $1
       LIMIT 1
-      `,
-      [slug]
-    );
+    `;
+
+    const LEGACY_SELECT_BY_SLUG = `
+      SELECT
+        id,
+        slug,
+        name,
+        kind,
+        timezone,
+        allow_pending,
+        branding,
+        logo_url,
+        created_at
+      FROM tenants
+      WHERE slug = $1
+      LIMIT 1
+    `;
+
+    let result;
+    try {
+      result = await db.query(FULL_SELECT_BY_SLUG, [slug]);
+    } catch (err) {
+      if (err && err.code === "42703") {
+        result = await db.query(LEGACY_SELECT_BY_SLUG, [slug]);
+      } else {
+        throw err;
+      }
+    }
 
     if (!result.rows.length) {
       return res.status(404).json({ error: "Tenant not found" });
