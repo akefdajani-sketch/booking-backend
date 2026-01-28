@@ -329,6 +329,15 @@ router.get("/", async (req, res) => {
         timezone,
         allow_pending,
         branding,
+        logo_url,
+        cover_image_url,
+        banner_book_url,
+        banner_reservations_url,
+        banner_account_url,
+        banner_home_url,
+        theme_key,
+        layout_key,
+        currency_code,
         created_at
       FROM tenants
       ORDER BY name ASC
@@ -472,6 +481,60 @@ router.get("/by-slug/:slug", async (req, res) => {
     return res.json({ tenant: result.rows[0] });
   } catch (err) {
     console.error("Error loading tenant by slug:", err);
+    return res.status(500).json({ error: "Failed to load tenant" });
+  }
+});
+
+
+
+// -----------------------------------------------------------------------------
+// GET /api/tenants/:id
+// Admin/Owner: returns a single tenant by id (full shape).
+// Purpose:
+//  - Normalizes list vs detail payloads so UI never 'loses' branding fields.
+//  - Allows targeted fetch without loading all tenants.
+// -----------------------------------------------------------------------------
+router.get("/:id", requireAdmin, async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id) || id <= 0) {
+      return res.status(400).json({ error: "Invalid tenant id" });
+    }
+
+    const result = await db.query(
+      `
+      SELECT
+        id,
+        slug,
+        name,
+        kind,
+        timezone,
+        allow_pending,
+        branding,
+        logo_url,
+        cover_image_url,
+        banner_book_url,
+        banner_reservations_url,
+        banner_account_url,
+        banner_home_url,
+        theme_key,
+        layout_key,
+        currency_code,
+        created_at
+      FROM tenants
+      WHERE id = $1
+      LIMIT 1
+      `,
+      [id]
+    );
+
+    if (!result.rows.length) {
+      return res.status(404).json({ error: "Tenant not found" });
+    }
+
+    return res.json({ tenant: result.rows[0] });
+  } catch (err) {
+    console.error("Error loading tenant by id:", err);
     return res.status(500).json({ error: "Failed to load tenant" });
   }
 });
