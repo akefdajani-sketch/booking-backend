@@ -23,6 +23,16 @@ function normalizeAvailabilityBasis(v) {
   return s;
 }
 
+function normalizeAllowMembership(v) {
+  if (v === undefined) return undefined;
+  if (v === null) return null;
+  if (typeof v === "boolean") return v;
+  const s = String(v).toLowerCase().trim();
+  if (s === "true" || s === "1" || s === "yes" || s === "y") return true;
+  if (s === "false" || s === "0" || s === "no" || s === "n") return false;
+  return undefined;
+}
+
 async function getServicesColumns() {
   const { rows } = await db.query(
     `
@@ -122,6 +132,10 @@ router.get("/", async (req, res) => {
       ? "COALESCE(s.requires_confirmation, false) AS requires_confirmation"
       : "false::boolean AS requires_confirmation";
 
+    const allowMembershipExpr = svcCols.has("allow_membership")
+      ? "COALESCE(s.allow_membership, false) AS allow_membership"
+      : "false::boolean AS allow_membership";
+
     const q = `
       SELECT
         s.id,
@@ -136,6 +150,7 @@ router.get("/", async (req, res) => {
         COALESCE(s.requires_staff, false)    AS requires_staff,
         COALESCE(s.requires_resource, false) AS requires_resource,
         ${requiresConfirmationExpr},
+        ${allowMembershipExpr},
         s.availability_basis                AS availability_basis,
         COALESCE(s.is_active, true)         AS is_active,
         ${imageExpr},
@@ -179,6 +194,7 @@ router.post("/", requireAdmin, async (req, res) => {
       requires_staff,
       requires_resource,
       requires_confirmation,
+      allow_membership,
       availability_basis,
       is_active,
     } = req.body || {};
@@ -258,6 +274,10 @@ router.post("/", requireAdmin, async (req, res) => {
     if (svcCols.has("requires_confirmation")) {
       add("requires_confirmation", requires_confirmation == null ? false : !!requires_confirmation);
     }
+    if (svcCols.has("allow_membership")) {
+      const am = normalizeAllowMembership(allow_membership);
+      if (am !== undefined) add("allow_membership", !!am);
+    }
     if (svcCols.has("availability_basis")) add("availability_basis", ab);
     if (svcCols.has("is_active")) add("is_active", is_active == null ? true : !!is_active);
 
@@ -300,6 +320,7 @@ router.patch("/:id", requireAdmin, async (req, res) => {
       requires_staff,
       requires_resource,
       requires_confirmation,
+      allow_membership,
       availability_basis,
       is_active,
     } = req.body || {};
@@ -346,6 +367,10 @@ router.patch("/:id", requireAdmin, async (req, res) => {
     if (requires_resource !== undefined && svcCols.has("requires_resource")) add("requires_resource", !!requires_resource);
     if (requires_confirmation !== undefined && svcCols.has("requires_confirmation")) {
       add("requires_confirmation", !!requires_confirmation);
+    }
+    if (allow_membership !== undefined && svcCols.has("allow_membership")) {
+      const am = normalizeAllowMembership(allow_membership);
+      if (am !== undefined) add("allow_membership", !!am);
     }
     if (availability_basis !== undefined && svcCols.has("availability_basis")) add("availability_basis", ab);
     if (is_active !== undefined && svcCols.has("is_active")) add("is_active", !!is_active);
