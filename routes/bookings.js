@@ -56,6 +56,48 @@ async function checkBlackoutOverlap({
 }
 
 // ---------------------------------------------------------------------------
+// Membership eligibility (service-level rule)
+// ---------------------------------------------------------------------------
+async function servicesHasColumn(client, columnName) {
+  const { rows } = await client.query(
+    `
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_schema='public'
+      AND table_name='services'
+      AND column_name = $1
+    LIMIT 1
+    `,
+    [String(columnName)]
+  );
+  return rows.length > 0;
+}
+
+async function getServiceAllowMembership(client, tenantId, serviceId) {
+  const tid = Number(tenantId);
+  const sid = Number(serviceId);
+  if (!Number.isFinite(tid) || tid <= 0) return { supported: false, allowed: false };
+  if (!Number.isFinite(sid) || sid <= 0) return { supported: false, allowed: false };
+
+  const supported = await servicesHasColumn(client, "allow_membership");
+  if (!supported) {
+    // Backward compatible: if the schema hasn't been patched yet,
+    // we treat the rule as "not configured" (allowed=false) so we never silently debit.
+    return { supported: false, allowed: false };
+  }
+
+  const r = await client.query(
+    `SELECT COALESCE(allow_membership,false) AS allow_membership
+     FROM services
+     WHERE id=$1 AND tenant_id=$2
+     LIMIT 1`,
+    [sid, tid]
+  );
+  if (!r.rows.length) return { supported: true, allowed: false };
+  return { supported: true, allowed: !!r.rows[0].allow_membership };
+}
+
+// ---------------------------------------------------------------------------
 // Phase 0 safety helpers
 // ---------------------------------------------------------------------------
 function getIdempotencyKey(req) {
@@ -878,10 +920,38 @@ router.post("/", async (req, res) => {
 
       // Optional: auto-consume an eligible membership entitlement (platform-safe, no schema change)
       // If requireMembership=true, we will HARD FAIL when no eligible entitlement exists.
-      const wantAutoMembership =
+      let wantAutoMembership =
         (autoConsumeMembership === true || String(autoConsumeMembership).toLowerCase() === "true");
-      const wantRequireMembership =
+      let wantRequireMembership =
         (requireMembership === true || String(requireMembership).toLowerCase() === "true");
+
+      // Service-level eligibility guard:
+      // We only allow membership debits for services explicitly marked allow_membership=true.
+      // This prevents accidental credit use for non-membership products (e.g., lessons, karaoke).
+      const membershipRequested =
+        wantAutoMembership || wantRequireMembership || (customerMembershipId != null && String(customerMembershipId).trim() !== "");
+
+      if (membershipRequested) {
+        if (!serviceId) {
+          await client.query("ROLLBACK");
+          return res.status(400).json({ error: "Membership credits require a service selection." });
+        }
+
+        const svcRule = await getServiceAllowMembership(client, resolvedTenantId, serviceId);
+        if (!svcRule.allowed) {
+          // Hard-fail when the caller explicitly requested membership use.
+          if (wantRequireMembership || (customerMembershipId != null && String(customerMembershipId).trim() !== "")) {
+            await client.query("ROLLBACK");
+            return res.status(409).json({
+              error: "This service is not eligible for membership credits. Ask the business to enable membership for this service in Setup → Memberships.",
+            });
+          }
+
+          // Soft mode: ignore auto consumption for non-eligible services.
+          wantAutoMembership = false;
+          wantRequireMembership = false;
+        }
+      }
 
       if (!finalCustomerMembershipId && (wantAutoMembership || wantRequireMembership) && !customerMembershipId) {
         if (!finalCustomerId) {
