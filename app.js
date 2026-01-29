@@ -28,6 +28,9 @@ const adminThemesRouter = require("./routes/adminThemes");
 const adminTenantsThemeRouter = require("./routes/adminTenantsTheme");
 const publicTenantThemeRouter = require("./routes/publicTenantTheme");
 
+// Phase 3 links (staff/resources <-> services)
+const linksRouter = require("./routes/links");
+
 const app = express();
 
 app.use(corsMiddleware);
@@ -62,6 +65,9 @@ app.use("/api/uploads", uploadsRouter);
 app.use("/api/admin/themes", adminThemesRouter);
 app.use("/api/admin/tenants", adminTenantsThemeRouter);
 app.use("/api/public/tenant-theme", publicTenantThemeRouter);
+
+// Relationship links
+app.use("/api/links", linksRouter);
 
 app.get("/health", (req, res) => res.json({ ok: true }));
 
