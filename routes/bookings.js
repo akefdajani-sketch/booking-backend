@@ -680,6 +680,8 @@ router.post("/", async (req, res) => {
       resourceId,
       customerId,
       customerMembershipId,
+      autoConsumeMembership,
+      requireMembership,
     } = req.body || {};
 
     const slug = mustHaveTenantSlug(req, res);
@@ -873,6 +875,72 @@ router.post("/", async (req, res) => {
       let finalCustomerMembershipId = null;
       let debitMinutes = 0;
       let debitUses = 0;
+
+      // Optional: auto-consume an eligible membership entitlement (platform-safe, no schema change)
+      // If requireMembership=true, we will HARD FAIL when no eligible entitlement exists.
+      const wantAutoMembership =
+        (autoConsumeMembership === true || String(autoConsumeMembership).toLowerCase() === "true");
+      const wantRequireMembership =
+        (requireMembership === true || String(requireMembership).toLowerCase() === "true");
+
+      if (!finalCustomerMembershipId && (wantAutoMembership || wantRequireMembership) && !customerMembershipId) {
+        if (!finalCustomerId) {
+          await client.query("ROLLBACK");
+          return res.status(400).json({ error: "Membership consumption requires a signed-in customer." });
+        }
+
+        // Pick ONE eligible active membership deterministically.
+        // Eligibility: active + not expired + (minutes_remaining >= duration OR uses_remaining >= 1)
+        // Ordering: soonest expiry first (NULLS LAST), then highest remaining balance, then id.
+        const eligible = await client.query(
+          `
+          SELECT id, customer_id, minutes_remaining, uses_remaining
+          FROM customer_memberships
+          WHERE tenant_id = $1
+            AND customer_id = $2
+            AND COALESCE(status, 'active') = 'active'
+            AND (end_at IS NULL OR end_at > NOW())
+            AND (COALESCE(minutes_remaining,0) >= $3 OR COALESCE(uses_remaining,0) >= 1)
+          ORDER BY
+            end_at NULLS LAST,
+            end_at ASC,
+            COALESCE(minutes_remaining,0) DESC,
+            COALESCE(uses_remaining,0) DESC,
+            id ASC
+          LIMIT 1
+          FOR UPDATE
+          `,
+          [resolvedTenantId, finalCustomerId, Number(duration)]
+        );
+
+        if (!eligible.rows.length) {
+          if (wantRequireMembership) {
+            await client.query("ROLLBACK");
+            return res.status(409).json({ error: "No eligible membership entitlement found." });
+          }
+          // soft mode: proceed without membership
+        } else {
+          const cm = eligible.rows[0];
+          const minsRemaining = Number(cm.minutes_remaining || 0);
+          const usesRemaining = Number(cm.uses_remaining || 0);
+
+          // Debit policy mirrors the explicit membership path:
+          if (minsRemaining >= Number(duration)) {
+            debitMinutes = -Number(duration);
+            debitUses = 0;
+          } else if (usesRemaining >= 1) {
+            debitMinutes = 0;
+            debitUses = -1;
+          } else if (wantRequireMembership) {
+            await client.query("ROLLBACK");
+            return res.status(409).json({ error: "Insufficient membership balance." });
+          }
+
+          finalCustomerMembershipId = cm.id;
+        }
+      }
+
+
 
       if (customerMembershipId != null && String(customerMembershipId).trim() !== "") {
         const cmid = Number(customerMembershipId);
