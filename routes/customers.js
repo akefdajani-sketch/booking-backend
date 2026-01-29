@@ -335,30 +335,58 @@ router.get("/me/memberships", requireGoogleAuth, requireTenant, async (req, res)
 
     // Column names in customer_memberships / membership_plans have changed over
     // time. Build a query that only references columns that exist.
+    //
+    // IMPORTANT (money-trust): The current platform uses an append-only ledger
+    // with customer_memberships.minutes_remaining / uses_remaining as the
+    // authoritative cached balances. Older iterations used included/used
+    // minutes. This endpoint must support BOTH shapes so the public booking UI
+    // can reliably determine if the customer has spendable credits.
     const cmPlanId = await pickCol("customer_memberships", "cm", [
       "plan_id",
       "membership_plan_id",
     ]);
-    const cmStatus = await pickCol("customer_memberships", "cm", ["status"], "NULL");
-    const cmStarted = await pickCol("customer_memberships", "cm", [
-      "started_at",
-      "start_at",
-      "created_at",
-    ], "NULL");
-    const cmExpires = await pickCol("customer_memberships", "cm", [
-      "expires_at",
-      "end_at",
-      "valid_until",
-    ], "NULL");
-    const cmUsed = await pickCol("customer_memberships", "cm", [
-      "used_minutes",
-      "minutes_used",
-    ], "NULL");
-    const cmIncluded = await pickCol("customer_memberships", "cm", [
-      "included_minutes",
-      "minutes_total",
-      "minutes_included",
-    ], "NULL");
+
+    const cmStatusRaw = await pickCol("customer_memberships", "cm", ["status"], "NULL");
+    const cmStarted = await pickCol(
+      "customer_memberships",
+      "cm",
+      ["started_at", "start_at", "created_at"],
+      "NULL"
+    );
+    const cmEndAt = await pickCol(
+      "customer_memberships",
+      "cm",
+      ["end_at", "expires_at", "valid_until"],
+      "NULL"
+    );
+
+    // Ledger-era balances (preferred when columns exist)
+    const cmMinutesRemaining = await pickCol(
+      "customer_memberships",
+      "cm",
+      ["minutes_remaining"],
+      "NULL"
+    );
+    const cmUsesRemaining = await pickCol(
+      "customer_memberships",
+      "cm",
+      ["uses_remaining"],
+      "NULL"
+    );
+
+    // Legacy minutes fields (fallback)
+    const cmUsedLegacy = await pickCol(
+      "customer_memberships",
+      "cm",
+      ["used_minutes", "minutes_used"],
+      "NULL"
+    );
+    const cmIncludedLegacy = await pickCol(
+      "customer_memberships",
+      "cm",
+      ["included_minutes", "minutes_total", "minutes_included"],
+      "NULL"
+    );
 
     const mpName = await pickCol("membership_plans", "mp", ["name", "title"], "NULL");
     const mpDesc = await pickCol(
@@ -367,15 +395,30 @@ router.get("/me/memberships", requireGoogleAuth, requireTenant, async (req, res)
       ["description", "subtitle"],
       "NULL"
     );
-    const mpIncluded = await pickCol("membership_plans", "mp", [
-      "included_minutes",
-      "minutes_total",
-      "minutes_included",
-    ], "NULL");
+    const mpIncluded = await pickCol(
+      "membership_plans",
+      "mp",
+      ["included_minutes", "minutes_total", "minutes_included"],
+      "NULL"
+    );
 
-    const includedExpr = `COALESCE(${mpIncluded}, ${cmIncluded})`;
-    const usedExpr = `COALESCE(${cmUsed}, 0)`;
-    const remainingExpr = `CASE WHEN ${includedExpr} IS NOT NULL THEN GREATEST(${includedExpr} - ${usedExpr}, 0) ELSE NULL END`;
+    // Prefer ledger-era minutes_remaining when available; otherwise compute from included-used.
+    const legacyIncludedExpr = `COALESCE(${mpIncluded}, ${cmIncludedLegacy})`;
+    const legacyUsedExpr = `COALESCE(${cmUsedLegacy}, 0)`;
+    const legacyRemainingExpr = `CASE WHEN ${legacyIncludedExpr} IS NOT NULL THEN GREATEST(${legacyIncludedExpr} - ${legacyUsedExpr}, 0) ELSE NULL END`;
+
+    const minutesRemainingExpr = `COALESCE(${cmMinutesRemaining}, ${legacyRemainingExpr})`;
+    const usesRemainingExpr = `COALESCE(${cmUsesRemaining}, 0)`;
+
+    // Normalize status so the UI doesn't show "active" when end_at has passed.
+    // If status column doesn't exist, we treat it as 'active' until end_at.
+    const statusExpr = `CASE
+      WHEN ${cmEndAt} IS NOT NULL AND ${cmEndAt} <= NOW() THEN 'expired'
+      WHEN ${cmStatusRaw} IS NULL THEN 'active'
+      WHEN LOWER(${cmStatusRaw}::text) IN ('active','cancelled','expired') THEN LOWER(${cmStatusRaw}::text)
+      ELSE LOWER(${cmStatusRaw}::text)
+    END`;
+
     const orderCol = await pickCol(
       "customer_memberships",
       "cm",
@@ -390,12 +433,12 @@ router.get("/me/memberships", requireGoogleAuth, requireTenant, async (req, res)
         cm.tenant_id,
         cm.customer_id,
         ${cmPlanId} AS plan_id,
-        ${cmStatus} AS status,
+        ${statusExpr} AS status,
         ${cmStarted} AS started_at,
-        ${cmExpires} AS expires_at,
-        ${includedExpr} AS included_minutes,
-        ${usedExpr} AS used_minutes,
-        ${remainingExpr} AS remaining_minutes,
+        ${cmEndAt} AS end_at,
+        ${minutesRemainingExpr}::int AS minutes_remaining,
+        ${usesRemainingExpr}::int AS uses_remaining,
+        ${minutesRemainingExpr}::int AS remaining_minutes,
         ${mpName} AS plan_name,
         ${mpDesc} AS plan_description
       FROM customer_memberships cm
