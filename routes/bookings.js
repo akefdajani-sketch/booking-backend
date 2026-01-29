@@ -1175,16 +1175,31 @@ router.post("/", async (req, res) => {
         // IMPORTANT: Only apply the balance update if we actually inserted the ledger line.
         // If a unique-violation happened (replay), we must NOT double-debit.
         if (ledgerInserted) {
-          await client.query(
-            `
-            UPDATE customer_memberships
-            SET
-              minutes_remaining = COALESCE(minutes_remaining, 0) + $1::int,
-              uses_remaining = COALESCE(uses_remaining, 0) + $2::int
-            WHERE id = $3 AND tenant_id = $4
-            `,
-            [minutesDelta, usesDelta, finalCustomerMembershipId, resolvedTenantId]
-          );
+	          // Guard against going negative. This prevents a hard 500 (constraint violation)
+	          // and turns it into a clean "insufficient balance" response.
+	          const balRes = await client.query(
+	            `
+	            UPDATE customer_memberships
+	            SET
+	              minutes_remaining = COALESCE(minutes_remaining, 0) + $1::int,
+	              uses_remaining = COALESCE(uses_remaining, 0) + $2::int
+	            WHERE id = $3
+	              AND tenant_id = $4
+	              AND (COALESCE(minutes_remaining, 0) + $1::int) >= 0
+	              AND (COALESCE(uses_remaining, 0) + $2::int) >= 0
+	            RETURNING id, minutes_remaining, uses_remaining
+	            `,
+	            [minutesDelta, usesDelta, finalCustomerMembershipId, resolvedTenantId]
+	          );
+
+	          if (balRes.rowCount === 0) {
+	            await client.query('ROLLBACK');
+	            return res.status(409).json({
+	              error: 'membership_insufficient_balance',
+	              message:
+	                'Membership does not have enough remaining balance for this booking. Please choose a shorter duration or a different payment option.'
+	            });
+	          }
         }
       }
 
