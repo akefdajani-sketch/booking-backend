@@ -1062,6 +1062,19 @@ router.post("/", async (req, res) => {
 
       // If a membership was provided, debit it once per booking (idempotent by unique constraint).
       if (finalCustomerMembershipId) {
+        const minutesDelta = Number(debitMinutes || 0);
+        const usesDelta = Number(debitUses || 0);
+
+        // Guard: never write a no-op ledger line.
+        // This can happen if durationMinutes is accidentally 0, or if the debit policy fails to set deltas.
+        if (minutesDelta === 0 && usesDelta === 0) {
+          await client.query("ROLLBACK");
+          return res.status(500).json({
+            error: "Membership debit failed: computed a zero delta. Please contact support.",
+          });
+        }
+
+        let ledgerInserted = false;
         try {
           await client.query(
             `
@@ -1074,14 +1087,34 @@ router.post("/", async (req, res) => {
               resolvedTenantId,
               finalCustomerMembershipId,
               bookingId,
-              debitMinutes || null,
-              debitUses || null,
+              minutesDelta || null,
+              usesDelta || null,
               `Debit for booking ${bookingId}`,
             ]
           );
+          ledgerInserted = true;
         } catch (e) {
           // If this is a replay, the ledger row may already exist. Ignore unique-violation.
           if (!(e && e.code === "23505")) throw e;
+        }
+
+        // Apply balance changes in the SAME transaction.
+        // We intentionally do this in application code (not only triggers) so the system remains correct
+        // even if the DB trigger set is incomplete in a given environment.
+        //
+        // IMPORTANT: Only apply the balance update if we actually inserted the ledger line.
+        // If a unique-violation happened (replay), we must NOT double-debit.
+        if (ledgerInserted) {
+          await client.query(
+            `
+            UPDATE customer_memberships
+            SET
+              minutes_remaining = COALESCE(minutes_remaining, 0) + $1::int,
+              uses_remaining = COALESCE(uses_remaining, 0) + $2::int
+            WHERE id = $3 AND tenant_id = $4
+            `,
+            [minutesDelta, usesDelta, finalCustomerMembershipId, resolvedTenantId]
+          );
         }
       }
 
