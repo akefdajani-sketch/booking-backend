@@ -706,11 +706,9 @@ router.delete("/:id", requireAdmin, requireTenant, async (req, res) => {
 
 // ---------------------------------------------------------------------------
 // POST /api/bookings
-// Customer booking creation (Google-auth required)
-//
-// Phase B (Session Integrity): bookings must NOT be creatable while logged out.
-// This route now requires a valid Google token and a resolved tenant.
+// Public booking creation (tenantSlug required)
 // ---------------------------------------------------------------------------
+// Phase C: booking creation is authenticated (prevents ghost bookings after session expiry).
 router.post("/", requireGoogleAuth, requireTenant, async (req, res) => {
   try {
     const {
@@ -718,6 +716,8 @@ router.post("/", requireGoogleAuth, requireTenant, async (req, res) => {
       serviceId,
       startTime,
       durationMinutes,
+      // customerName/phone/email may be sent by older UIs, but the platform now
+      // trusts Google auth + customer profile as the source of truth.
       customerName,
       customerPhone,
       customerEmail,
@@ -729,22 +729,79 @@ router.post("/", requireGoogleAuth, requireTenant, async (req, res) => {
       requireMembership,
     } = req.body || {};
 
-    const resolvedTenantId = Number(req.tenantId);
-    const slug = String(req.tenantSlug || tenantSlug || "").trim();
-    if (!resolvedTenantId) return res.status(400).json({ error: "Missing tenant." });
+    const slug = (req.tenantSlug || tenantSlug || "").toString().trim();
+    const resolvedTenantId = Number(req.tenantId || 0);
+    if (!slug) return res.status(400).json({ error: "Missing tenantSlug." });
+    if (!Number.isFinite(resolvedTenantId) || resolvedTenantId <= 0) {
+      return res.status(400).json({ error: "Invalid tenant." });
+    }
 
     const idemKey = getIdempotencyKey(req);
 
-    // Customer name can be provided by the client, but must be non-empty.
-    // Fall back to Google profile if needed.
-    const effectiveCustomerName =
-      (customerName && String(customerName).trim()) ||
-      (req.googleUser?.name && String(req.googleUser.name).trim()) ||
-      (req.googleUser?.email ? String(req.googleUser.email).split("@")[0] : "");
+    const googleEmail = (req.googleUser?.email || "").toString().trim().toLowerCase();
+    const googleName = (req.googleUser?.name || req.googleUser?.given_name || "").toString().trim();
+    if (!googleEmail) return res.status(401).json({ error: "Unauthorized" });
 
-    if (!effectiveCustomerName || !String(effectiveCustomerName).trim() || !startTime) {
-      return res.status(400).json({
-        error: "Missing required fields (customerName, startTime).",
+    if (!startTime) {
+      return res.status(400).json({ error: "Missing required fields (startTime)." });
+    }
+
+    // Tenant policy: require customer phone unless explicitly disabled.
+    // (Schema-free Phase C: read from tenants.branding JSONB when available.)
+    let requirePhone = true;
+    try {
+      const tpol = await db.query(`SELECT branding FROM tenants WHERE id=$1 LIMIT 1`, [resolvedTenantId]);
+      const branding = tpol.rows?.[0]?.branding || {};
+      const v = branding?.require_phone ?? branding?.requirePhone ?? branding?.phone_required ?? branding?.phoneRequired;
+      if (typeof v === "boolean") requirePhone = v;
+      if (typeof v === "string" && v.trim() !== "") {
+        requirePhone = ["1", "true", "yes", "y"].includes(v.trim().toLowerCase());
+      }
+    } catch (_) {
+      // keep default
+    }
+
+    // Resolve or create customer for this tenant using Google email.
+    // IMPORTANT: we NEVER trust customerId from the client for authenticated flows.
+    let finalCustomerId = null;
+    let finalCustomerName = googleName || String(customerName || "").trim() || "Customer";
+    let finalCustomerPhone = String(customerPhone || "").trim() || null;
+    let finalCustomerEmail = googleEmail;
+
+    const existingCust = await db.query(
+      `SELECT id, name, phone, email
+       FROM customers
+       WHERE tenant_id=$1 AND LOWER(email)=LOWER($2)
+       LIMIT 1`,
+      [resolvedTenantId, googleEmail]
+    );
+
+    if (existingCust.rows.length) {
+      const row = existingCust.rows[0];
+      finalCustomerId = row.id;
+      finalCustomerName = String(row.name || finalCustomerName).trim() || finalCustomerName;
+      // Prefer stored phone; only update if client supplied a phone.
+      finalCustomerPhone = String(row.phone || "").trim() || finalCustomerPhone;
+    } else {
+      // Create a minimal customer record.
+      const ins = await db.query(
+        `INSERT INTO customers (tenant_id, name, phone, email, created_at)
+         VALUES ($1,$2,$3,$4,NOW())
+         RETURNING id`,
+        [resolvedTenantId, finalCustomerName, finalCustomerPhone, googleEmail]
+      );
+      finalCustomerId = ins.rows?.[0]?.id || null;
+    }
+
+    if (!finalCustomerId) {
+      return res.status(500).json({ error: "Failed to resolve customer." });
+    }
+
+    if (requirePhone && !String(finalCustomerPhone || "").trim()) {
+      return res.status(409).json({
+        error: "Phone number required before booking.",
+        code: "PROFILE_INCOMPLETE",
+        fields: ["phone"],
       });
     }
 
@@ -856,59 +913,11 @@ router.post("/", requireGoogleAuth, requireTenant, async (req, res) => {
     try {
       await client.query("BEGIN");
 
-      // -------------------------------------------------------------------
-      // ✅ Customer identity is derived from Google auth (NOT client-provided).
-      // This prevents "book while logged out" and prevents booking on behalf
-      // of other customers by supplying arbitrary emails/ids.
-      // -------------------------------------------------------------------
-      const googleEmail = String(req.googleUser?.email || "").trim().toLowerCase();
-      if (!googleEmail) {
-        await client.query("ROLLBACK");
-        return res.status(401).json({ error: "Unauthorized" });
-      }
-
-      if (customerEmail && String(customerEmail).trim()) {
-        const bodyEmail = String(customerEmail).trim().toLowerCase();
-        if (bodyEmail !== googleEmail) {
-          await client.query("ROLLBACK");
-          return res.status(400).json({
-            error: "Email must match your Google account.",
-          });
-        }
-      }
-
-      const cleanName = String(effectiveCustomerName).trim();
-      const cleanPhone = customerPhone ? String(customerPhone).trim() : null;
-
-      // Upsert customer row scoped by (tenant_id, email)
-      const upsert = await client.query(
-        `
-        INSERT INTO customers (tenant_id, name, phone, email, created_at)
-        VALUES ($1, $2, $3, $4, NOW())
-        ON CONFLICT (tenant_id, email)
-        DO UPDATE SET
-          name = EXCLUDED.name,
-          phone = COALESCE(EXCLUDED.phone, customers.phone),
-          updated_at = NOW()
-        RETURNING id
-        `,
-        [resolvedTenantId, cleanName, cleanPhone, googleEmail]
-      );
-
-      const finalCustomerId = Number(upsert.rows?.[0]?.id || 0) || null;
-      if (!finalCustomerId) {
-        await client.query("ROLLBACK");
-        return res.status(500).json({ error: "Failed to resolve customer." });
-      }
-
-      // If the client passed a customerId (legacy), it must match the authed user.
-      if (customerId != null && String(customerId).trim() !== "") {
-        const cid = Number(customerId);
-        if (!Number.isFinite(cid) || cid <= 0 || Number(cid) !== Number(finalCustomerId)) {
-          await client.query("ROLLBACK");
-          return res.status(403).json({ error: "Customer mismatch." });
-        }
-      }
+      // Customer is already resolved (authenticated) before the transaction.
+      // Keep local aliases for downstream logic / inserts.
+      const cleanName = String(finalCustomerName || "Customer").trim();
+      const cleanPhone = finalCustomerPhone ? String(finalCustomerPhone).trim() : null;
+      const cleanEmail = finalCustomerEmail ? String(finalCustomerEmail).trim() : null;
 
 
       // Optional: apply customer membership (atomic debit in the same transaction)
