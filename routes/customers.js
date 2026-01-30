@@ -577,35 +577,84 @@ router.post("/me/memberships/subscribe", requireGoogleAuth, requireTenant, async
     if (cust.rows.length === 0) return res.status(404).json({ error: "Customer not found" });
     const customerId = cust.rows[0].id;
 
+    // membership_plans has had a few schema iterations (type vs billing_type).
+    // We'll infer "minutes vs uses" from included_uses being NULL/non-NULL.
+    const mpCols = await getExistingColumns("membership_plans");
+    const planTypeCol = firstExisting(mpCols, ["type", "billing_type"]);
+
     const plan = await pool.query(
-      `SELECT id, type, included_minutes, included_uses, validity_days FROM membership_plans WHERE id=$1 AND tenant_id=$2 LIMIT 1`,
+      `
+      SELECT
+        id,
+        ${planTypeCol ? planTypeCol : "NULL"} AS plan_type,
+        included_minutes,
+        included_uses,
+        validity_days
+      FROM membership_plans
+      WHERE id=$1 AND tenant_id=$2
+      LIMIT 1
+      `,
       [planIdNum, tenantId]
     );
     if (plan.rows.length === 0) return res.status(404).json({ error: "Plan not found" });
 
     const p = plan.rows[0];
+    const includedMinutes = Number(p.included_minutes || 0);
+    const includedUses = p.included_uses == null ? null : Number(p.included_uses);
+
     const now = new Date();
-    const expiresAt = new Date(now.getTime() + (Number(p.validity_days || 0) * 24 * 60 * 60 * 1000));
+    const endAt = new Date(now.getTime() + (Number(p.validity_days || 0) * 24 * 60 * 60 * 1000));
 
-    const ins = await pool.query(
-      `
-      INSERT INTO customer_memberships
-        (tenant_id, customer_id, plan_id, remaining_minutes, remaining_uses, started_at, expires_at, status)
-      VALUES
-        ($1, $2, $3, $4, $5, NOW(), $6, 'active')
-      RETURNING *
-      `,
-      [
-        tenantId,
-        customerId,
-        planIdNum,
-        p.type === "hours" ? Number(p.included_minutes || 0) : null,
-        p.type === "uses" ? Number(p.included_uses || 0) : null,
-        expiresAt,
-      ]
-    );
+    await pool.query("BEGIN");
 
-    return res.json({ ok: true, membership: ins.rows[0] });
+    try {
+      // Insert using the CURRENT DB schema:
+      // start_at, end_at, minutes_remaining, uses_remaining
+      const ins = await pool.query(
+        `
+        INSERT INTO customer_memberships
+          (tenant_id, customer_id, plan_id, status, start_at, end_at, minutes_remaining, uses_remaining)
+        VALUES
+          ($1, $2, $3, 'active', $4, $5, $6, $7)
+        RETURNING id, tenant_id, customer_id, plan_id, status, start_at, end_at, minutes_remaining, uses_remaining
+        `,
+        [
+          tenantId,
+          customerId,
+          planIdNum,
+          now.toISOString(),
+          endAt.toISOString(),
+          includedMinutes,
+          includedUses,
+        ]
+      );
+
+      const membership = ins.rows[0];
+
+      // Create the initial GRANT row in the ledger (this is the money-truth).
+      await pool.query(
+        `
+        INSERT INTO membership_ledger
+          (tenant_id, customer_membership_id, booking_id, type, minutes_delta, uses_delta, note)
+        VALUES
+          ($1, $2, NULL, 'grant', $3, $4, $5)
+        `,
+        [
+          tenantId,
+          membership.id,
+          includedMinutes,
+          includedUses == null ? 0 : includedUses,
+          `Initial grant for plan ${planIdNum}`,
+        ]
+      );
+
+      await pool.query("COMMIT");
+      return res.json({ ok: true, membership });
+    } catch (e2) {
+      await pool.query("ROLLBACK");
+      console.error("POST /customers/me/memberships/subscribe DB error:", e2);
+      return res.status(500).json({ error: "Server error" });
+    }
   } catch (e) {
     console.error("POST /customers/me/memberships/subscribe error:", e);
     return res.status(500).json({ error: "Server error" });
