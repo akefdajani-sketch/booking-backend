@@ -41,6 +41,19 @@ router.get("/:slug", async (req, res) => {
       id: tenant.id,
       slug: tenant.slug,
       logo_url: tenant.logo_url,
+      // Phase C: lightweight booking policy flags (schema-free, stored in branding json).
+      settings: {
+        // default true unless explicitly disabled
+        require_phone: (() => {
+          const b = tenant.branding || {};
+          const v = b?.require_phone ?? b?.requirePhone ?? b?.phone_required ?? b?.phoneRequired;
+          if (typeof v === "boolean") return v;
+          if (typeof v === "string" && v.trim() !== "") {
+            return ["1", "true", "yes", "y"].includes(v.trim().toLowerCase());
+          }
+          return true;
+        })(),
+      },
       banners: {
         home: tenant.banner_home_url,
         book: tenant.banner_book_url,
