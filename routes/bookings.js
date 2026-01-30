@@ -706,9 +706,12 @@ router.delete("/:id", requireAdmin, requireTenant, async (req, res) => {
 
 // ---------------------------------------------------------------------------
 // POST /api/bookings
-// Public booking creation (tenantSlug required)
+// Customer booking creation (Google-auth required)
+//
+// Phase B (Session Integrity): bookings must NOT be creatable while logged out.
+// This route now requires a valid Google token and a resolved tenant.
 // ---------------------------------------------------------------------------
-router.post("/", async (req, res) => {
+router.post("/", requireGoogleAuth, requireTenant, async (req, res) => {
   try {
     const {
       tenantSlug,
@@ -726,31 +729,23 @@ router.post("/", async (req, res) => {
       requireMembership,
     } = req.body || {};
 
-    const slug = mustHaveTenantSlug(req, res);
-    if (!slug) return;
+    const resolvedTenantId = Number(req.tenantId);
+    const slug = String(req.tenantSlug || tenantSlug || "").trim();
+    if (!resolvedTenantId) return res.status(400).json({ error: "Missing tenant." });
 
     const idemKey = getIdempotencyKey(req);
 
-    if (!customerName || !String(customerName).trim() || !startTime) {
-      return res
-        .status(400)
-        .json({ error: "Missing required fields (customerName, startTime)." });
-    }
+    // Customer name can be provided by the client, but must be non-empty.
+    // Fall back to Google profile if needed.
+    const effectiveCustomerName =
+      (customerName && String(customerName).trim()) ||
+      (req.googleUser?.name && String(req.googleUser.name).trim()) ||
+      (req.googleUser?.email ? String(req.googleUser.email).split("@")[0] : "");
 
-    const tRes = await db.query(
-      `SELECT id FROM tenants WHERE slug=$1 LIMIT 1`,
-      [String(slug)]
-    );
-    const resolvedTenantId = tRes.rows?.[0]?.id || null;
-    if (!resolvedTenantId) return res.status(400).json({ error: "Unknown tenantSlug." });
-
-    const tenantIdRaw = req.body?.tenantId;
-    if (tenantIdRaw != null && String(tenantIdRaw).trim() !== "") {
-      const tid = Number(tenantIdRaw);
-      if (!Number.isFinite(tid) || tid <= 0) return res.status(400).json({ error: "Invalid tenantId." });
-      if (Number(tid) !== Number(resolvedTenantId)) {
-        return res.status(400).json({ error: "Tenant mismatch." });
-      }
+    if (!effectiveCustomerName || !String(effectiveCustomerName).trim() || !startTime) {
+      return res.status(400).json({
+        error: "Missing required fields (customerName, startTime).",
+      });
     }
 
     const start = new Date(startTime);
@@ -861,54 +856,57 @@ router.post("/", async (req, res) => {
     try {
       await client.query("BEGIN");
 
-      const cleanName = String(customerName).trim();
-      const cleanPhone = customerPhone ? String(customerPhone).trim() : null;
-      const cleanEmail = customerEmail ? String(customerEmail).trim() : null;
-
-      let finalCustomerId = null;
-
-      if (customerId) {
-        const cid = Number(customerId);
-        const cRes = await client.query(
-          `SELECT id FROM customers WHERE id=$1 AND tenant_id=$2`,
-          [cid, resolvedTenantId]
-        );
-        if (cRes.rows.length) finalCustomerId = cRes.rows[0].id;
+      // -------------------------------------------------------------------
+      // ✅ Customer identity is derived from Google auth (NOT client-provided).
+      // This prevents "book while logged out" and prevents booking on behalf
+      // of other customers by supplying arbitrary emails/ids.
+      // -------------------------------------------------------------------
+      const googleEmail = String(req.googleUser?.email || "").trim().toLowerCase();
+      if (!googleEmail) {
+        await client.query("ROLLBACK");
+        return res.status(401).json({ error: "Unauthorized" });
       }
 
-      if (!finalCustomerId && (cleanPhone || cleanEmail)) {
-        const existingRes = await client.query(
-          `
-          SELECT id, name
-          FROM customers
-          WHERE tenant_id = $1
-            AND (
-              ($2::text IS NOT NULL AND phone = $2::text) OR
-              ($3::text IS NOT NULL AND email = $3::text)
-            )
-          LIMIT 1
-          `,
-          [resolvedTenantId, cleanPhone, cleanEmail]
-        );
+      if (customerEmail && String(customerEmail).trim()) {
+        const bodyEmail = String(customerEmail).trim().toLowerCase();
+        if (bodyEmail !== googleEmail) {
+          await client.query("ROLLBACK");
+          return res.status(400).json({
+            error: "Email must match your Google account.",
+          });
+        }
+      }
 
-        if (existingRes.rows.length) {
-          finalCustomerId = existingRes.rows[0].id;
-          if (cleanName && cleanName !== existingRes.rows[0].name) {
-            await client.query(
-              `UPDATE customers SET name=$1, updated_at=NOW() WHERE id=$2`,
-              [cleanName, finalCustomerId]
-            );
-          }
-        } else {
-          const insertCust = await client.query(
-            `
-            INSERT INTO customers (tenant_id, name, phone, email, notes, created_at)
-            VALUES ($1, $2, $3, $4, NULL, NOW())
-            RETURNING id
-            `,
-            [resolvedTenantId, cleanName, cleanPhone, cleanEmail]
-          );
-          finalCustomerId = insertCust.rows[0].id;
+      const cleanName = String(effectiveCustomerName).trim();
+      const cleanPhone = customerPhone ? String(customerPhone).trim() : null;
+
+      // Upsert customer row scoped by (tenant_id, email)
+      const upsert = await client.query(
+        `
+        INSERT INTO customers (tenant_id, name, phone, email, created_at)
+        VALUES ($1, $2, $3, $4, NOW())
+        ON CONFLICT (tenant_id, email)
+        DO UPDATE SET
+          name = EXCLUDED.name,
+          phone = COALESCE(EXCLUDED.phone, customers.phone),
+          updated_at = NOW()
+        RETURNING id
+        `,
+        [resolvedTenantId, cleanName, cleanPhone, googleEmail]
+      );
+
+      const finalCustomerId = Number(upsert.rows?.[0]?.id || 0) || null;
+      if (!finalCustomerId) {
+        await client.query("ROLLBACK");
+        return res.status(500).json({ error: "Failed to resolve customer." });
+      }
+
+      // If the client passed a customerId (legacy), it must match the authed user.
+      if (customerId != null && String(customerId).trim() !== "") {
+        const cid = Number(customerId);
+        if (!Number.isFinite(cid) || cid <= 0 || Number(cid) !== Number(finalCustomerId)) {
+          await client.query("ROLLBACK");
+          return res.status(403).json({ error: "Customer mismatch." });
         }
       }
 
