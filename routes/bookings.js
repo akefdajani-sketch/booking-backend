@@ -1207,6 +1207,39 @@ router.post("/", requireGoogleAuth, requireTenant, async (req, res) => {
 	                'Membership does not have enough remaining balance for this booking. Please choose a shorter duration or a different payment option.'
 	            });
 	          }
+
+	          // If balance is now depleted, expire the membership so the customer can renew.
+	          // Works for minutes-only, uses-only, or hybrid (Birdie) memberships.
+	          try {
+	            const newBal = balRes.rows[0] || {};
+	            const mins = Number(newBal.minutes_remaining ?? 0);
+	            const uses = Number(newBal.uses_remaining ?? 0);
+
+	            if (mins <= 0 && uses <= 0) {
+	              await client.query(
+	                `
+	                UPDATE customer_memberships
+	                SET status = 'expired'
+	                WHERE id = $1 AND tenant_id = $2 AND status = 'active'
+	                `,
+	                [finalCustomerMembershipId, resolvedTenantId]
+	              );
+	            } else {
+	              // Time-based expiry guard (in case end_at has passed)
+	              await client.query(
+	                `
+	                UPDATE customer_memberships
+	                SET status = 'expired'
+	                WHERE id = $1 AND tenant_id = $2 AND status = 'active'
+	                  AND end_at IS NOT NULL AND end_at <= NOW()
+	                `,
+	                [finalCustomerMembershipId, resolvedTenantId]
+	              );
+	            }
+	          } catch (eExpire) {
+	            // Don't fail booking if the expiry update fails; balances + ledger are already correct.
+	            console.warn("Membership expiry update failed (non-fatal):", eExpire?.message || eExpire);
+	          }
         }
       }
 

@@ -442,6 +442,13 @@ router.get("/me/memberships", requireGoogleAuth, requireTenant, async (req, res)
       "NULL"
     );
 
+    const mpIncludedUses = await pickCol(
+      "membership_plans",
+      "mp",
+      ["included_uses", "uses_total", "uses_included"],
+      "NULL"
+    );
+
     // Prefer ledger-era minutes_remaining when available; otherwise compute from included-used.
     const legacyIncludedExpr = `COALESCE(${mpIncluded}, ${cmIncludedLegacy})`;
     const legacyUsedExpr = `COALESCE(${cmUsedLegacy}, 0)`;
@@ -453,7 +460,17 @@ router.get("/me/memberships", requireGoogleAuth, requireTenant, async (req, res)
     // Normalize status so the UI doesn't show "active" when end_at has passed.
     // If status column doesn't exist, we treat it as 'active' until end_at.
     const statusExpr = `CASE
+      -- Time expiry
       WHEN ${cmEndAt} IS NOT NULL AND ${cmEndAt} <= NOW() THEN 'expired'
+
+      -- Credit expiry (Option A: sessions/classes are uses)
+      WHEN (COALESCE(${mpIncluded}, 0) > 0 AND (${minutesRemainingExpr}) <= 0) THEN 'expired'
+      WHEN (COALESCE(${mpIncludedUses}, 0) > 0 AND (${usesRemainingExpr}) <= 0) THEN 'expired'
+
+      -- Fallback: if plan credit shape is unknown, treat "both depleted" as expired
+      WHEN (${mpIncluded} IS NULL AND ${mpIncludedUses} IS NULL)
+        AND (COALESCE(${minutesRemainingExpr}, 0) <= 0 AND COALESCE(${usesRemainingExpr}, 0) <= 0) THEN 'expired'
+
       WHEN ${cmStatusRaw} IS NULL THEN 'active'
       WHEN LOWER(${cmStatusRaw}::text) IN ('active','cancelled','expired') THEN LOWER(${cmStatusRaw}::text)
       ELSE LOWER(${cmStatusRaw}::text)
@@ -566,6 +583,7 @@ router.post("/me/memberships/subscribe", requireGoogleAuth, requireTenant, async
     const email = (req.googleUser?.email || "").toLowerCase();
     const { planId } = req.body || {};
     const planIdNum = Number(planId);
+
     if (!tenantId) return res.status(400).json({ error: "Missing tenant" });
     if (!email) return res.status(401).json({ error: "Unauthorized" });
     if (!Number.isFinite(planIdNum)) return res.status(400).json({ error: "Invalid planId" });
@@ -578,14 +596,15 @@ router.post("/me/memberships/subscribe", requireGoogleAuth, requireTenant, async
     const customerId = cust.rows[0].id;
 
     // membership_plans has had a few schema iterations (type vs billing_type).
-    // We'll infer "minutes vs uses" from included_uses being NULL/non-NULL.
     const mpCols = await getExistingColumns("membership_plans");
     const planTypeCol = firstExisting(mpCols, ["type", "billing_type"]);
+    const planNameCol = firstExisting(mpCols, ["name", "title"]);
 
     const plan = await pool.query(
       `
       SELECT
         id,
+        ${planNameCol ? planNameCol : "NULL"} AS name,
         ${planTypeCol ? planTypeCol : "NULL"} AS plan_type,
         included_minutes,
         included_uses,
@@ -601,37 +620,106 @@ router.post("/me/memberships/subscribe", requireGoogleAuth, requireTenant, async
     const p = plan.rows[0];
     const includedMinutes = Number(p.included_minutes || 0);
     const includedUses = p.included_uses == null ? null : Number(p.included_uses);
+    const validityDays = Number(p.validity_days || 0);
 
     const now = new Date();
-    const endAt = new Date(now.getTime() + (Number(p.validity_days || 0) * 24 * 60 * 60 * 1000));
+    const endAt = validityDays > 0
+      ? new Date(now.getTime() + (validityDays * 24 * 60 * 60 * 1000))
+      : null;
 
     await pool.query("BEGIN");
 
     try {
-      // Insert using the CURRENT DB schema:
-      // start_at, end_at, minutes_remaining, uses_remaining
-      const ins = await pool.query(
+      // -------------------------------------------------------------------
+      // Option A (agreed): sessions/classes/visits are "uses". Birdie is minutes.
+      //
+      // A membership is effectively expired if:
+      // - time-based: end_at <= NOW()
+      // - credit-based: minutes_remaining <= 0 OR uses_remaining <= 0 (depending on plan)
+      // - hybrid: either of the above
+      //
+      // We allow repurchase once it's effectively expired.
+      // -------------------------------------------------------------------
+
+      // 1) Auto-expire any "active" rows that are effectively expired (time OR credits).
+      //    This prevents a stale active row from blocking renewals.
+      await pool.query(
         `
-        INSERT INTO customer_memberships
-          (tenant_id, customer_id, plan_id, status, start_at, end_at, minutes_remaining, uses_remaining)
-        VALUES
-          ($1, $2, $3, 'active', $4, $5, $6, $7)
-        RETURNING id, tenant_id, customer_id, plan_id, status, start_at, end_at, minutes_remaining, uses_remaining
+        UPDATE customer_memberships
+        SET status = 'expired'
+        WHERE tenant_id = $1
+          AND customer_id = $2
+          AND plan_id = $3
+          AND status = 'active'
+          AND (
+            (end_at IS NOT NULL AND end_at <= NOW())
+            OR (COALESCE(minutes_remaining, 0) <= 0 AND COALESCE(uses_remaining, 0) <= 0)
+          )
         `,
-        [
-          tenantId,
-          customerId,
-          planIdNum,
-          now.toISOString(),
-          endAt.toISOString(),
-          includedMinutes,
-          includedUses,
-        ]
+        [tenantId, customerId, planIdNum]
       );
 
-      const membership = ins.rows[0];
+      // 2) If there is still an active membership for this plan, return it (idempotent).
+      const existing = await pool.query(
+        `
+        SELECT id, tenant_id, customer_id, plan_id, status, start_at, end_at, minutes_remaining, uses_remaining
+        FROM customer_memberships
+        WHERE tenant_id=$1 AND customer_id=$2 AND plan_id=$3 AND status='active'
+        ORDER BY id DESC
+        LIMIT 1
+        `,
+        [tenantId, customerId, planIdNum]
+      );
 
-      // Create the initial GRANT row in the ledger (this is the money-truth).
+      if (existing.rows.length > 0) {
+        await pool.query("COMMIT");
+        return res.json({ ok: true, alreadyActive: true, membership: existing.rows[0] });
+      }
+
+      // 3) Create a fresh membership row.
+      let membership;
+      try {
+        const ins = await pool.query(
+          `
+          INSERT INTO customer_memberships
+            (tenant_id, customer_id, plan_id, status, start_at, end_at, minutes_remaining, uses_remaining)
+          VALUES
+            ($1, $2, $3, 'active', $4, $5, $6, $7)
+          RETURNING id, tenant_id, customer_id, plan_id, status, start_at, end_at, minutes_remaining, uses_remaining
+          `,
+          [
+            tenantId,
+            customerId,
+            planIdNum,
+            now.toISOString(),
+            endAt ? endAt.toISOString() : null,
+            includedMinutes,
+            includedUses,
+          ]
+        );
+        membership = ins.rows[0];
+      } catch (eIns) {
+        // If there is a race, the unique constraint may fire. Return the active membership cleanly.
+        if (eIns && eIns.code === "23505" && String(eIns.constraint || "") === "uq_cm_one_active_per_plan") {
+          const raced = await pool.query(
+            `
+            SELECT id, tenant_id, customer_id, plan_id, status, start_at, end_at, minutes_remaining, uses_remaining
+            FROM customer_memberships
+            WHERE tenant_id=$1 AND customer_id=$2 AND plan_id=$3 AND status='active'
+            ORDER BY id DESC
+            LIMIT 1
+            `,
+            [tenantId, customerId, planIdNum]
+          );
+          if (raced.rows.length > 0) {
+            await pool.query("COMMIT");
+            return res.json({ ok: true, alreadyActive: true, membership: raced.rows[0] });
+          }
+        }
+        throw eIns;
+      }
+
+      // 4) Create the initial GRANT row in the ledger (money-truth).
       await pool.query(
         `
         INSERT INTO membership_ledger
@@ -642,14 +730,14 @@ router.post("/me/memberships/subscribe", requireGoogleAuth, requireTenant, async
         [
           tenantId,
           membership.id,
-          includedMinutes,
-          includedUses == null ? 0 : includedUses,
-          `Initial grant for plan ${planIdNum}`,
+          includedMinutes || null,
+          (includedUses == null ? 0 : includedUses),
+          `Initial grant for plan ${planIdNum}${p.name ? ` (${p.name})` : ""}`,
         ]
       );
 
       await pool.query("COMMIT");
-      return res.json({ ok: true, membership });
+      return res.json({ ok: true, alreadyActive: false, membership });
     } catch (e2) {
       await pool.query("ROLLBACK");
       console.error("POST /customers/me/memberships/subscribe DB error:", e2);
