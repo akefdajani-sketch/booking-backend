@@ -693,8 +693,9 @@ router.post("/me/memberships/subscribe", requireGoogleAuth, requireTenant, async
             planIdNum,
             now.toISOString(),
             endAt ? endAt.toISOString() : null,
-            includedMinutes,
-            includedUses,
+            // Balances are derived from the membership_ledger; initialize to 0.
+            0,
+            0,
           ]
         );
         membership = ins.rows[0];
