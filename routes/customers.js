@@ -200,6 +200,51 @@ router.post("/me", requireGoogleAuth, async (req, res) => {
 // Auth: Google ID token (requireGoogleAuth). Tenant: requireTenant via ?tenantSlug=...
 // ===============================
 
+// ------------------------------------------------------------
+// PUBLIC (Google): GET /api/customers/me/session?tenantSlug=...
+// Lightweight session probe used by the booking UI to detect token expiry.
+// - Returns 200 when the provided Google token is valid for this tenant context.
+// - Returns 401 when token is missing/expired/invalid.
+// NOTE: No DB reads required beyond tenant resolution.
+// ------------------------------------------------------------
+router.get("/me/session", requireGoogleAuth, requireTenant, async (req, res) => {
+  return res.json({
+    authed: true,
+    tenantId: Number(req.tenantId),
+    email: String(req.googleUser?.email || ""),
+    name: req.googleUser?.name ? String(req.googleUser.name) : null,
+  });
+});
+
+// ------------------------------------------------------------
+// PUBLIC (Google): GET /api/customers/me?tenantSlug=...
+// Returns the current customer's profile for this tenant (if exists).
+// Used to prevent repeatedly asking for phone number on every visit.
+// ------------------------------------------------------------
+router.get("/me", requireGoogleAuth, requireTenant, async (req, res) => {
+  try {
+    const tenantId = Number(req.tenantId);
+    const email = String(req.googleUser?.email || "").trim().toLowerCase();
+    if (!tenantId) return res.status(400).json({ error: "Missing tenant" });
+    if (!email) return res.status(401).json({ error: "Unauthorized" });
+
+    const q = await db.query(
+      `
+      SELECT id, tenant_id, name, phone, email, created_at
+      FROM customers
+      WHERE tenant_id=$1 AND LOWER(email)=LOWER($2)
+      LIMIT 1
+      `,
+      [tenantId, email]
+    );
+
+    return res.json({ customer: q.rows?.[0] || null });
+  } catch (err) {
+    console.error("GET /customers/me error:", err);
+    return res.status(500).json({ error: "Failed to load customer" });
+  }
+});
+
 // Get my booking history for a tenant
 router.get("/me/bookings", requireGoogleAuth, requireTenant, async (req, res) => {
   try {
