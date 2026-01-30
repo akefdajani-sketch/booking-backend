@@ -174,6 +174,134 @@ async function bumpTenantBookingChange(tenantId) {
   }
 }
 
+
+
+// ---------------------------------------------------------------------------
+// Membership checkout policy (tenant-controlled, JSONB-driven)
+// Stored in tenants.branding.membershipCheckout (and/or legacy paths)
+// ---------------------------------------------------------------------------
+async function loadMembershipCheckoutPolicy(client, tenantId) {
+  const tid = Number(tenantId);
+  if (!Number.isFinite(tid) || tid <= 0) return null;
+
+  // Default policy (Flexrz recommended)
+  const defaults = {
+    mode: "smart_top_up", // smart_top_up | renew_upgrade | strict | off
+    topUp: {
+      enabled: true,
+      allowSelfServe: true,
+      // price per minute (so any interval works); UI can show per hour derived
+      pricePerMinute: 0, // 0 = not priced (still can top-up if tenant uses offline payment)
+      currency: null,
+      // rounding rules for UX + accounting (minutes)
+      roundToMinutes: 30,
+      minPurchaseMinutes: 30,
+    },
+    renewUpgrade: { enabled: true },
+    strict: { enabled: false },
+  };
+
+  try {
+    const r = await client.query(
+      `
+      SELECT
+        COALESCE(branding, '{}'::jsonb) AS branding,
+        currency_code
+      FROM tenants
+      WHERE id = $1
+      LIMIT 1
+      `,
+      [tid]
+    );
+    if (!r.rows.length) return defaults;
+
+    const branding = r.rows[0]?.branding || {};
+    const currency = r.rows[0]?.currency_code || null;
+
+    // Support multiple possible JSON paths (schema evolves)
+    const maybe =
+      branding?.membershipCheckout ||
+      branding?.membership_checkout ||
+      branding?.membership?.checkout ||
+      branding?.membership?.checkoutPolicy ||
+      null;
+
+    const merged = { ...defaults, ...(maybe && typeof maybe === "object" ? maybe : {}) };
+    merged.topUp = { ...defaults.topUp, ...(merged.topUp || {}) };
+    merged.renewUpgrade = { ...defaults.renewUpgrade, ...(merged.renewUpgrade || {}) };
+    merged.strict = { ...defaults.strict, ...(merged.strict || {}) };
+
+    // Currency fallback
+    if (!merged.topUp.currency) merged.topUp.currency = currency;
+
+    return merged;
+  } catch (e) {
+    // best-effort: never fail booking because of policy read
+    return defaults;
+  }
+}
+
+function roundUpMinutes(value, roundTo) {
+  const v = Math.max(0, Number(value || 0));
+  const r = Math.max(1, Number(roundTo || 1));
+  return Math.ceil(v / r) * r;
+}
+
+function buildMembershipResolution({ policy, minutesShort, usesShort }) {
+  const p = policy || {};
+  const mode = String(p.mode || "smart_top_up");
+
+  const out = {
+    mode,
+    options: [],
+    topUp: null,
+    renewUpgrade: null,
+    strict: null,
+  };
+
+  // Smart Top-Up
+  if (p?.topUp?.enabled && (minutesShort > 0 || usesShort > 0)) {
+    const roundTo = Number(p?.topUp?.roundToMinutes || 1);
+    const minBuy = Number(p?.topUp?.minPurchaseMinutes || 0);
+    const minsNeededRaw = minutesShort > 0 ? Number(minutesShort) : 0;
+    const minsNeededRounded = Math.max(roundUpMinutes(minsNeededRaw, roundTo), minBuy || 0);
+
+    const pricePerMinute = Number(p?.topUp?.pricePerMinute || 0);
+    const currency = p?.topUp?.currency || null;
+    const price = pricePerMinute > 0 ? Math.round(minsNeededRounded * pricePerMinute * 100) / 100 : null;
+
+    out.topUp = {
+      enabled: true,
+      allowSelfServe: !!p?.topUp?.allowSelfServe,
+      minutesNeeded: minsNeededRounded || null,
+      usesNeeded: usesShort > 0 ? Number(usesShort) : null,
+      price,
+      currency,
+    };
+    out.options.push("top_up");
+  }
+
+  // Renew / Upgrade
+  if (p?.renewUpgrade?.enabled) {
+    out.renewUpgrade = { enabled: true };
+    out.options.push("renew_upgrade");
+  }
+
+  // Strict
+  if (p?.strict?.enabled || mode === "strict") {
+    out.strict = { enabled: true };
+    out.options.push("strict");
+  }
+
+  // If tenant explicitly wants strict, override options
+  if (mode === "strict") {
+    out.options = ["renew_upgrade"]; // no top-up fallback in strict mode
+    out.topUp = null;
+    out.strict = { enabled: true };
+  }
+
+  return out;
+}
 // ---------------------------------------------------------------------------
 // GET /api/bookings?tenantSlug|tenantId=...
 // (unchanged)
@@ -925,6 +1053,12 @@ router.post("/", requireGoogleAuth, requireTenant, async (req, res) => {
       let debitMinutes = 0;
       let debitUses = 0;
 
+      // Snapshot of selected membership balance BEFORE debit (for resolution UI)
+      let membershipBefore = null;
+
+      // Tenant membership checkout policy (defaults safe)
+      const membershipPolicy = await loadMembershipCheckoutPolicy(client, resolvedTenantId);
+
       // Optional: auto-consume an eligible membership entitlement (platform-safe, no schema change)
       // If requireMembership=true, we will HARD FAIL when no eligible entitlement exists.
       let wantAutoMembership =
@@ -1002,6 +1136,9 @@ router.post("/", requireGoogleAuth, requireTenant, async (req, res) => {
           const usesRemaining = Number(cm.uses_remaining || 0);
 
           // Debit policy mirrors the explicit membership path:
+          // capture balances for resolution
+          membershipBefore = { minutes_remaining: minsRemaining, uses_remaining: usesRemaining, id: cm.id };
+
           if (minsRemaining >= Number(duration)) {
             debitMinutes = -Number(duration);
             debitUses = 0;
@@ -1057,6 +1194,8 @@ router.post("/", requireGoogleAuth, requireTenant, async (req, res) => {
 
         const minsRemaining = Number(cm.minutes_remaining || 0);
         const usesRemaining = Number(cm.uses_remaining || 0);
+
+        membershipBefore = { minutes_remaining: minsRemaining, uses_remaining: usesRemaining, id: cm.id };
 
         // Default debit policy:
         // - If membership has enough minutes, debit booking duration minutes.
@@ -1202,10 +1341,33 @@ router.post("/", requireGoogleAuth, requireTenant, async (req, res) => {
 	          if (balRes.rowCount === 0) {
 	            await client.query('ROLLBACK');
 	            return res.status(409).json({
-	              error: 'membership_insufficient_balance',
-	              message:
-	                'Membership does not have enough remaining balance for this booking. Please choose a shorter duration or a different payment option.'
-	            });
+              error: 'membership_insufficient_balance',
+              message:
+                'Membership does not have enough remaining balance for this booking. Please choose a shorter duration or a different payment option.',
+              resolution: (() => {
+                try {
+                  const before = membershipBefore || {};
+                  const beforeMins = Number(before.minutes_remaining ?? 0);
+                  const beforeUses = Number(before.uses_remaining ?? 0);
+
+                  // When we attempted a debit that would go negative, compute the shortage.
+                  const minutesShort =
+                    minutesDelta < 0 ? Math.max(0, -(beforeMins + minutesDelta)) : 0;
+                  const usesShort =
+                    usesDelta < 0 ? Math.max(0, -(beforeUses + usesDelta)) : 0;
+
+                  const r = buildMembershipResolution({
+                    policy: membershipPolicy,
+                    minutesShort,
+                    usesShort,
+                  });
+                  r.membershipId = before.id || null;
+                  return r;
+                } catch {
+                  return buildMembershipResolution({ policy: membershipPolicy, minutesShort: 0, usesShort: 0 });
+                }
+              })()
+            });
 	          }
 
 	          // If balance is now depleted, expire the membership so the customer can renew.

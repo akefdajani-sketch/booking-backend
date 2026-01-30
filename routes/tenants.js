@@ -234,6 +234,72 @@ async function setBrandingAsset(tenantId, jsonPathArray, value) {
   return result.rows?.[0] || null;
 }
 
+
+
+// -----------------------------------------------------------------------------
+// Membership checkout policy (tenant settings)
+// Stored at tenants.branding.membershipCheckout (JSONB)
+// Admin-only (owner dashboard).
+// -----------------------------------------------------------------------------
+// GET /api/tenants/membership-checkout?tenantSlug=...
+router.get("/membership-checkout", requireAdmin, requireTenant, async (req, res) => {
+  try {
+    const tenantId = req.tenantId;
+    const r = await db.query(
+      `
+      SELECT
+        COALESCE(branding, '{}'::jsonb) #> '{membershipCheckout}' AS membership_checkout,
+        currency_code
+      FROM tenants
+      WHERE id = $1
+      LIMIT 1
+      `,
+      [Number(tenantId)]
+    );
+
+    const row = r.rows?.[0] || {};
+    return res.json({
+      membershipCheckout: row.membership_checkout || null,
+      currency_code: row.currency_code || null,
+    });
+  } catch (err) {
+    console.error("GET membership-checkout error", err);
+    return res.status(500).json({ error: "Failed to load membership checkout policy." });
+  }
+});
+
+// PUT /api/tenants/membership-checkout?tenantSlug=...
+// Body: { membershipCheckout: { ... } }
+router.put("/membership-checkout", requireAdmin, requireTenant, async (req, res) => {
+  try {
+    const tenantId = req.tenantId;
+    const payload = req.body?.membershipCheckout;
+
+    if (!payload || typeof payload !== "object") {
+      return res.status(400).json({ error: "membershipCheckout object is required." });
+    }
+
+    const r = await db.query(
+      `
+      UPDATE tenants
+      SET branding = jsonb_set(
+        COALESCE(branding, '{}'::jsonb),
+        '{membershipCheckout}',
+        $2::jsonb,
+        true
+      )
+      WHERE id = $1
+      RETURNING COALESCE(branding, '{}'::jsonb) #> '{membershipCheckout}' AS membership_checkout
+      `,
+      [Number(tenantId), JSON.stringify(payload)]
+    );
+
+    return res.json({ membershipCheckout: r.rows?.[0]?.membership_checkout || null });
+  } catch (err) {
+    console.error("PUT membership-checkout error", err);
+    return res.status(500).json({ error: "Failed to save membership checkout policy." });
+  }
+});
 // -----------------------------------------------------------------------------
 // GET /api/tenants/heartbeat?tenantSlug=...
 // Tenant-scoped lightweight endpoint for "nudge" polling.
