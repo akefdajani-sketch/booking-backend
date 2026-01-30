@@ -507,4 +507,255 @@ router.get("/:id/ledger", requireAdmin, requireTenant, async (req, res) => {
   }
 });
 
+
+
+// -----------------------------------------------------------------------------
+// Membership top-up (Smart Top-Up)
+// Creates a positive ledger line and increments balances atomically.
+// -----------------------------------------------------------------------------
+// Stored policy: tenants.branding.membershipCheckout (or compatible paths)
+async function loadMembershipCheckoutPolicy(dbClient, tenantId) {
+  const defaults = {
+    mode: "smart_top_up",
+    topUp: {
+      enabled: true,
+      allowSelfServe: true,
+      roundToMinutes: 30,
+      minPurchaseMinutes: 30,
+      pricePerMinute: 0,
+      currency: null,
+    },
+  };
+
+  try {
+    const r = await dbClient.query(
+      `
+      SELECT COALESCE(branding, '{}'::jsonb) AS branding, currency_code
+      FROM tenants
+      WHERE id = $1
+      LIMIT 1
+      `,
+      [Number(tenantId)]
+    );
+    if (!r.rows.length) return defaults;
+
+    const branding = r.rows[0]?.branding || {};
+    const currency = r.rows[0]?.currency_code || null;
+
+    const maybe =
+      branding?.membershipCheckout ||
+      branding?.membership_checkout ||
+      branding?.membership?.checkout ||
+      branding?.membership?.checkoutPolicy ||
+      null;
+
+    const merged = { ...defaults, ...(maybe && typeof maybe === "object" ? maybe : {}) };
+    merged.topUp = { ...defaults.topUp, ...(merged.topUp || {}) };
+    if (!merged.topUp.currency) merged.topUp.currency = currency;
+
+    return merged;
+  } catch {
+    return defaults;
+  }
+}
+
+function roundUpMinutes(value, roundTo) {
+  const v = Math.max(0, Number(value || 0));
+  const r = Math.max(1, Number(roundTo || 1));
+  return Math.ceil(v / r) * r;
+}
+
+async function applyMembershipTopUp({
+  client,
+  tenantId,
+  membershipId,
+  minutesToAdd,
+  usesToAdd,
+  note,
+  actorType,
+}) {
+  const mins = Number(minutesToAdd || 0);
+  const uses = Number(usesToAdd || 0);
+  if (mins <= 0 && uses <= 0) {
+    throw new Error("Top-up requires minutesToAdd or usesToAdd.");
+  }
+
+  await client.query("BEGIN");
+  try {
+    // Ensure membership belongs to tenant (lock row)
+    const mRes = await client.query(
+      `
+      SELECT id, customer_id, status, end_at, minutes_remaining, uses_remaining
+      FROM customer_memberships
+      WHERE tenant_id = $1 AND id = $2
+      FOR UPDATE
+      `,
+      [Number(tenantId), Number(membershipId)]
+    );
+    if (!mRes.rows.length) {
+      await client.query("ROLLBACK");
+      return { ok: false, status: 404, error: "membership not found" };
+    }
+
+    const m = mRes.rows[0];
+
+    // Block archived memberships
+    if (String(m.status) === "archived") {
+      await client.query("ROLLBACK");
+      return { ok: false, status: 409, error: "membership is archived" };
+    }
+
+    // Block time-expired memberships (end_at passed)
+    if (m.end_at && new Date(m.end_at).getTime() <= Date.now()) {
+      await client.query("ROLLBACK");
+      return { ok: false, status: 409, error: "membership is expired (time)" };
+    }
+
+    // Insert ledger credit
+    const type = "topup";
+    const ledgerNote = note || `Top-up (${actorType || "system"})`;
+    await client.query(
+      `
+      INSERT INTO membership_ledger
+        (tenant_id, customer_membership_id, booking_id, type, minutes_delta, uses_delta, note)
+      VALUES
+        ($1, $2, NULL, $3, $4, $5, $6)
+      `,
+      [
+        Number(tenantId),
+        Number(membershipId),
+        type,
+        mins > 0 ? mins : null,
+        uses > 0 ? uses : null,
+        ledgerNote,
+      ]
+    );
+
+    // Apply balances
+    const upd = await client.query(
+      `
+      UPDATE customer_memberships
+      SET
+        minutes_remaining = COALESCE(minutes_remaining, 0) + $1::int,
+        uses_remaining = COALESCE(uses_remaining, 0) + $2::int,
+        status = CASE
+          WHEN status = 'expired' THEN 'active'
+          ELSE status
+        END
+      WHERE tenant_id = $3 AND id = $4
+      RETURNING id, tenant_id, customer_id, status, minutes_remaining, uses_remaining
+      `,
+      [mins, uses, Number(tenantId), Number(membershipId)]
+    );
+
+    await client.query("COMMIT");
+    return { ok: true, membership: upd.rows[0] };
+  } catch (e) {
+    try { await client.query("ROLLBACK"); } catch {}
+    throw e;
+  }
+}
+
+// CUSTOMER: POST /api/customer-memberships/:id/top-up?tenantSlug=...
+// Body: { minutesToAdd?: number, usesToAdd?: number, note?: string }
+//
+// Requires Google auth + tenant, and policy must allow self-serve top-ups.
+router.post("/:id/top-up", requireGoogleAuth, requireTenant, async (req, res) => {
+  try {
+    const tenantId = req.tenantId;
+    const membershipId = Number(req.params.id);
+
+    const googleEmail = String(req.googleUser?.email || "").toLowerCase().trim();
+    if (!googleEmail) return res.status(401).json({ error: "Unauthorized" });
+
+    const policy = await loadMembershipCheckoutPolicy(db, tenantId);
+    if (!policy?.topUp?.enabled) {
+      return res.status(409).json({ error: "top_up_disabled" });
+    }
+    if (!policy?.topUp?.allowSelfServe) {
+      return res.status(403).json({ error: "top_up_not_allowed" });
+    }
+
+    // Parse + normalize minutes
+    let minutesToAdd = Number(req.body?.minutesToAdd || 0);
+    const usesToAdd = Number(req.body?.usesToAdd || 0);
+
+    const roundTo = Number(policy?.topUp?.roundToMinutes || 1);
+    const minBuy = Number(policy?.topUp?.minPurchaseMinutes || 0);
+    if (minutesToAdd > 0) {
+      minutesToAdd = roundUpMinutes(minutesToAdd, roundTo);
+      if (minBuy > 0) minutesToAdd = Math.max(minutesToAdd, minBuy);
+    }
+
+    // Validate membership belongs to signed-in customer (by email)
+    const c = await db.query(
+      `SELECT id FROM customers WHERE tenant_id=$1 AND lower(email)=lower($2) LIMIT 1`,
+      [tenantId, googleEmail]
+    );
+    const customerId = c.rows?.[0]?.id ? Number(c.rows[0].id) : null;
+    if (!customerId) return res.status(403).json({ error: "customer_not_found" });
+
+    const owns = await db.query(
+      `SELECT id FROM customer_memberships WHERE tenant_id=$1 AND id=$2 AND customer_id=$3 LIMIT 1`,
+      [tenantId, membershipId, customerId]
+    );
+    if (!owns.rows.length) return res.status(403).json({ error: "forbidden" });
+
+    const result = await applyMembershipTopUp({
+      client: db,
+      tenantId,
+      membershipId,
+      minutesToAdd,
+      usesToAdd,
+      note: req.body?.note,
+      actorType: "customer",
+    });
+
+    if (!result.ok) return res.status(result.status).json({ error: result.error });
+    return res.json({ membership: result.membership });
+  } catch (err) {
+    console.error("customer top-up error", err);
+    return res.status(500).json({ error: "Failed to top up." });
+  }
+});
+
+// ADMIN: POST /api/customer-memberships/:id/top-up-admin?tenantSlug=...
+// Body: { minutesToAdd?: number, usesToAdd?: number, note?: string }
+router.post("/:id/top-up-admin", requireAdmin, requireTenant, async (req, res) => {
+  try {
+    const tenantId = req.tenantId;
+    const membershipId = Number(req.params.id);
+
+    const policy = await loadMembershipCheckoutPolicy(db, tenantId);
+    if (!policy?.topUp?.enabled) {
+      return res.status(409).json({ error: "top_up_disabled" });
+    }
+
+    let minutesToAdd = Number(req.body?.minutesToAdd || 0);
+    const usesToAdd = Number(req.body?.usesToAdd || 0);
+
+    const roundTo = Number(policy?.topUp?.roundToMinutes || 1);
+    const minBuy = Number(policy?.topUp?.minPurchaseMinutes || 0);
+    if (minutesToAdd > 0) {
+      minutesToAdd = roundUpMinutes(minutesToAdd, roundTo);
+      if (minBuy > 0) minutesToAdd = Math.max(minutesToAdd, minBuy);
+    }
+
+    const result = await applyMembershipTopUp({
+      client: db,
+      tenantId,
+      membershipId,
+      minutesToAdd,
+      usesToAdd,
+      note: req.body?.note,
+      actorType: "admin",
+    });
+
+    if (!result.ok) return res.status(result.status).json({ error: result.error });
+    return res.json({ membership: result.membership });
+  } catch (err) {
+    console.error("admin top-up error", err);
+    return res.status(500).json({ error: "Failed to top up." });
+  }
+});
 module.exports = router;
