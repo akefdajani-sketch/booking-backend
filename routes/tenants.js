@@ -300,6 +300,72 @@ router.put("/membership-checkout", requireAdmin, requireTenant, async (req, res)
     return res.status(500).json({ error: "Failed to save membership checkout policy." });
   }
 });
+
+
+// -----------------------------------------------------------------------------
+// Home landing content (booking Home tab)
+// Stored at tenants.branding.homeLanding (JSONB)
+// Admin-only (owner dashboard).
+// -----------------------------------------------------------------------------
+// GET /api/tenants/home-landing?tenantSlug=...
+router.get("/home-landing", requireAdmin, requireTenant, async (req, res) => {
+  try {
+    const tenantId = req.tenantId;
+    const r = await db.query(
+      `
+      SELECT
+        COALESCE(branding, '{}'::jsonb) #> '{homeLanding}' AS home_landing,
+        currency_code
+      FROM tenants
+      WHERE id = $1
+      LIMIT 1
+      `,
+      [Number(tenantId)]
+    );
+
+    const row = r.rows?.[0] || {};
+    return res.json({
+      homeLanding: row.home_landing || null,
+      currency_code: row.currency_code || null,
+    });
+  } catch (err) {
+    console.error("GET home-landing error", err);
+    return res.status(500).json({ error: "Failed to load home landing content." });
+  }
+});
+
+// PUT /api/tenants/home-landing?tenantSlug=...
+// Body: { homeLanding: { ... } }
+router.put("/home-landing", requireAdmin, requireTenant, async (req, res) => {
+  try {
+    const tenantId = req.tenantId;
+    const payload = req.body?.homeLanding;
+
+    if (!payload || typeof payload !== "object") {
+      return res.status(400).json({ error: "homeLanding object is required." });
+    }
+
+    const r = await db.query(
+      `
+      UPDATE tenants
+      SET branding = jsonb_set(
+        COALESCE(branding, '{}'::jsonb),
+        '{homeLanding}',
+        $2::jsonb,
+        true
+      )
+      WHERE id = $1
+      RETURNING COALESCE(branding, '{}'::jsonb) #> '{homeLanding}' AS home_landing
+      `,
+      [Number(tenantId), JSON.stringify(payload)]
+    );
+
+    return res.json({ homeLanding: r.rows?.[0]?.home_landing || null });
+  } catch (err) {
+    console.error("PUT home-landing error", err);
+    return res.status(500).json({ error: "Failed to save home landing content." });
+  }
+});
 // -----------------------------------------------------------------------------
 // GET /api/tenants/heartbeat?tenantSlug=...
 // Tenant-scoped lightweight endpoint for "nudge" polling.
