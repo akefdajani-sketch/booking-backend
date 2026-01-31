@@ -302,6 +302,33 @@ function buildMembershipResolution({ policy, minutesShort, usesShort }) {
 
   return out;
 }
+
+function buildMembershipInsufficientPayload({ policy, durationMinutes, membershipBefore, membershipId }) {
+  const minsRemaining = Number(membershipBefore?.minutes_remaining || 0);
+  const usesRemaining = Number(membershipBefore?.uses_remaining || 0);
+  const dur = Math.max(0, Number(durationMinutes || 0));
+
+  // Compute shortage: prefer minutes shortage when member has minutes bucket; otherwise minutes shortage for duration.
+  let minutesShort = 0;
+  let usesShort = 0;
+
+  if (minsRemaining > 0) {
+    minutesShort = Math.max(0, dur - minsRemaining);
+  } else if (usesRemaining > 0) {
+    usesShort = 0;
+  } else {
+    minutesShort = dur;
+    usesShort = 0;
+  }
+
+  const resolution = buildMembershipResolution({ policy, minutesShort, usesShort });
+  return {
+    error: "membership_insufficient_balance",
+    message: "Insufficient membership balance.",
+    resolution: { ...resolution, membershipId: membershipId || null },
+  };
+}
+
 // ---------------------------------------------------------------------------
 // GET /api/bookings?tenantSlug|tenantId=...
 // (unchanged)
@@ -1128,7 +1155,9 @@ router.post("/", requireGoogleAuth, requireTenant, async (req, res) => {
         if (!eligible.rows.length) {
           if (wantRequireMembership) {
             await client.query("ROLLBACK");
-            return res.status(409).json({ error: "No eligible membership entitlement found." });
+            const payload = buildMembershipInsufficientPayload({ policy: membershipPolicy, durationMinutes: Number(duration), membershipBefore: null, membershipId: null });
+            payload.message = "No eligible membership entitlement found.";
+            return res.status(409).json(payload);
           }
           // soft mode: proceed without membership
         } else {
@@ -1148,7 +1177,7 @@ router.post("/", requireGoogleAuth, requireTenant, async (req, res) => {
             debitUses = -1;
           } else if (wantRequireMembership) {
             await client.query("ROLLBACK");
-            return res.status(409).json({ error: "Insufficient membership balance." });
+            return res.status(409).json(buildMembershipInsufficientPayload({ policy: membershipPolicy, durationMinutes: Number(duration), membershipBefore, membershipId: cm.id }));
           }
 
           finalCustomerMembershipId = cm.id;
@@ -1210,7 +1239,7 @@ router.post("/", requireGoogleAuth, requireTenant, async (req, res) => {
           debitUses = -1;
         } else {
           await client.query("ROLLBACK");
-          return res.status(409).json({ error: "Insufficient membership balance." });
+          return res.status(409).json(buildMembershipInsufficientPayload({ policy: membershipPolicy, durationMinutes: Number(duration), membershipBefore, membershipId: cm.id }));
         }
 
         finalCustomerMembershipId = cm.id;
