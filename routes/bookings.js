@@ -1354,19 +1354,36 @@ router.post("/", requireGoogleAuth, requireTenant, async (req, res) => {
 	          // Guard against going negative. This prevents a hard 500 (constraint violation)
 	          // and turns it into a clean "insufficient balance" response.
 	          const balRes = await client.query(
-	            `
-	            UPDATE customer_memberships
-	            SET
-	              minutes_remaining = COALESCE(minutes_remaining, 0) + $1::int,
-	              uses_remaining = COALESCE(uses_remaining, 0) + $2::int
-	            WHERE id = $3
-	              AND tenant_id = $4
-	              AND (COALESCE(minutes_remaining, 0) + $1::int) >= 0
-	              AND (COALESCE(uses_remaining, 0) + $2::int) >= 0
-	            RETURNING id, minutes_remaining, uses_remaining
-	            `,
-	            [minutesDelta, usesDelta, finalCustomerMembershipId, resolvedTenantId]
-	          );
+              `
+              UPDATE customer_memberships cm
+              SET
+                minutes_remaining = GREATEST(
+                  0,
+                  COALESCE(
+                    (
+                      SELECT SUM(ml.minutes_delta)
+                      FROM membership_ledger ml
+                      WHERE ml.customer_membership_id = cm.id
+                    ),
+                    0
+                  )
+                ),
+                uses_remaining = GREATEST(
+                  0,
+                  COALESCE(
+                    (
+                      SELECT SUM(ml.uses_delta)
+                      FROM membership_ledger ml
+                      WHERE ml.customer_membership_id = cm.id
+                    ),
+                    0
+                  )
+                )
+              WHERE cm.id = $1 AND cm.tenant_id = $2
+              RETURNING id, minutes_remaining, uses_remaining
+              `,
+              [finalCustomerMembershipId, resolvedTenantId]
+            );
 
 	          if (balRes.rowCount === 0) {
 	            await client.query('ROLLBACK');
