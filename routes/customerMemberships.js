@@ -412,20 +412,39 @@ router.post("/consume-next", requireAdmin, requireTenant, async (req, res) => {
       );
     }
 
-    // Apply balance changes (DB constraint prevents negative balances)
+    // Recompute cached balances from ledger (ledger is the source of truth)
     const upd = await client.query(
       `
-      UPDATE customer_memberships
+      UPDATE customer_memberships cm
       SET
-        minutes_remaining = COALESCE(minutes_remaining, 0) - $1::int,
-        uses_remaining = COALESCE(uses_remaining, 0) - $2::int
-      WHERE id = $3 AND tenant_id = $4
-      RETURNING id, tenant_id, customer_id, plan_id, status, start_at, end_at, minutes_remaining, uses_remaining
+        minutes_remaining = GREATEST(
+          0,
+          COALESCE(
+            (
+              SELECT SUM(ml.minutes_delta)
+              FROM membership_ledger ml
+              WHERE ml.customer_membership_id = cm.id
+            ),
+            0
+          )
+        ),
+        uses_remaining = GREATEST(
+          0,
+          COALESCE(
+            (
+              SELECT SUM(ml.uses_delta)
+              FROM membership_ledger ml
+              WHERE ml.customer_membership_id = cm.id
+            ),
+            0
+          )
+        )
+      WHERE cm.id = $1 AND cm.tenant_id = $2
+      RETURNING *
       `,
-      [minutesToDebit, usesToDebit, cmId, tenantId]
+      [membershipId, tenantId]
     );
 
-    await client.query("COMMIT");
     return res.json({ membership: upd.rows[0] });
   } catch (err) {
     // Idempotency: if this booking was already debited, return the current membership state.
