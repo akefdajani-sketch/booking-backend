@@ -1103,6 +1103,7 @@ router.post("/", requireGoogleAuth, requireTenant, async (req, res) => {
         // Pick ONE eligible active membership deterministically.
         // Eligibility: active + not expired + (minutes_remaining >= duration OR uses_remaining >= 1)
         // Ordering: soonest expiry first (NULLS LAST), then highest remaining balance, then id.
+        // Note: we select a candidate even if it has insufficient minutes, so we can return Smart Top-Up resolution.
         const eligible = await client.query(
           `
           SELECT id, customer_id, minutes_remaining, uses_remaining
@@ -1111,7 +1112,7 @@ router.post("/", requireGoogleAuth, requireTenant, async (req, res) => {
             AND customer_id = $2
             AND COALESCE(status, 'active') = 'active'
             AND (end_at IS NULL OR end_at > NOW())
-            AND (COALESCE(minutes_remaining,0) >= $3 OR COALESCE(uses_remaining,0) >= 1)
+            AND (COALESCE(minutes_remaining,0) > 0 OR COALESCE(uses_remaining,0) > 0)
           ORDER BY
             end_at NULLS LAST,
             end_at ASC,
@@ -1121,7 +1122,7 @@ router.post("/", requireGoogleAuth, requireTenant, async (req, res) => {
           LIMIT 1
           FOR UPDATE
           `,
-          [resolvedTenantId, finalCustomerId, Number(duration)]
+          [resolvedTenantId, finalCustomerId]
         );
 
         if (!eligible.rows.length) {
@@ -1135,24 +1136,39 @@ router.post("/", requireGoogleAuth, requireTenant, async (req, res) => {
           const minsRemaining = Number(cm.minutes_remaining || 0);
           const usesRemaining = Number(cm.uses_remaining || 0);
 
-          // Debit policy mirrors the explicit membership path:
-          // capture balances for resolution
-          membershipBefore = { minutes_remaining: minsRemaining, uses_remaining: usesRemaining, id: cm.id };
+          // Capture balances for Smart Top-Up resolution if a debit fails.
+          membershipBefore = {
+            minutes_remaining: minsRemaining,
+            uses_remaining: usesRemaining,
+            id: cm.id,
+          };
+
+          // Default: select this membership as the candidate.
+          // In "soft" mode (autoConsume without require), we may choose to proceed without it.
+          finalCustomerMembershipId = cm.id;
 
           if (minsRemaining >= Number(duration)) {
+            // Minutes-based debit succeeds
             debitMinutes = -Number(duration);
             debitUses = 0;
           } else if (usesRemaining >= 1) {
+            // Uses-based debit succeeds
             debitMinutes = 0;
             debitUses = -1;
-          } else if (wantRequireMembership) {
-            await client.query("ROLLBACK");
-            return res.status(409).json({ error: "Insufficient membership balance." });
-          }
-
-          finalCustomerMembershipId = cm.id;
-        }
-      }
+          } else {
+            // Candidate exists but is insufficient for minutes-based debit.
+            // If membership is required, attempt the debit so the balance guard fails
+            // and we can return a structured Smart Top-Up resolution (409 with `resolution`).
+            if (wantRequireMembership) {
+              debitMinutes = -Number(duration);
+              debitUses = 0;
+            } else {
+              // Soft mode: proceed without membership (no debit)
+              debitMinutes = 0;
+              debitUses = 0;
+              finalCustomerMembershipId = null;
+            }
+          }      }
 
 
 
