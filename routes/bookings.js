@@ -1122,7 +1122,7 @@ router.post("/", requireGoogleAuth, requireTenant, async (req, res) => {
           LIMIT 1
           FOR UPDATE
           `,
-          [resolvedTenantId, finalCustomerId, Number(duration)]
+          [resolvedTenantId, finalCustomerId]
         );
 
         if (!eligible.rows.length) {
