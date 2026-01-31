@@ -13,6 +13,12 @@ These are “child rows with no standalone business meaning.” If the parent is
 | service_unavailability.service_id → services.id | fk_service_unavailability_service | Unavailability rows are dependent on service |
 | tenant_invoice_lines.invoice_id → tenant_invoices.id | tenant_invoice_lines_invoice_id_fkey | Line items are dependent on invoice |
 | tenant_payments.invoice_id → tenant_invoices.id | tenant_payments_invoice_id_fkey | Payments are dependent on invoice record |
+| resource_service_links.resource_id → resources.id | resource_service_links_resource_id_fkey | Join rows are dependent on resource |
+| resource_service_links.service_id → services.id | resource_service_links_service_id_fkey | Join rows are dependent on service |
+| staff_resource_links.resource_id → resources.id | staff_resource_links_resource_id_fkey | Join rows are dependent on resource |
+| staff_resource_links.staff_id → staff.id | staff_resource_links_staff_id_fkey | Join rows are dependent on staff |
+| staff_service_links.service_id → services.id | staff_service_links_service_id_fkey | Join rows are dependent on service |
+| staff_service_links.staff_id → staff.id | staff_service_links_staff_id_fkey | Join rows are dependent on staff |
 
 ---
 
@@ -38,6 +44,9 @@ These are tenant-owned tables that cascade from `tenants.id`. Under soft delete,
 | tenant_users.tenant_id → tenants.id | tenant_users_tenant_id_fkey | Keep only if tenant purge exists (audit history risk) |
 
 **If you do NOT have Tenant Purge:** change all rows in this section to **ON DELETE RESTRICT**.
+| resource_service_links.tenant_id → tenants.id | resource_service_links_tenant_id_fkey | Keep only if hard-delete tenant purge exists |
+| staff_resource_links.tenant_id → tenants.id | staff_resource_links_tenant_id_fkey | Keep only if hard-delete tenant purge exists |
+| staff_service_links.tenant_id → tenants.id | staff_service_links_tenant_id_fkey | Keep only if hard-delete tenant purge exists |
 
 ---
 
