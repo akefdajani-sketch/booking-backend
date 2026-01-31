@@ -4,8 +4,8 @@
 
 # BookFlow Foreign Key Inventory (Critical Tables)
 
-**Last audited:** 2026-01-26  
-**Source of truth snapshot:** `docs/db/generated/fk_inventory_2026-01-26.csv`  
+**Last audited:** 2026-02-01  
+**Source of truth snapshot:** `docs/db/generated/fk_inventory_2026-02-01.csv`  
 **Scope (MVP):** bookings, membership_ledger, customer_memberships, tenant_subscriptions, users, tenant_users, tenants
 
 ## How to read this

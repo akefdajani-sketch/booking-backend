@@ -1,6 +1,6 @@
 ## Approved Exceptions — CASCADE Foreign Keys (Tenant Purge = YES)
 
-**Source snapshot:** `docs/db/generated/fk_inventory_2026-01-26.csv`  
+**Source snapshot:** `docs/db/generated/fk_inventory_2026-02-01.csv`  
 **Soft delete policy:** Business-critical entities are soft-deleted in normal operations.  
 **Hard delete policy:** Physical deletes are permitted **only** via the controlled **Owner-only Tenant Purge** workflow.
 
@@ -22,6 +22,12 @@ These children have no standalone business meaning and should be removed if the 
 | service_unavailability.service_id → services.id | fk_service_unavailability_service | Unavailability rows are strictly dependent on the service record; hard delete cleanup is correct. | Owner | 2026-01-26 |
 | tenant_invoice_lines.invoice_id → tenant_invoices.id | tenant_invoice_lines_invoice_id_fkey | Invoice line items are dependent on the invoice; hard-deleting an invoice must remove its lines. | Owner | 2026-01-26 |
 | tenant_payments.invoice_id → tenant_invoices.id | tenant_payments_invoice_id_fkey | Payments are dependent on the invoice record; hard delete cleanup prevents orphan payment rows. | Owner | 2026-01-26 |
+| resource_service_links.resource_id → resources.id | resource_service_links_resource_id_fkey | Join rows are strictly dependent on resource; safe cleanup on hard delete. | Owner | 2026-02-01 |
+| resource_service_links.service_id → services.id | resource_service_links_service_id_fkey | Join rows are strictly dependent on service; safe cleanup on hard delete. | Owner | 2026-02-01 |
+| staff_resource_links.resource_id → resources.id | staff_resource_links_resource_id_fkey | Join rows are strictly dependent on resource; safe cleanup on hard delete. | Owner | 2026-02-01 |
+| staff_resource_links.staff_id → staff.id | staff_resource_links_staff_id_fkey | Join rows are strictly dependent on staff; safe cleanup on hard delete. | Owner | 2026-02-01 |
+| staff_service_links.service_id → services.id | staff_service_links_service_id_fkey | Join rows are strictly dependent on service; safe cleanup on hard delete. | Owner | 2026-02-01 |
+| staff_service_links.staff_id → staff.id | staff_service_links_staff_id_fkey | Join rows are strictly dependent on staff; safe cleanup on hard delete. | Owner | 2026-02-01 |
 
 ---
 
@@ -45,6 +51,9 @@ These are approved **only because Tenant Purge exists**. Under soft delete opera
 | tenant_payments.tenant_id → tenants.id | tenant_payments_tenant_id_fkey | Tenant Purge removes tenant payment records as part of complete tenant data removal (subject to retention policy). | Owner | 2026-01-26 |
 | tenant_subscriptions.tenant_id → tenants.id | tenant_subscriptions_tenant_id_fkey | Tenant Purge removes subscription records tied to the deleted tenant; prevents orphan subscription rows. | Owner | 2026-01-26 |
 | tenant_users.tenant_id → tenants.id | tenant_users_tenant_id_fkey | Tenant Purge removes tenant-user mappings because the tenant no longer exists. | Owner | 2026-01-26 |
+| resource_service_links.tenant_id → tenants.id | resource_service_links_tenant_id_fkey | Tenant Purge must fully remove tenant-owned link rows. | Owner | 2026-02-01 |
+| staff_resource_links.tenant_id → tenants.id | staff_resource_links_tenant_id_fkey | Tenant Purge must fully remove tenant-owned link rows. | Owner | 2026-02-01 |
+| staff_service_links.tenant_id → tenants.id | staff_service_links_tenant_id_fkey | Tenant Purge must fully remove tenant-owned link rows. | Owner | 2026-02-01 |
 
 ---
 
@@ -57,7 +66,7 @@ This CASCADE conflicts with soft delete + auditability and should be changed to 
 
 ## Approved Exceptions — CASCADE Foreign Keys (Auto-generated)
 
-**Source snapshot:** `docs/db/generated/fk_inventory_2026-01-26.csv`  
+**Source snapshot:** `docs/db/generated/fk_inventory_2026-02-01.csv`  
 **Rule:** Every CASCADE must be explicitly approved and justified.
 
 | CASCADE FK (local → referenced) | ON DELETE | ON UPDATE | Constraint | Why this CASCADE is safe / necessary | Approved by | Approved date |
