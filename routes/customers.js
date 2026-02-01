@@ -240,6 +240,88 @@ router.get("/me/session", requireGoogleAuth, requireTenant, async (req, res) => 
   }
 });
 
+// ------------------------------------------------------------
+// GET /api/customers/me/versions
+// Customer-scoped change signals for the public booking UI.
+//
+// Returns monotonic-ish timestamps (epoch ms) that change when:
+// - this customer's bookings change
+// - this customer's memberships/ledger change
+//
+// The booking UI can poll this cheaply and only refetch heavy payloads
+// (history/memberships) when a version changes.
+// ------------------------------------------------------------
+router.get("/me/versions", requireGoogleAuth, requireTenant, async (req, res) => {
+  try {
+    const tenantId = req.tenantId || req.tenant?.id;
+    const email = (req.googleUser?.email || "").toLowerCase();
+    if (!tenantId) return res.status(400).json({ error: "Missing tenant" });
+    if (!email) return res.status(401).json({ error: "Unauthorized" });
+
+    const cust = await pool.query(
+      `SELECT id FROM customers WHERE tenant_id=$1 AND LOWER(email)=LOWER($2) LIMIT 1`,
+      [tenantId, email]
+    );
+
+    if (cust.rows.length === 0) {
+      return res.json({ bookingsVersion: 0, membershipsVersion: 0 });
+    }
+
+    const customerId = cust.rows[0].id;
+
+    // bookings version = MAX(COALESCE(updated_at, created_at)) for this customer
+    const bUpdated = await pickCol("bookings", "b", ["updated_at", "updatedAt"], "NULL");
+    const bCreated = await pickCol("bookings", "b", ["created_at", "createdAt"], "NULL");
+    const bTouch = `COALESCE(${bUpdated}, ${bCreated})`;
+
+    const bookingsRes = await pool.query(
+      `SELECT MAX(${bTouch}) AS max_ts
+       FROM bookings b
+       WHERE b.tenant_id=$1 AND b.customer_id=$2`,
+      [tenantId, customerId]
+    );
+
+    const bookingsTs = bookingsRes.rows?.[0]?.max_ts ? new Date(bookingsRes.rows[0].max_ts).getTime() : 0;
+
+    // memberships version = max of:
+    // - customer_memberships MAX(COALESCE(updated_at, created_at/started_at))
+    // - membership_ledger MAX(created_at) joined via customer_memberships
+    const cmUpdated = await pickCol("customer_memberships", "cm", ["updated_at", "updatedAt"], "NULL");
+    const cmCreated = await pickCol(
+      "customer_memberships",
+      "cm",
+      ["created_at", "createdAt", "started_at", "start_at"],
+      "NULL"
+    );
+    const cmTouch = `COALESCE(${cmUpdated}, ${cmCreated})`;
+
+    const cmRes = await pool.query(
+      `SELECT MAX(${cmTouch}) AS max_ts
+       FROM customer_memberships cm
+       WHERE cm.tenant_id=$1 AND cm.customer_id=$2`,
+      [tenantId, customerId]
+    );
+
+    const mlCreated = await pickCol("membership_ledger", "ml", ["created_at", "createdAt"], "NULL");
+    const mlRes = await pool.query(
+      `SELECT MAX(${mlCreated}) AS max_ts
+       FROM membership_ledger ml
+       JOIN customer_memberships cm ON cm.id = ml.customer_membership_id
+       WHERE cm.tenant_id=$1 AND cm.customer_id=$2`,
+      [tenantId, customerId]
+    );
+
+    const cmTs = cmRes.rows?.[0]?.max_ts ? new Date(cmRes.rows[0].max_ts).getTime() : 0;
+    const mlTs = mlRes.rows?.[0]?.max_ts ? new Date(mlRes.rows[0].max_ts).getTime() : 0;
+    const membershipsTs = Math.max(cmTs, mlTs);
+
+    return res.json({ bookingsVersion: bookingsTs, membershipsVersion: membershipsTs });
+  } catch (e) {
+    console.error("GET /customers/me/versions error:", e);
+    return res.status(500).json({ error: "Server error" });
+  }
+});
+
 // Get my booking history for a tenant
 router.get("/me/bookings", requireGoogleAuth, requireTenant, async (req, res) => {
   try {
