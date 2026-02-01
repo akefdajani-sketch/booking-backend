@@ -394,6 +394,10 @@ router.get("/publish-status", requireAdmin, requireTenant, async (req, res) => {
     const tenantId = Number(req.tenantId);
     const validation = await validateTenantPublish(db, tenantId);
 
+    // Snapshots needed by owner UI (Draft vs Live + unpublished diff)
+    // Use a schema-safe SELECT list so the dashboard never hard-crashes on a missing column.
+    const cols = await getTenantColumnSet();
+
     // Load current persisted publish metadata (no mutation in GET)
     const meta = await db.query(
       `
@@ -405,6 +409,19 @@ router.get("/publish-status", requireAdmin, requireTenant, async (req, res) => {
       [tenantId]
     );
     const row = meta.rows?.[0] || {};
+
+    const snap = await db.query(
+      `
+      SELECT
+        COALESCE(branding, '{}'::jsonb) AS branding,
+        ${cols.has("branding_published") ? "COALESCE(branding_published, '{}'::jsonb)" : "'{}'::jsonb"} AS branding_published
+      FROM tenants
+      WHERE id = $1
+      LIMIT 1
+      `,
+      [tenantId]
+    );
+    const snapRow = snap.rows?.[0] || {};
 
     const persistedStatus = String(row.publish_status || "draft");
 
@@ -421,6 +438,10 @@ router.get("/publish-status", requireAdmin, requireTenant, async (req, res) => {
         publish_errors: row.publish_errors || [],
         published_at: row.published_at || null,
         last_validated_at: row.last_validated_at || null,
+      },
+      snapshots: {
+        branding: snapRow.branding || {},
+        branding_published: snapRow.branding_published || {},
       },
       computed: {
         publish_status: computedStatus,
