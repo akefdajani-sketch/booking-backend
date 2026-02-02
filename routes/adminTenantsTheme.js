@@ -220,6 +220,10 @@ router.get("/:tenantId/appearance/diff", requireAdmin, async (req, res) => {
     const tenantId = Number(req.params.tenantId);
     if (!tenantId) return res.status(400).json({ error: "invalid tenant_id" });
 
+    // Ensure columns exist (safe to call repeatedly)
+    await ensureBrandingColumns();
+    await ensureThemeSchemaColumns();
+
     const q = await db.query(
       `
       select
@@ -227,15 +231,16 @@ router.get("/:tenantId/appearance/diff", requireAdmin, async (req, res) => {
         t.slug,
         t.theme_key,
 
-        t.branding_draft_json as branding_draft,
-        t.branding_published_json as branding_published,
-        t.publish_status,
-        t.draft_saved_at,
-        t.published_at,
+        -- Branding (draft/published)
+        t.branding as branding_draft,
+        t.branding_published,
+        t.publish_status as branding_publish_status,
+        t.branding_draft_saved_at,
+        t.branding_published_at,
 
-        t.theme_schema_draft_json as theme_schema_draft,
-        t.theme_schema_published_json as theme_schema_published,
-        t.theme_schema_publish_status,
+        -- Theme schema (draft/published)
+        t.theme_schema_draft_json,
+        t.theme_schema_published_json,
         t.theme_schema_draft_saved_at,
         t.theme_schema_published_at
       from tenants t
@@ -250,41 +255,38 @@ router.get("/:tenantId/appearance/diff", requireAdmin, async (req, res) => {
 
     const brandingDraft = row.branding_draft || {};
     const brandingPublished = row.branding_published || {};
+    const schemaDraft = row.theme_schema_draft_json || {};
+    const schemaPublished = row.theme_schema_published_json || {};
 
-    const schemaDraft = row.theme_schema_draft || {};
-    const schemaPublished = row.theme_schema_published || {};
+    const brandingChanges = jsonDiff(brandingPublished, brandingDraft);
+    const schemaChanges = jsonDiff(schemaPublished, schemaDraft);
 
-    const brandingDiff = jsonDiff(brandingPublished, brandingDraft);
-    const themeSchemaDiff = jsonDiff(schemaPublished, schemaDraft);
-
-    return res.json({
+    res.json({
       tenant_id: row.tenant_id,
       slug: row.slug,
       theme_key: row.theme_key,
 
       branding: {
-        draft: brandingDraft,
-        published: brandingPublished,
-        publish_status: row.publish_status || "draft",
-        draft_saved_at: row.draft_saved_at,
-        published_at: row.published_at,
-        diff: brandingDiff,
+        has_changes: brandingChanges.length > 0,
+        publish_status: row.branding_publish_status || "unknown",
+        draft_saved_at: row.branding_draft_saved_at,
+        published_at: row.branding_published_at,
+        changes: brandingChanges,
       },
 
       theme_schema: {
-        draft: schemaDraft,
-        published: schemaPublished,
-        publish_status: row.theme_schema_publish_status || "draft",
+        has_changes: schemaChanges.length > 0,
         draft_saved_at: row.theme_schema_draft_saved_at,
         published_at: row.theme_schema_published_at,
-        diff: themeSchemaDiff,
+        changes: schemaChanges,
       },
     });
   } catch (e) {
     console.error("GET /admin/tenants/:id/appearance/diff error", e);
-    return res.status(500).json({ error: "server_error" });
+    res.status(500).json({ error: "server error" });
   }
 });
+
 
 router.post("/:tenantId/theme-key", requireAdmin, async (req, res) => {
   try {
