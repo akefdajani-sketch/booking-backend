@@ -270,6 +270,107 @@ router.post("/:tenantId/theme-schema/rollback", requireAdmin, async (req, res) =
   res.json({ ok: true });
 });
 
+// Phase 1.5: Reset to inherit
+// Deletes draft keys so the tenant inherits defaults (theme tokens) for those keys.
+//
+// Body (JSON):
+// {
+//   scope: 'overrides' | 'layout' | 'all',
+//   key?: string // optional key within the scope, e.g. 'radius' in overrides
+// }
+router.post("/:tenantId/theme-schema/reset-inherit", requireAdmin, async (req, res) => {
+  const tenantId = Number(req.params.tenantId);
+  if (!tenantId) return res.status(400).json({ error: "Invalid tenantId" });
+
+  await ensureThemeSchemaColumns();
+
+  const body = parseJsonBody(req);
+  const scope = body?.scope;
+  const key = body?.key;
+
+  if (!scope || !["overrides", "layout", "all"].includes(scope)) {
+    return res.status(400).json({ error: "Invalid scope" });
+  }
+  if (key != null && typeof key !== "string") {
+    return res.status(400).json({ error: "Invalid key" });
+  }
+
+  const { rows: tRows } = await db.query(
+    `SELECT theme_schema_draft_json
+     FROM tenants
+     WHERE id = $1`,
+    [tenantId]
+  );
+  if (!tRows[0]) return res.status(404).json({ error: "Tenant not found" });
+
+  const draft = (tRows[0].theme_schema_draft_json && typeof tRows[0].theme_schema_draft_json === "object")
+    ? JSON.parse(JSON.stringify(tRows[0].theme_schema_draft_json))
+    : {};
+
+  // Ensure top-level shape is object
+  if (!draft || typeof draft !== "object") {
+    return res.status(400).json({ error: "Invalid theme_schema_draft_json" });
+  }
+
+  const delKey = (obj, k) => {
+    if (!obj || typeof obj !== "object") return;
+    delete obj[k];
+    // Cleanup empty objects
+    if (Object.keys(obj).length === 0) {
+      // caller will delete container if needed
+    }
+  };
+
+  const wipeContainer = (containerKey) => {
+    if (draft && typeof draft === "object" && draft[containerKey] && typeof draft[containerKey] === "object") {
+      delete draft[containerKey];
+    }
+  };
+
+  if (scope === "all") {
+    wipeContainer("overrides");
+    wipeContainer("layout");
+  } else if (scope === "overrides") {
+    if (key) {
+      if (!draft.overrides || typeof draft.overrides !== "object") {
+        // nothing to do
+      } else {
+        delKey(draft.overrides, key);
+        if (draft.overrides && typeof draft.overrides === "object" && Object.keys(draft.overrides).length === 0) {
+          delete draft.overrides;
+        }
+      }
+    } else {
+      wipeContainer("overrides");
+    }
+  } else if (scope === "layout") {
+    if (key) {
+      if (!draft.layout || typeof draft.layout !== "object") {
+        // nothing to do
+      } else {
+        delKey(draft.layout, key);
+        if (draft.layout && typeof draft.layout === "object" && Object.keys(draft.layout).length === 0) {
+          delete draft.layout;
+        }
+      }
+    } else {
+      wipeContainer("layout");
+    }
+  }
+
+  await db.query(
+    `UPDATE tenants
+     SET theme_schema_draft_json = $2,
+         theme_schema_draft_saved_at = NOW()
+     WHERE id = $1`,
+    [tenantId, draft]
+  );
+
+  await logChange(tenantId, "THEME_SCHEMA_RESET_INHERIT", getActor(req), { scope, key: key || null });
+
+  res.json({ ok: true, theme_schema_draft: draft });
+});
+
 router.get("/:tenantId/theme-schema/changelog", requireAdmin, async (req, res) => {
   const tenantId = Number(req.params.tenantId);
   if (!tenantId) return res.status(400).json({ error: "Invalid tenantId" });

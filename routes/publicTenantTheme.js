@@ -44,22 +44,22 @@ router.get("/:slug", async (req, res) => {
   // Cache theme payload briefly (themes change rarely, but reduce flicker + load).
   res.set("Cache-Control", "public, max-age=60, stale-while-revalidate=300");
 
-  // Publish protocol:
-  // - Prefer branding_published when tenant is in 'published' state AND snapshot is non-empty.
-  // - Otherwise fall back to the working copy branding.
+  // Phase 1.5: Lock down public contract (published-only)
+  // Public endpoints must NEVER leak draft/working snapshots.
+  // If a tenant is not published (or published snapshot is empty), return branding=null.
   const publishedObj = tenant.branding_published && typeof tenant.branding_published === "object"
     ? tenant.branding_published
     : null;
   const hasPublished = publishedObj && Object.keys(publishedObj).length > 0;
-  const effectiveBranding = (String(tenant.publish_status || "") === "published" && hasPublished)
-    ? publishedObj
-    : (tenant.branding || {});
+  const isPublished = String(tenant.publish_status || "") === "published";
+  const effectiveBranding = (isPublished && hasPublished) ? publishedObj : null;
 
-  // Theme schema is always served as the *published* snapshot.
-  // If nothing is published yet, this will be null.
+  // Theme schema is served as the *published* snapshot only.
+  // If tenant isn't published yet, this must be null.
   const publishedThemeSchema = tenant.theme_schema_published_json && typeof tenant.theme_schema_published_json === "object"
     ? tenant.theme_schema_published_json
     : null;
+  const effectiveThemeSchema = isPublished ? publishedThemeSchema : null;
 
   res.json({
     tenant: {
@@ -87,7 +87,7 @@ router.get("/:slug", async (req, res) => {
       },
       brand_overrides: tenant.brand_overrides_json || {},
       branding: effectiveBranding,
-      theme_schema: publishedThemeSchema,
+      theme_schema: effectiveThemeSchema,
     },
     theme: {
       key: theme.key,
