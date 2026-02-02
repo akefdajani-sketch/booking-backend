@@ -5,6 +5,78 @@
 const express = require("express");
 const router = express.Router();
 
+// --------------------
+// Diff helpers (Phase 2B)
+// --------------------
+function isPlainObject(v) {
+  return v !== null && typeof v === "object" && !Array.isArray(v);
+}
+
+function stableStringify(v) {
+  try {
+    if (typeof v === "string") return v;
+    return JSON.stringify(v);
+  } catch {
+    return String(v);
+  }
+}
+
+/**
+ * Compute a shallow+deep diff between two JSON-like values.
+ * Returns a list of { path, type, from, to } where:
+ *  - type: "added" | "removed" | "changed"
+ */
+function jsonDiff(fromVal, toVal, basePath = "") {
+  const changes = [];
+
+  // identical (including primitives)
+  if (fromVal === toVal) return changes;
+
+  // arrays: treat as value change (simple but predictable)
+  if (Array.isArray(fromVal) || Array.isArray(toVal)) {
+    const fromStr = stableStringify(fromVal);
+    const toStr = stableStringify(toVal);
+    if (fromStr !== toStr) {
+      changes.push({ path: basePath || "", type: "changed", from: fromVal, to: toVal });
+    }
+    return changes;
+  }
+
+  // objects: recurse key-by-key
+  if (isPlainObject(fromVal) && isPlainObject(toVal)) {
+    const keys = new Set([...Object.keys(fromVal), ...Object.keys(toVal)]);
+    for (const k of Array.from(keys).sort()) {
+      const nextPath = basePath ? `${basePath}.${k}` : k;
+      if (!(k in fromVal)) {
+        changes.push({ path: nextPath, type: "added", from: undefined, to: toVal[k] });
+        continue;
+      }
+      if (!(k in toVal)) {
+        changes.push({ path: nextPath, type: "removed", from: fromVal[k], to: undefined });
+        continue;
+      }
+      changes.push(...jsonDiff(fromVal[k], toVal[k], nextPath));
+    }
+    return changes;
+  }
+
+  // primitives / mismatched types
+  changes.push({ path: basePath || "", type: "changed", from: fromVal, to: toVal });
+  return changes;
+}
+
+function summarizeDiff(changes) {
+  const counts = { added: 0, removed: 0, changed: 0, total: 0 };
+  for (const c of changes) {
+    if (c.type === "added") counts.added += 1;
+    else if (c.type === "removed") counts.removed += 1;
+    else counts.changed += 1;
+  }
+  counts.total = changes.length;
+  return counts;
+}
+
+
 const db = require("../db");
 const requireAdmin = require("../middleware/requireAdmin");
 const { getPlanSummaryForTenant } = require("../utils/planEnforcement");
@@ -134,6 +206,78 @@ router.get("/:tenantId/appearance", requireAdmin, async (req, res) => {
   } catch (e) {
     console.error("GET /api/admin/tenants/:tenantId/appearance error:", e);
     return res.status(500).json({ error: "Failed to load tenant appearance" });
+  }
+});
+
+
+/**
+ * Diff viewer support: compare draft vs published for branding + theme_schema.
+ * Returns draft/published blobs plus normalized diff lists.
+ */
+router.get("/:tenantId/appearance/diff", requireAdmin, async (req, res) => {
+  try {
+    const tenantId = Number(req.params.tenantId);
+    if (!tenantId) return res.status(400).json({ error: "invalid tenant_id" });
+
+    const q = await db.query(
+      `
+      select
+        t.id as tenant_id,
+        t.slug,
+        t.theme_key,
+        ta.branding_draft,
+        ta.branding_published,
+        ta.theme_schema_draft,
+        ta.theme_schema_published,
+        ta.publish_status,
+        ta.draft_saved_at,
+        ta.published_at
+      from tenants t
+      join tenant_appearance ta on ta.tenant_id = t.id
+      where t.id = $1
+      `,
+      [tenantId]
+    );
+
+    if (!q.rows.length) return res.status(404).json({ error: "tenant not found" });
+
+    const row = q.rows[0];
+
+    const brandingDraft = row.branding_draft || {};
+    const brandingPublished = row.branding_published || {};
+    const schemaDraft = row.theme_schema_draft || {};
+    const schemaPublished = row.theme_schema_published || {};
+
+    const brandingChanges = jsonDiff(brandingPublished, brandingDraft);
+    const schemaChanges = jsonDiff(schemaPublished, schemaDraft);
+
+    return res.json({
+      tenant_id: row.tenant_id,
+      slug: row.slug,
+      theme_key: row.theme_key,
+      publish_status: row.publish_status,
+      draft_saved_at: row.draft_saved_at,
+      published_at: row.published_at,
+      branding: {
+        draft: brandingDraft,
+        published: brandingPublished,
+        diff: {
+          counts: summarizeDiff(brandingChanges),
+          changes: brandingChanges,
+        },
+      },
+      theme_schema: {
+        draft: schemaDraft,
+        published: schemaPublished,
+        diff: {
+          counts: summarizeDiff(schemaChanges),
+          changes: schemaChanges,
+        },
+      },
+    });
+  } catch (e) {
+    console.error("GET /admin/tenants/:id/appearance/diff error", e);
+    return res.status(500).json({ error: "server_error" });
   }
 });
 
@@ -268,107 +412,6 @@ router.post("/:tenantId/theme-schema/rollback", requireAdmin, async (req, res) =
   await logChange(tenantId, "THEME_SCHEMA_ROLLBACK", getActor(req), {});
 
   res.json({ ok: true });
-});
-
-// Phase 1.5: Reset to inherit
-// Deletes draft keys so the tenant inherits defaults (theme tokens) for those keys.
-//
-// Body (JSON):
-// {
-//   scope: 'overrides' | 'layout' | 'all',
-//   key?: string // optional key within the scope, e.g. 'radius' in overrides
-// }
-router.post("/:tenantId/theme-schema/reset-inherit", requireAdmin, async (req, res) => {
-  const tenantId = Number(req.params.tenantId);
-  if (!tenantId) return res.status(400).json({ error: "Invalid tenantId" });
-
-  await ensureThemeSchemaColumns();
-
-  const body = parseJsonBody(req);
-  const scope = body?.scope;
-  const key = body?.key;
-
-  if (!scope || !["overrides", "layout", "all"].includes(scope)) {
-    return res.status(400).json({ error: "Invalid scope" });
-  }
-  if (key != null && typeof key !== "string") {
-    return res.status(400).json({ error: "Invalid key" });
-  }
-
-  const { rows: tRows } = await db.query(
-    `SELECT theme_schema_draft_json
-     FROM tenants
-     WHERE id = $1`,
-    [tenantId]
-  );
-  if (!tRows[0]) return res.status(404).json({ error: "Tenant not found" });
-
-  const draft = (tRows[0].theme_schema_draft_json && typeof tRows[0].theme_schema_draft_json === "object")
-    ? JSON.parse(JSON.stringify(tRows[0].theme_schema_draft_json))
-    : {};
-
-  // Ensure top-level shape is object
-  if (!draft || typeof draft !== "object") {
-    return res.status(400).json({ error: "Invalid theme_schema_draft_json" });
-  }
-
-  const delKey = (obj, k) => {
-    if (!obj || typeof obj !== "object") return;
-    delete obj[k];
-    // Cleanup empty objects
-    if (Object.keys(obj).length === 0) {
-      // caller will delete container if needed
-    }
-  };
-
-  const wipeContainer = (containerKey) => {
-    if (draft && typeof draft === "object" && draft[containerKey] && typeof draft[containerKey] === "object") {
-      delete draft[containerKey];
-    }
-  };
-
-  if (scope === "all") {
-    wipeContainer("overrides");
-    wipeContainer("layout");
-  } else if (scope === "overrides") {
-    if (key) {
-      if (!draft.overrides || typeof draft.overrides !== "object") {
-        // nothing to do
-      } else {
-        delKey(draft.overrides, key);
-        if (draft.overrides && typeof draft.overrides === "object" && Object.keys(draft.overrides).length === 0) {
-          delete draft.overrides;
-        }
-      }
-    } else {
-      wipeContainer("overrides");
-    }
-  } else if (scope === "layout") {
-    if (key) {
-      if (!draft.layout || typeof draft.layout !== "object") {
-        // nothing to do
-      } else {
-        delKey(draft.layout, key);
-        if (draft.layout && typeof draft.layout === "object" && Object.keys(draft.layout).length === 0) {
-          delete draft.layout;
-        }
-      }
-    } else {
-      wipeContainer("layout");
-    }
-  }
-
-  await db.query(
-    `UPDATE tenants
-     SET theme_schema_draft_json = $2,
-         theme_schema_draft_saved_at = NOW()
-     WHERE id = $1`,
-    [tenantId, draft]
-  );
-
-  await logChange(tenantId, "THEME_SCHEMA_RESET_INHERIT", getActor(req), { scope, key: key || null });
-
-  res.json({ ok: true, theme_schema_draft: draft });
 });
 
 router.get("/:tenantId/theme-schema/changelog", requireAdmin, async (req, res) => {
