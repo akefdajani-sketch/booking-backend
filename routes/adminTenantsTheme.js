@@ -317,11 +317,13 @@ router.post("/:tenantId/appearance/reset-to-inherit", requireAdmin, async (req, 
 
     const q = await db.query(
       `
-      UPDATE tenants
-      SET
-        -- Theme Studio (draft/publish)
-        branding = NULL,
-        branding_published = NULL,
+	      UPDATE tenants
+	      SET
+	        -- Theme Studio (draft/publish)
+	        -- IMPORTANT: some environments enforce NOT NULL on branding columns.
+	        -- Use '{}' to represent "no tenant override" without violating constraints.
+	        branding = '{}'::jsonb,
+	        branding_published = '{}'::jsonb,
         branding_draft_saved_at = NULL,
         branding_published_at = NULL,
 
