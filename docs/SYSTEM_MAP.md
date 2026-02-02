@@ -50,3 +50,18 @@ Mental Model (Non-Negotiable)
 Theme → Services → Availability → Slots → Booking → Ledger
 
 If a change breaks this chain, it is invalid.
+
+---
+
+## Theming & Layout System (Living Docs)
+These docs define the source-of-truth contract for themes/layouts and the publish workflow:
+
+- Frontend: `docs/THEMING_SYSTEM.md`
+- Frontend: `docs/LAYOUT_CATALOG.md`
+- Frontend: `docs/APPEARANCE_PUBLISH_PROTOCOL.md`
+- Frontend: `docs/ROLLBACK_PLAYBOOK_THEMES.md`
+- Frontend: `docs/TEST_MATRIX_THEMES_LAYOUTS.md`
+
+- Backend: `docs/THEME_API_CONTRACT.md`
+- Backend: `docs/DB_THEME_SCHEMA.md`
+- Backend: `docs/TEST_MATRIX_THEMES_LAYOUTS.md`
