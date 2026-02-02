@@ -219,22 +219,29 @@ router.get("/:tenantId/appearance/diff", requireAdmin, async (req, res) => {
     const tenantId = Number(req.params.tenantId);
     if (!tenantId) return res.status(400).json({ error: "invalid tenant_id" });
 
+    // ✅ Phase 1.5 registry model: read appearance data directly from `tenants`
     const q = await db.query(
       `
-      select
-        t.id as tenant_id,
+      SELECT
+        t.id AS tenant_id,
         t.slug,
         t.theme_key,
-        ta.branding_draft,
-        ta.branding_published,
-        ta.theme_schema_draft,
-        ta.theme_schema_published,
-        ta.publish_status,
-        ta.draft_saved_at,
-        ta.published_at
-      from tenants t
-      join tenant_appearance ta on ta.tenant_id = t.id
-      where t.id = $1
+
+        -- Draft vs Published (brand)
+        t.branding               AS branding_draft,
+        t.branding_published     AS branding_published,
+
+        -- Draft vs Published (schema)
+        t.theme_schema_draft_json      AS theme_schema_draft,
+        t.theme_schema_published_json  AS theme_schema_published,
+
+        -- Optional metadata (only if these columns exist in your tenants table)
+        t.publish_status,
+        t.branding_draft_saved_at      AS draft_saved_at,
+        t.branding_published_at        AS published_at
+      FROM tenants t
+      WHERE t.id = $1
+      LIMIT 1
       `,
       [tenantId]
     );
@@ -250,6 +257,13 @@ router.get("/:tenantId/appearance/diff", requireAdmin, async (req, res) => {
 
     const brandingChanges = jsonDiff(brandingPublished, brandingDraft);
     const schemaChanges = jsonDiff(schemaPublished, schemaDraft);
+
+    // (keep the rest of your existing response/return logic here)
+  } catch (err) {
+    console.error("GET /admin/tenants/:id/appearance/diff error", err);
+    return res.status(500).json({ error: "internal_error" });
+  }
+});
 
     return res.json({
       tenant_id: row.tenant_id,
