@@ -109,6 +109,12 @@ async function ensureThemeKeyColumn() {
   await db.query(`ALTER TABLE tenants ADD COLUMN IF NOT EXISTS theme_key TEXT;`);
 }
 
+async function ensureBrandOverridesColumn() {
+  // Legacy + public booking pages still rely on this column. Treat NULL as "inherit".
+  await db.query(`ALTER TABLE tenants ADD COLUMN IF NOT EXISTS brand_overrides_json JSONB;`);
+}
+
+
 async function ensureChangelog() {
   await db.query(`
     CREATE TABLE IF NOT EXISTS tenant_theme_schema_changelog (
@@ -284,6 +290,67 @@ router.get("/:tenantId/appearance/diff", requireAdmin, async (req, res) => {
   } catch (e) {
     console.error("GET /admin/tenants/:id/appearance/diff error", e);
     res.status(500).json({ error: "server error" });
+  }
+});
+
+
+/**
+ * Phase 2A: Reset to inherit
+ *
+ * Hard rule:
+ *  - NULL means "inherit"
+ *  - {} means "explicit override"
+ *
+ * This endpoint clears *tenant-level* overrides (branding + theme schema + legacy brand overrides)
+ * without changing the selected base theme key.
+ */
+router.post("/:tenantId/appearance/reset-to-inherit", requireAdmin, async (req, res) => {
+  try {
+    const tenantId = Number(req.params.tenantId);
+    if (!Number.isFinite(tenantId) || tenantId <= 0) {
+      return res.status(400).json({ error: "Invalid tenantId" });
+    }
+
+    await ensureBrandingColumns();
+    await ensureThemeSchemaColumns();
+    await ensureBrandOverridesColumn();
+
+    const q = await db.query(
+      `
+      UPDATE tenants
+      SET
+        -- Theme Studio (draft/publish)
+        branding = NULL,
+        branding_published = NULL,
+        branding_draft_saved_at = NULL,
+        branding_published_at = NULL,
+
+        theme_schema_draft_json = NULL,
+        theme_schema_published_json = NULL,
+        theme_schema_draft_saved_at = NULL,
+        theme_schema_published_at = NULL,
+
+        -- Legacy public booking overrides (tokens CSS vars)
+        brand_overrides_json = NULL
+      WHERE id = $1
+      RETURNING id, slug, theme_key
+      `,
+      [tenantId]
+    );
+
+    if (!q.rows[0]) return res.status(404).json({ error: "Tenant not found" });
+
+    await logChange(tenantId, "APPEARANCE_RESET_TO_INHERIT", getActor(req), {});
+
+    return res.json({
+      ok: true,
+      tenant_id: q.rows[0].id,
+      slug: q.rows[0].slug,
+      theme_key: q.rows[0].theme_key || null,
+    });
+  } catch (e) {
+    console.error("POST /api/admin/tenants/:tenantId/appearance/reset-to-inherit error:", e);
+    return res.status(500).json({ error: "Failed to reset appearance" });
   }
 });
 
