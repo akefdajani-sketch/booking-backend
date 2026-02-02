@@ -214,34 +214,32 @@ router.get("/:tenantId/appearance", requireAdmin, async (req, res) => {
  * Diff viewer support: compare draft vs published for branding + theme_schema.
  * Returns draft/published blobs plus normalized diff lists.
  */
+// Diff viewer endpoint: compare published vs draft for branding + theme_schema
 router.get("/:tenantId/appearance/diff", requireAdmin, async (req, res) => {
   try {
     const tenantId = Number(req.params.tenantId);
     if (!tenantId) return res.status(400).json({ error: "invalid tenant_id" });
 
-    // ✅ Phase 1.5 registry model: read appearance data directly from `tenants`
     const q = await db.query(
       `
-      SELECT
-        t.id AS tenant_id,
+      select
+        t.id as tenant_id,
         t.slug,
         t.theme_key,
 
-        -- Draft vs Published (brand)
-        t.branding               AS branding_draft,
-        t.branding_published     AS branding_published,
-
-        -- Draft vs Published (schema)
-        t.theme_schema_draft_json      AS theme_schema_draft,
-        t.theme_schema_published_json  AS theme_schema_published,
-
-        -- Optional metadata (only if these columns exist in your tenants table)
+        t.branding_draft_json as branding_draft,
+        t.branding_published_json as branding_published,
         t.publish_status,
-        t.branding_draft_saved_at      AS draft_saved_at,
-        t.branding_published_at        AS published_at
-      FROM tenants t
-      WHERE t.id = $1
-      LIMIT 1
+        t.draft_saved_at,
+        t.published_at,
+
+        t.theme_schema_draft_json as theme_schema_draft,
+        t.theme_schema_published_json as theme_schema_published,
+        t.theme_schema_publish_status,
+        t.theme_schema_draft_saved_at,
+        t.theme_schema_published_at
+      from tenants t
+      where t.id = $1
       `,
       [tenantId]
     );
@@ -252,41 +250,34 @@ router.get("/:tenantId/appearance/diff", requireAdmin, async (req, res) => {
 
     const brandingDraft = row.branding_draft || {};
     const brandingPublished = row.branding_published || {};
+
     const schemaDraft = row.theme_schema_draft || {};
     const schemaPublished = row.theme_schema_published || {};
 
-    const brandingChanges = jsonDiff(brandingPublished, brandingDraft);
-    const schemaChanges = jsonDiff(schemaPublished, schemaDraft);
-
-    // (keep the rest of your existing response/return logic here)
-  } catch (err) {
-    console.error("GET /admin/tenants/:id/appearance/diff error", err);
-    return res.status(500).json({ error: "internal_error" });
-  }
-});
+    const brandingDiff = jsonDiff(brandingPublished, brandingDraft);
+    const themeSchemaDiff = jsonDiff(schemaPublished, schemaDraft);
 
     return res.json({
       tenant_id: row.tenant_id,
       slug: row.slug,
       theme_key: row.theme_key,
-      publish_status: row.publish_status,
-      draft_saved_at: row.draft_saved_at,
-      published_at: row.published_at,
+
       branding: {
         draft: brandingDraft,
         published: brandingPublished,
-        diff: {
-          counts: summarizeDiff(brandingChanges),
-          changes: brandingChanges,
-        },
+        publish_status: row.publish_status || "draft",
+        draft_saved_at: row.draft_saved_at,
+        published_at: row.published_at,
+        diff: brandingDiff,
       },
+
       theme_schema: {
         draft: schemaDraft,
         published: schemaPublished,
-        diff: {
-          counts: summarizeDiff(schemaChanges),
-          changes: schemaChanges,
-        },
+        publish_status: row.theme_schema_publish_status || "draft",
+        draft_saved_at: row.theme_schema_draft_saved_at,
+        published_at: row.theme_schema_published_at,
+        diff: themeSchemaDiff,
       },
     });
   } catch (e) {
@@ -295,12 +286,6 @@ router.get("/:tenantId/appearance/diff", requireAdmin, async (req, res) => {
   }
 });
 
-// -----------------------------------------------------------------------------
-// Phase 1: Theme key setter (admin)
-// POST /api/admin/tenants/:tenantId/theme-key
-// Body: { theme_key: "premium_v1" }
-// Validates theme exists and is_published.
-// -----------------------------------------------------------------------------
 router.post("/:tenantId/theme-key", requireAdmin, async (req, res) => {
   try {
     const tenantId = Number(req.params.tenantId);
