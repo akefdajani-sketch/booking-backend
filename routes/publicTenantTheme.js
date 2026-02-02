@@ -2,6 +2,11 @@ const express = require("express");
 const router = express.Router();
 const db = require("../db");
 
+// Public, cacheable tenant appearance payload for /book/[slug]
+//
+// IMPORTANT:
+// - Only returns *published* branding + *published* theme schema.
+// - Draft values are admin-only.
 router.get("/:slug", async (req, res) => {
   const { slug } = req.params;
 
@@ -10,6 +15,7 @@ router.get("/:slug", async (req, res) => {
             branding,
             branding_published,
             publish_status,
+            theme_schema_published_json,
             banner_home_url, banner_book_url, banner_account_url, banner_reservations_url,
             logo_url
      FROM tenants
@@ -49,6 +55,12 @@ router.get("/:slug", async (req, res) => {
     ? publishedObj
     : (tenant.branding || {});
 
+  // Theme schema is always served as the *published* snapshot.
+  // If nothing is published yet, this will be null.
+  const publishedThemeSchema = tenant.theme_schema_published_json && typeof tenant.theme_schema_published_json === "object"
+    ? tenant.theme_schema_published_json
+    : null;
+
   res.json({
     tenant: {
       id: tenant.id,
@@ -71,16 +83,17 @@ router.get("/:slug", async (req, res) => {
         home: tenant.banner_home_url,
         book: tenant.banner_book_url,
         account: tenant.banner_account_url,
-        reservations: tenant.banner_reservations_url
+        reservations: tenant.banner_reservations_url,
       },
       brand_overrides: tenant.brand_overrides_json || {},
-      branding: effectiveBranding
+      branding: effectiveBranding,
+      theme_schema: publishedThemeSchema,
     },
     theme: {
       key: theme.key,
       layout_key: theme.layout_key || "classic",
-      tokens: theme.tokens_json || {}
-    }
+      tokens: theme.tokens_json || {},
+    },
   });
 });
 

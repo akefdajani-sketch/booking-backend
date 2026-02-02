@@ -65,3 +65,9 @@ These docs define the source-of-truth contract for themes/layouts and the publis
 - Backend: `docs/THEME_API_CONTRACT.md`
 - Backend: `docs/DB_THEME_SCHEMA.md`
 - Backend: `docs/TEST_MATRIX_THEMES_LAYOUTS.md`
+
+
+## Appearance & Brand (Phase 1)
+- API: docs/api/APPEARANCE_CONTRACT.md
+- DB: docs/db/APPEARANCE_SCHEMA.md
+- QA: docs/qa/PHASE1_ACCEPTANCE_TESTS.md
