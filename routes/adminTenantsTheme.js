@@ -221,10 +221,13 @@ router.get("/:tenantId/appearance", requireAdmin, async (req, res) => {
  * Returns draft/published blobs plus normalized diff lists.
  */
 // Diff viewer endpoint: compare published vs draft for branding + theme_schema
+// Returns normalized { diff: { counts, changes } } per section, with truncation safety.
 router.get("/:tenantId/appearance/diff", requireAdmin, async (req, res) => {
   try {
     const tenantId = Number(req.params.tenantId);
-    if (!tenantId) return res.status(400).json({ error: "invalid tenant_id" });
+    if (!Number.isFinite(tenantId) || tenantId <= 0) {
+      return res.status(400).json({ error: "invalid tenant_id" });
+    }
 
     // Ensure columns exist (safe to call repeatedly)
     await ensureBrandingColumns();
@@ -259,51 +262,47 @@ router.get("/:tenantId/appearance/diff", requireAdmin, async (req, res) => {
 
     const row = q.rows[0];
 
-    const brandingDraft = row.branding_draft || {};
-    const brandingPublished = row.branding_published || {};
-    const schemaDraft = row.theme_schema_draft_json || {};
-    const schemaPublished = row.theme_schema_published_json || {};
+    const LIMIT = 500;
 
-    const brandingChanges = jsonDiff(brandingPublished, brandingDraft);
-    const schemaChanges = jsonDiff(schemaPublished, schemaDraft);
+    function buildSection(publishedVal, draftVal) {
+      const published = publishedVal ?? {};
+      const draft = draftVal ?? {};
+      const changesAll = jsonDiff(published, draft);
+      const truncated = changesAll.length > LIMIT;
+      const changes = truncated ? changesAll.slice(0, LIMIT) : changesAll;
+      return {
+        diff: {
+          counts: summarizeDiff(changesAll),
+          changes,
+          truncated,
+          limit: LIMIT,
+        },
+      };
+    }
 
-    res.json({
+    // Diff is computed as published → draft (what would change if you publish draft).
+    const brandingSection = buildSection(row.branding_published, row.branding_draft);
+    const schemaSection = buildSection(row.theme_schema_published_json, row.theme_schema_draft_json);
+
+    return res.json({
       tenant_id: row.tenant_id,
       slug: row.slug,
-      theme_key: row.theme_key,
+      theme_key: row.theme_key || null,
 
-      branding: {
-        has_changes: brandingChanges.length > 0,
-        publish_status: row.branding_publish_status || "unknown",
-        draft_saved_at: row.branding_draft_saved_at,
-        published_at: row.branding_published_at,
-        changes: brandingChanges,
-      },
+      // compatibility / banner support
+      publish_status: row.branding_publish_status || null,
+      draft_saved_at: row.theme_schema_draft_saved_at || null,
+      published_at: row.theme_schema_published_at || null,
 
-      theme_schema: {
-        has_changes: schemaChanges.length > 0,
-        draft_saved_at: row.theme_schema_draft_saved_at,
-        published_at: row.theme_schema_published_at,
-        changes: schemaChanges,
-      },
+      branding: brandingSection,
+      theme_schema: schemaSection,
     });
   } catch (e) {
     console.error("GET /admin/tenants/:id/appearance/diff error", e);
-    res.status(500).json({ error: "server error" });
+    return res.status(500).json({ error: "server error" });
   }
 });
 
-
-/**
- * Phase 2A: Reset to inherit
- *
- * Hard rule:
- *  - NULL means "inherit"
- *  - {} means "explicit override"
- *
- * This endpoint clears *tenant-level* overrides (branding + theme schema + legacy brand overrides)
- * without changing the selected base theme key.
- */
 router.post("/:tenantId/appearance/reset-to-inherit", requireAdmin, async (req, res) => {
   try {
     const tenantId = Number(req.params.tenantId);
