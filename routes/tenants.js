@@ -466,6 +466,40 @@ router.post("/publish", requireAdmin, requireTenant, async (req, res) => {
     const tenantId = Number(req.tenantId);
     const dryRun = Boolean(req.body?.dryRun);
 
+    // -----------------------------------------------------------------------
+    // Publish guard (Phase 2D mini-win)
+    // If the tenant is already "published" and branding draft equals the
+    // published snapshot, return a no-op response.
+    //
+    // Why:
+    // - Prevent accidental "republish" clicks from touching timestamps.
+    // - Make UI behavior deterministic (can show "No changes" toast).
+    // -----------------------------------------------------------------------
+    const guard = await db.query(
+      `SELECT publish_status,
+              (COALESCE(branding, '{}'::jsonb) = COALESCE(branding_published, '{}'::jsonb)) AS no_branding_changes
+         FROM tenants
+        WHERE id = $1`,
+      [tenantId]
+    );
+
+    if (guard.rows?.[0]) {
+      const persistedStatus = guard.rows[0].publish_status || "draft";
+      const noBrandingChanges = Boolean(guard.rows[0].no_branding_changes);
+
+      // Only treat as "no changes" if the tenant is already published.
+      // If they are still draft, pressing publish should still flip state.
+      if (persistedStatus === "published" && noBrandingChanges) {
+        return res.status(200).json({
+          ok: true,
+          no_changes: true,
+          publish_status: "published",
+          dryRun,
+          serverTime: new Date().toISOString(),
+        });
+      }
+    }
+
     const validation = await validateTenantPublish(db, tenantId);
     const now = new Date().toISOString();
 

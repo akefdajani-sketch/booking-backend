@@ -444,6 +444,26 @@ router.post("/:tenantId/theme-schema/publish", requireAdmin, async (req, res) =>
 
   await ensureThemeSchemaColumns();
 
+  // Phase 2D mini-win: if draft equals published and we already have a published
+  // snapshot, treat this as a no-op publish (avoid touching timestamps).
+  try {
+    const guard = await db.query(
+      `SELECT
+         (theme_schema_published_json IS NOT NULL) AS has_published,
+         (COALESCE(theme_schema_draft_json, 'null'::jsonb) = COALESCE(theme_schema_published_json, 'null'::jsonb)) AS no_schema_changes,
+         theme_schema_published_at
+       FROM tenants
+       WHERE id = $1`,
+      [tenantId]
+    );
+    const g = guard.rows?.[0];
+    if (g?.has_published && g?.no_schema_changes) {
+      return res.status(200).json({ ok: true, no_changes: true, published_at: g.theme_schema_published_at || null });
+    }
+  } catch (e) {
+    // Guard failures should not block publishing.
+  }
+
   const { rows } = await db.query(
     `UPDATE tenants
      SET theme_schema_published_json = theme_schema_draft_json,
