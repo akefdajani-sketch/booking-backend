@@ -5,8 +5,8 @@ const cors = require("cors");
 const allowedOrigins = [
   "http://localhost:3000",
   "https://booking-frontend-psi.vercel.app",
-  // Add your custom domain here if you have one:
-  // "https://yourdomain.com",
+  "https://flexrz.com",
+  "https://www.flexrz.com",
 ];
 
 // Allow Vercel preview URLs automatically
