@@ -7,6 +7,7 @@ const allowedOrigins = [
   "https://booking-frontend-psi.vercel.app",
   "https://flexrz.com",
   "https://www.flexrz.com",
+  "https://auth.flexrz.com",
 ];
 
 // Allow Vercel preview URLs automatically
