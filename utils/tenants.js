@@ -60,7 +60,54 @@ async function getTenantBySlug(slug) {
   return tenant;
 }
 
+/**
+ * Resolve tenant (id + slug) by custom domain.
+ * Used by /api/tenant-domains/_public/resolve.
+ *
+ * Notes:
+ * - Expects tenant_domains.domain stored in lowercase.
+ * - Supports resolving both root and www forms.
+ * - If tenant_domains table doesn't exist (older env), returns null.
+ */
+async function getTenantByDomain(domainRaw) {
+  let d = String(domainRaw || "").trim().toLowerCase();
+  if (!d) throw new Error("Missing domain");
+
+  // strip scheme/path
+  d = d.replace(/^https?:\/\//i, "");
+  d = d.split("/")[0].split("?")[0].split("#")[0];
+  d = d.replace(/\.$/, "");
+
+  const candidates = [d];
+  if (d.startsWith("www.")) candidates.push(d.slice(4));
+  else candidates.push("www." + d);
+
+  const exists = await db.query(
+    `SELECT to_regclass('public.tenant_domains') AS reg`
+  );
+  if (!exists.rows?.[0]?.reg) return null;
+
+  const r = await db.query(
+    `
+      SELECT td.tenant_id, t.slug
+      FROM tenant_domains td
+      JOIN tenants t ON t.id = td.tenant_id
+      WHERE td.domain = ANY($1::text[])
+        AND td.status = 'active'
+      ORDER BY td.is_primary DESC
+      LIMIT 1
+    `,
+    [candidates]
+  );
+
+  const row = r.rows?.[0];
+  if (!row) return null;
+
+  return { tenantId: Number(row.tenant_id), tenantSlug: row.slug };
+}
+
 module.exports = {
   getTenantIdFromSlug,
   getTenantBySlug,
+  getTenantByDomain,
 };

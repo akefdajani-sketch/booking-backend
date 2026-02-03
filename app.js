@@ -31,6 +31,9 @@ const publicTenantThemeRouter = require("./routes/publicTenantTheme");
 // Phase 3 links (staff/resources <-> services)
 const linksRouter = require("./routes/links");
 
+// Tenant custom domains (domain -> tenant slug)
+const tenantDomainsRouter = require("./routes/tenantDomains");
+
 const app = express();
 
 app.use(corsMiddleware);
@@ -68,6 +71,9 @@ app.use("/api/public/tenant-theme", publicTenantThemeRouter);
 
 // Relationship links
 app.use("/api/links", linksRouter);
+
+// Tenant custom domains
+app.use("/api/tenant-domains", tenantDomainsRouter);
 
 app.get("/health", (req, res) => res.json({ ok: true }));
 
