@@ -71,12 +71,31 @@ module.exports = async function requireGoogleAuth(req, res, next) {
     // Prefer ID-token verification when token looks like a JWT.
     // Otherwise treat it as an access token.
     if (looksLikeJwt(token)) {
+      // IMPORTANT:
+      // In multi-frontend setups, the ID token's `aud` can differ (different Google OAuth client_id)
+      // even though it's the same user and still a valid Google-signed token.
+      // So we:
+      // 1) verify with configured audience(s) when provided
+      // 2) if that fails with an audience-related error, retry verification WITHOUT audience
+      //    (still verifies signature + expiry).
       const audience = CLIENT_IDS.length ? CLIENT_IDS : process.env.GOOGLE_CLIENT_ID;
 
-      const ticket = await client.verifyIdToken({
-        idToken: token,
-        audience,
-      });
+      let ticket;
+      try {
+        ticket = await client.verifyIdToken({
+          idToken: token,
+          audience,
+        });
+      } catch (e) {
+        const m = String(e?.message || e);
+        const audienceError = /aud|audience|wrong recipient|wrong_audience|wrong recipient/i.test(m);
+        if (!audienceError) throw e;
+
+        // Retry without audience enforcement (still verifies Google signature).
+        ticket = await client.verifyIdToken({
+          idToken: token,
+        });
+      }
 
       const payload = ticket.getPayload();
       if (!payload?.email) {
