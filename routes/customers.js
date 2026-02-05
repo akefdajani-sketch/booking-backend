@@ -396,64 +396,9 @@ router.get("/me/bookings", requireGoogleAuth, requireTenant, async (req, res) =>
   }
 });
 
-// ---------------------------------------------------------------------------
-// GET /api/customers/me/memberships
-// Customer portal: return memberships for authenticated user + tenant
-// ---------------------------------------------------------------------------
-router.get("/me/memberships", requireGoogleAuth, requireTenant, async (req, res) => {
-  try {
-    const tenantId = Number(req.tenantId || 0);
-    if (!tenantId) return res.status(400).json({ error: "Invalid tenant." });
-
-    const googleEmail = (req.googleUser?.email || "").toString().trim().toLowerCase();
-    if (!googleEmail) return res.status(401).json({ error: "Unauthorized" });
-
-    const cRes = await db.query(
-      `SELECT id
-       FROM customers
-       WHERE tenant_id=$1 AND LOWER(email)=LOWER($2)
-       LIMIT 1`,
-      [tenantId, googleEmail]
-    );
-
-    if (!cRes.rows.length) {
-      return res.status(200).json({ memberships: [] });
-    }
-
-    const customerId = Number(cRes.rows[0].id);
-
-    const mRes = await db.query(
-      `
-      SELECT
-        cm.id,
-        cm.tenant_id,
-        cm.customer_id,
-        cm.plan_id,
-        mp.name AS plan_name,
-        cm.minutes_remaining,
-        cm.uses_remaining,
-        cm.valid_until,
-        cm.status,
-        cm.created_at,
-        cm.updated_at
-      FROM customer_memberships cm
-      LEFT JOIN membership_plans mp
-        ON mp.id = cm.plan_id
-       AND mp.tenant_id = cm.tenant_id
-      WHERE cm.tenant_id = $1
-        AND cm.customer_id = $2
-      ORDER BY cm.created_at DESC
-      `,
-      [tenantId, customerId]
-    );
-
-    return res.json({ memberships: mRes.rows || [] });
-  } catch (e) {
-    console.error("customers/me/memberships error:", e);
-    return res.status(500).json({ error: "Failed to load memberships." });
-  }
-});
-
+// NOTE:
+// There is a second /me/memberships route further below that is schema-tolerant
+// (it only selects columns that exist). We intentionally keep ONLY that route.
 
 // Cancel one of my bookings (soft-cancel)
 router.delete("/me/bookings/:id", requireGoogleAuth, requireTenant, async (req, res) => {
