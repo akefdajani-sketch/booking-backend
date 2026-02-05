@@ -33,6 +33,7 @@ const linksRouter = require("./routes/links");
 
 // Tenant custom domains (domain -> tenant slug)
 const tenantDomainsRouter = require("./routes/tenantDomains");
+const debugGoogleAuthRouter = require("./routes/debugGoogleAuth");
 
 const app = express();
 
@@ -76,6 +77,9 @@ app.use("/api/links", linksRouter);
 app.use("/api/tenant-domains", tenantDomainsRouter);
 
 app.get("/health", (req, res) => res.json({ ok: true }));
+// TEMP: auth debug endpoint (remove after fix)
+app.use("/api/debug", debugGoogleAuthRouter);
+
 
 app.use("/api", (req, res) => res.status(404).json({ error: "Not found" }));
 
