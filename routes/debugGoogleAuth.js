@@ -8,7 +8,6 @@
 // - It does NOT return the raw token.
 
 const express = require('express');
-const jwt = require('jsonwebtoken');
 const { OAuth2Client } = require('google-auth-library');
 
 const router = express.Router();
@@ -28,12 +27,23 @@ function splitBearer(req) {
   return token || null;
 }
 
+function base64UrlToJson(part) {
+  try {
+    // base64url -> base64
+    const b64 = part.replace(/-/g, '+').replace(/_/g, '/').padEnd(Math.ceil(part.length / 4) * 4, '=');
+    const jsonStr = Buffer.from(b64, 'base64').toString('utf8');
+    return safeJsonParse(jsonStr);
+  } catch {
+    return null;
+  }
+}
+
 function decodeJwtNoVerify(token) {
   // Returns null if not a JWT
   const parts = token.split('.');
   if (parts.length !== 3) return null;
-  const header = safeJsonParse(Buffer.from(parts[0], 'base64').toString('utf8'));
-  const payload = safeJsonParse(Buffer.from(parts[1], 'base64').toString('utf8'));
+  const header = base64UrlToJson(parts[0]);
+  const payload = base64UrlToJson(parts[1]);
   return { header, payload };
 }
 
@@ -123,22 +133,18 @@ router.get('/google-auth', async (req, res) => {
     };
   }
 
-  // Optional: try to verify as *your* JWT (if you set NEXTAUTH_SECRET on backend)
-  // This does NOT make it valid for your backend auth - it just helps identify it.
-  if (process.env.NEXTAUTH_SECRET && decoded) {
-    try {
-      const verified = jwt.verify(token, process.env.NEXTAUTH_SECRET);
-      out.nextAuthJwtVerify = {
-        ok: true,
-        verifiedKeys: Object.keys(verified || {}),
-      };
-    } catch (e) {
-      out.nextAuthJwtVerify = {
-        ok: false,
-        error: e?.message || String(e),
-      };
-    }
-  }
+  // Note:
+  // We intentionally do NOT verify the token with jsonwebtoken here.
+  // Your backend currently does not list "jsonwebtoken" as a dependency, and
+  // requiring it will crash the server on Render.
+  //
+  // If you later want to test "is this a NextAuth JWT signed with NEXTAUTH_SECRET",
+  // either (A) add jsonwebtoken to package.json, or (B) add a small verifier using jose.
+  out.nextAuthJwtVerify = {
+    skipped: true,
+    reason: 'jsonwebtoken not installed on backend',
+    hasNextAuthSecretEnv: Boolean(process.env.NEXTAUTH_SECRET),
+  };
 
   return res.status(200).json(out);
 });
