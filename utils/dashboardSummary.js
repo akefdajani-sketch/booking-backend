@@ -92,6 +92,47 @@ async function resolveTenantCurrencyCode(tenantId) {
   return tc.rows?.[0]?.currency_code || null;
 }
 
+
+async function tenantHasWorkingHours(tenantId) {
+  // Many deployments store working hours as JSON in tenants.working_hours
+  const hasWH = await db.query(
+    `SELECT 1 FROM information_schema.columns
+      WHERE table_schema='public' AND table_name='tenants' AND column_name='working_hours' LIMIT 1`
+  );
+  if (hasWH.rowCount <= 0) return null; // unknown
+  const r = await db.query(`SELECT working_hours FROM tenants WHERE id=$1 LIMIT 1`, [tenantId]);
+  const wh = r.rows?.[0]?.working_hours;
+  if (!wh) return false;
+  try {
+    // Accept both object and JSON string
+    const obj = typeof wh === "string" ? JSON.parse(wh) : wh;
+    return obj && typeof obj === "object" && Object.keys(obj).length > 0;
+  } catch {
+    return true; // non-empty but unparsable: treat as set to avoid false positives
+  }
+}
+
+async function countServicesRequiring(tenantId) {
+  // Returns counts for requires_staff / requires_resource if those columns exist
+  const cols = await getExistingColumns("services");
+  const hasReqStaff = cols.has("requires_staff");
+  const hasReqRes = cols.has("requires_resource");
+  if (!hasReqStaff && !hasReqRes) {
+    return { staffRequiredServices: 0, resourceRequiredServices: 0 };
+  }
+  const sel = [
+    hasReqStaff ? "COUNT(*) FILTER (WHERE requires_staff=true)::int AS staff_required" : "0::int AS staff_required",
+    hasReqRes ? "COUNT(*) FILTER (WHERE requires_resource=true)::int AS resource_required" : "0::int AS resource_required",
+  ].join(", ");
+  const q = await db.query(
+    `SELECT ${sel} FROM services WHERE tenant_id=$1`,
+    [tenantId]
+  );
+  return {
+    staffRequiredServices: q.rows?.[0]?.staff_required || 0,
+    resourceRequiredServices: q.rows?.[0]?.resource_required || 0,
+  };
+}
 function computeRange(mode, dateStr) {
   const anchorDay = startOfDayUTC(dateStr);
   let rangeStart = anchorDay;
@@ -278,6 +319,117 @@ async function getDashboardSummary({ tenantId, tenantSlug, mode, dateStr }) {
     attention.push({ title: "Underused capacity", value: "Utilization under 20%", tone: "neutral" });
   }
 
+
+  // ---------------------------------------------------------------------------
+  // PR-TD4: Rules + Insights cards
+  //
+  // Rules are actionable alerts (with optional CTA deep links).
+  // Insights are lightweight derived facts to help operators decide quickly.
+  // ---------------------------------------------------------------------------
+
+  const rules = [];
+  const insights = [];
+
+  // Config health rules
+  const [servicesCount, staffCount, resourcesCount] = await Promise.all([
+    countTableRows("services", tenantId),
+    countTableRows("staff", tenantId),
+    countTableRows("resources", tenantId),
+  ]);
+
+  const whSet = await tenantHasWorkingHours(tenantId);
+  if (whSet === false) {
+    rules.push({
+      id: "cfg_working_hours",
+      title: "Working hours not set",
+      value: "Set opening/closing hours so availability matches your real schedule.",
+      tone: "warn",
+      cta_label: "Set hours",
+      cta_href: `/owner/${tenantSlug}?tab=setup&pill=hours`,
+    });
+  }
+
+  if (servicesCount === 0) {
+    rules.push({
+      id: "cfg_services",
+      title: "No services configured",
+      value: "Add at least one service so customers can book.",
+      tone: "warn",
+      cta_label: "Add services",
+      cta_href: `/owner/${tenantSlug}?tab=setup&pill=services`,
+    });
+  }
+
+  const reqCounts = await countServicesRequiring(tenantId);
+  if (reqCounts.staffRequiredServices > 0 && staffCount === 0) {
+    rules.push({
+      id: "cfg_staff_missing",
+      title: "Staff required but none added",
+      value: `${reqCounts.staffRequiredServices} service(s) require staff — add staff to avoid availability issues.`,
+      tone: "warn",
+      cta_label: "Add staff",
+      cta_href: `/owner/${tenantSlug}?tab=setup&pill=staff`,
+    });
+  }
+
+  if (reqCounts.resourceRequiredServices > 0 && resourcesCount === 0) {
+    rules.push({
+      id: "cfg_resources_missing",
+      title: "Resources required but none added",
+      value: `${reqCounts.resourceRequiredServices} service(s) require resources — add resources to prevent overbooking.`,
+      tone: "warn",
+      cta_label: "Add resources",
+      cta_href: `/owner/${tenantSlug}?tab=setup&pill=resources`,
+    });
+  }
+
+  // Operational rules
+  if (pendingCount > 0) {
+    rules.push({
+      id: "ops_pending",
+      title: "Pending bookings",
+      value: `${pendingCount} booking(s) need confirmation.`,
+      tone: "warn",
+      cta_label: "Review bookings",
+      cta_href: `/owner/${tenantSlug}?tab=bookings`,
+    });
+  }
+
+  if (cancelledCount > 0) {
+    rules.push({
+      id: "ops_cancelled",
+      title: "Cancellations in range",
+      value: `${cancelledCount} booking(s) cancelled in this ${safeMode}.`,
+      tone: "neutral",
+      cta_label: "View bookings",
+      cta_href: `/owner/${tenantSlug}?tab=bookings`,
+    });
+  }
+
+  if (utilizationPct != null && utilizationPct < 20) {
+    rules.push({
+      id: "ops_underused",
+      title: "Underused capacity",
+      value: "Utilization under 20%. Consider a promo, bundles, or adjusting hours.",
+      tone: "neutral",
+      cta_label: "Open marketing",
+      cta_href: `/owner/${tenantSlug}?tab=dashboard`,
+    });
+  }
+
+  // Insights (non-actionable, just helpful signals)
+  if (repeatPct >= 50) insights.push({ id: "ins_repeat", title: "Repeat rate", value: `${repeatPct}% returning`, tone: "good" });
+  else insights.push({ id: "ins_repeat", title: "Repeat rate", value: `${repeatPct}% returning`, tone: "neutral" });
+
+  if (utilizationPct != null) {
+    const tone = utilizationPct >= 60 ? "good" : utilizationPct < 20 ? "warn" : "neutral";
+    insights.push({ id: "ins_util", title: "Utilization", value: `${utilizationPct}%`, tone });
+  }
+
+  if (confirmedCount > 0) {
+    insights.push({ id: "ins_confirmed", title: "Confirmed bookings", value: String(confirmedCount), tone: "neutral" });
+  }
+
   // ---------------------------------------------------------------------------
   // PR-TD3: Chart-ready series (still lightweight + tenant-safe)
   //
@@ -368,6 +520,8 @@ async function getDashboardSummary({ tenantId, tenantSlug, mode, dateStr }) {
     panels: {
       nextBookings,
       attention,
+      rules,
+      insights,
       customerPulse: { activeCustomers, returningCustomers },
     },
     series,
