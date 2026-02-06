@@ -175,8 +175,11 @@ async function getDashboardSummary({ tenantId, tenantSlug, mode, dateStr }) {
   let utilizationPct = null;
   const hoursReg = await db.query(`SELECT to_regclass('public.tenant_hours') AS reg`);
   if (hoursReg.rows?.[0]?.reg && capacityUnits > 0) {
+    // tenant_hours schema in this codebase uses open_time/close_time/is_closed
+    // (see routes/tenantHours.js). Older dashboard implementations mistakenly
+    // referenced start_time/end_time which do not exist.
     const hours = await db.query(
-      `SELECT day_of_week, start_time, end_time
+      `SELECT day_of_week, open_time, close_time, is_closed
        FROM tenant_hours
        WHERE tenant_id=$1`,
       [tenantId]
@@ -190,8 +193,9 @@ async function getDashboardSummary({ tenantId, tenantSlug, mode, dateStr }) {
       const dow = cursor.getUTCDay();
       const todays = rows.filter((r) => Number(r.day_of_week) === dow);
       for (const r of todays) {
-        const st = String(r.start_time || "").slice(0, 5);
-        const et = String(r.end_time || "").slice(0, 5);
+        if (r.is_closed === true) continue;
+        const st = String(r.open_time || "").slice(0, 5);
+        const et = String(r.close_time || "").slice(0, 5);
         if (!/^\d{2}:\d{2}$/.test(st) || !/^\d{2}:\d{2}$/.test(et)) continue;
         const [sh, sm] = st.split(":").map(Number);
         const [eh, em] = et.split(":").map(Number);
