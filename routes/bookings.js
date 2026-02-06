@@ -7,6 +7,7 @@ const db = pool;
 const requireAdmin = require("../middleware/requireAdmin");
 const requireGoogleAuth = require("../middleware/requireGoogleAuth");
 const { requireTenant } = require("../middleware/requireTenant");
+const { ensureBookingMoneyColumns } = require("../utils/ensureBookingMoneyColumns");
 const { checkConflicts, loadJoinedBookingById } = require("../utils/bookings");
 
 function shouldUseCustomerHistory(req) {
@@ -866,6 +867,10 @@ router.delete("/:id", requireAdmin, requireTenant, async (req, res) => {
 // Phase C: booking creation is authenticated (prevents ghost bookings after session expiry).
 router.post("/", requireGoogleAuth, requireTenant, async (req, res) => {
   try {
+    // Ensure revenue/price columns exist in older DBs.
+    // (No-op if already applied.)
+    await ensureBookingMoneyColumns();
+
     const {
       tenantSlug,
       serviceId,
@@ -973,6 +978,9 @@ router.post("/", requireGoogleAuth, requireTenant, async (req, res) => {
     let resolvedServiceId = serviceId ? Number(serviceId) : null;
     let duration = durationMinutes ? Number(durationMinutes) : null;
     let requiresConfirmation = false;
+    let serviceDurationMinutes = null;
+    let servicePriceAmount = null;
+    let tenantCurrencyCode = null;
 
     if (resolvedServiceId) {
       // Service-level confirmation mode:
@@ -986,8 +994,40 @@ router.post("/", requireGoogleAuth, requireTenant, async (req, res) => {
       );
       const hasReqConf = hasReqConfRes.rowCount > 0;
 
+      // Price columns are not consistent across older deployments.
+      const priceCols = await db.query(
+        `SELECT column_name
+         FROM information_schema.columns
+         WHERE table_schema='public'
+           AND table_name='services'
+           AND column_name IN ('price_amount','price')`
+      );
+      const hasPriceAmount = priceCols.rows.some((r) => r.column_name === 'price_amount');
+      const hasPriceLegacy = priceCols.rows.some((r) => r.column_name === 'price');
+      const priceExpr = hasPriceAmount && hasPriceLegacy
+        ? "COALESCE(price_amount, price) AS price_amount"
+        : hasPriceAmount
+          ? "price_amount AS price_amount"
+          : hasPriceLegacy
+            ? "price AS price_amount"
+            : "NULL::numeric AS price_amount";
+
+      // Tenant currency_code is used for dashboard display.
+      const tenantCols = await db.query(
+        `SELECT 1
+         FROM information_schema.columns
+         WHERE table_schema='public'
+           AND table_name='tenants'
+           AND column_name='currency_code'
+         LIMIT 1`
+      );
+      if (tenantCols.rowCount > 0) {
+        const tc = await db.query(`SELECT currency_code FROM tenants WHERE id=$1 LIMIT 1`, [resolvedTenantId]);
+        tenantCurrencyCode = tc.rows?.[0]?.currency_code || null;
+      }
+
       const sRes = await db.query(
-        `SELECT id, tenant_id, duration_minutes${hasReqConf ? ", COALESCE(requires_confirmation,false) AS requires_confirmation" : ""}
+        `SELECT id, tenant_id, duration_minutes, ${priceExpr}${hasReqConf ? ", COALESCE(requires_confirmation,false) AS requires_confirmation" : ""}
          FROM services WHERE id=$1 AND tenant_id=$2 LIMIT 1`,
         [resolvedServiceId, resolvedTenantId]
       );
@@ -997,6 +1037,9 @@ router.post("/", requireGoogleAuth, requireTenant, async (req, res) => {
       if (hasReqConf) {
         requiresConfirmation = !!sRes.rows[0].requires_confirmation;
       }
+
+      serviceDurationMinutes = Number(sRes.rows[0].duration_minutes || 0) || null;
+      servicePriceAmount = sRes.rows[0].price_amount != null ? Number(sRes.rows[0].price_amount) : null;
 
       if (!duration) {
         duration = Number(sRes.rows[0].duration_minutes || 60) || 60;
@@ -1247,6 +1290,24 @@ router.post("/", requireGoogleAuth, requireTenant, async (req, res) => {
 
       // Insert booking (idempotent)
       const initialStatus = requiresConfirmation ? "pending" : "confirmed";
+
+      // Compute price + charge amounts.
+      // - price_amount represents the booking's list price/value.
+      // - charge_amount is what we actually charge (0 if covered by membership).
+      // If booking duration differs from service duration, scale proportionally.
+      let price_amount = null;
+      if (servicePriceAmount != null && Number.isFinite(servicePriceAmount)) {
+        const base = Number(servicePriceAmount);
+        const svcDur = Number(serviceDurationMinutes || duration || 0);
+        const dur = Number(duration || 0);
+        if (svcDur > 0 && dur > 0 && dur !== svcDur) {
+          price_amount = Math.round((base * (dur / svcDur)) * 100) / 100;
+        } else {
+          price_amount = Math.round(base * 100) / 100;
+        }
+      }
+      const charge_amount = finalCustomerMembershipId ? 0 : price_amount;
+
       let bookingId;
       let created = true;
       try {
@@ -1254,10 +1315,12 @@ router.post("/", requireGoogleAuth, requireTenant, async (req, res) => {
           `
           INSERT INTO bookings
             (tenant_id, service_id, staff_id, resource_id, start_time, duration_minutes,
-             customer_id, customer_name, customer_phone, customer_email, status, idempotency_key, customer_membership_id)
+             customer_id, customer_name, customer_phone, customer_email, status, idempotency_key, customer_membership_id,
+             price_amount, charge_amount, currency_code)
           VALUES
             ($1, $2, $3, $4, $5, $6,
-             $7, $8, $9, $10, $11, $12, $13)
+             $7, $8, $9, $10, $11, $12, $13,
+             $14, $15, $16)
           RETURNING id;
           `,
           [
@@ -1274,6 +1337,9 @@ router.post("/", requireGoogleAuth, requireTenant, async (req, res) => {
             initialStatus,
             idemKey,
             finalCustomerMembershipId,
+            price_amount,
+            charge_amount,
+            tenantCurrencyCode,
           ]
         );
         bookingId = insert.rows[0].id;
