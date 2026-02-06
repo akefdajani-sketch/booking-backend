@@ -93,6 +93,56 @@ async function resolveTenantCurrencyCode(tenantId) {
 }
 
 
+async function resolveDashboardThresholds(tenantId) {
+  // Thresholds can be overridden per-tenant via tenants.branding.dashboard.thresholds (jsonb).
+  // This keeps TD5 "SaaS-safe" without requiring a schema migration.
+  const defaults = {
+    utilization_low_pct: 20,
+    utilization_good_pct: 60,
+    repeat_good_pct: 50,
+    dropoff_warn_pct: 30,
+    pending_warn_count: 1,
+    cancel_warn_count: 1,
+  };
+
+  try {
+    // branding column exists in modern deployments, but still guard for older DBs
+    const hasBranding = await db.query(
+      `SELECT 1 FROM information_schema.columns
+       WHERE table_schema='public' AND table_name='tenants' AND column_name='branding' LIMIT 1`
+    );
+    if (hasBranding.rowCount <= 0) return defaults;
+
+    const r = await db.query(`SELECT branding FROM tenants WHERE id=$1 LIMIT 1`, [tenantId]);
+    let branding = r.rows?.[0]?.branding;
+    if (!branding) return defaults;
+
+    if (typeof branding === "string") {
+      try { branding = JSON.parse(branding); } catch { return defaults; }
+    }
+
+    const raw =
+      (branding && branding.dashboard && branding.dashboard.thresholds) ||
+      (branding && branding.dashboard_thresholds) ||
+      (branding && branding.thresholds && branding.thresholds.dashboard) ||
+      null;
+
+    if (!raw || typeof raw !== "object") return defaults;
+
+    const cleaned = {};
+    for (const [k, v] of Object.entries(raw)) {
+      const n = Number(v);
+      if (!Number.isFinite(n)) continue;
+      cleaned[k] = n;
+    }
+
+    return { ...defaults, ...cleaned };
+  } catch {
+    return defaults;
+  }
+}
+
+
 async function tenantHasWorkingHours(tenantId) {
   // Many deployments store working hours as JSON in tenants.working_hours
   const hasWH = await db.query(
@@ -196,6 +246,8 @@ async function getDashboardSummary({ tenantId, tenantSlug, mode, dateStr }) {
   const revenueAmount = kpi.rows?.[0]?.revenue_amount != null ? String(kpi.rows[0].revenue_amount) : "0";
 
   const currencyCode = await resolveTenantCurrencyCode(tenantId);
+  const thresholds = await resolveDashboardThresholds(tenantId);
+
 
   const next = await db.query(
     `
@@ -240,6 +292,10 @@ async function getDashboardSummary({ tenantId, tenantSlug, mode, dateStr }) {
   const activeCustomers = pulse.rows?.[0]?.active_customers || 0;
   const returningCustomers = pulse.rows?.[0]?.returning_customers || 0;
   const repeatPct = activeCustomers > 0 ? Math.round((returningCustomers / activeCustomers) * 100) : 0;
+
+  const totalRequests = confirmedCount + pendingCount + cancelledCount;
+  const conversionPct = totalRequests > 0 ? Math.round((confirmedCount / totalRequests) * 100) : null;
+  const dropoffPct = totalRequests > 0 ? Math.max(0, 100 - conversionPct) : null;
 
   // Active memberships (best-effort; table might not exist in older envs)
   let activeMemberships = 0;
@@ -312,11 +368,11 @@ async function getDashboardSummary({ tenantId, tenantSlug, mode, dateStr }) {
   });
 
   const attention = [];
-  if (pendingCount > 0) {
+  if (pendingCount >= (thresholds.pending_warn_count || 1)) {
     attention.push({ title: "Pending bookings", value: `${pendingCount} need confirmation`, tone: "warn" });
   }
-  if (utilizationPct != null && utilizationPct < 20) {
-    attention.push({ title: "Underused capacity", value: "Utilization under 20%", tone: "neutral" });
+  if (utilizationPct != null && utilizationPct < (thresholds.utilization_low_pct || 20)) {
+    attention.push({ title: "Underused capacity", value: `Utilization under ${(thresholds.utilization_low_pct || 20)}%`, tone: "neutral" });
   }
 
 
@@ -383,7 +439,7 @@ async function getDashboardSummary({ tenantId, tenantSlug, mode, dateStr }) {
   }
 
   // Operational rules
-  if (pendingCount > 0) {
+  if (pendingCount >= (thresholds.pending_warn_count || 1)) {
     rules.push({
       id: "ops_pending",
       title: "Pending bookings",
@@ -394,7 +450,7 @@ async function getDashboardSummary({ tenantId, tenantSlug, mode, dateStr }) {
     });
   }
 
-  if (cancelledCount > 0) {
+  if (cancelledCount >= (thresholds.cancel_warn_count || 1)) {
     rules.push({
       id: "ops_cancelled",
       title: "Cancellations in range",
@@ -405,29 +461,53 @@ async function getDashboardSummary({ tenantId, tenantSlug, mode, dateStr }) {
     });
   }
 
-  if (utilizationPct != null && utilizationPct < 20) {
+  if (utilizationPct != null && utilizationPct < (thresholds.utilization_low_pct || 20)) {
     rules.push({
       id: "ops_underused",
       title: "Underused capacity",
-      value: "Utilization under 20%. Consider a promo, bundles, or adjusting hours.",
+      value: `Utilization under ${(thresholds.utilization_low_pct || 20)}%. Consider a promo, bundles, or adjusting hours.`,
       tone: "neutral",
       cta_label: "Open marketing",
       cta_href: `/owner/${tenantSlug}?tab=dashboard`,
     });
   }
 
+  if (dropoffPct != null && dropoffPct >= (thresholds.dropoff_warn_pct || 30) && totalRequests >= 5) {
+    const dominant = pendingCount >= cancelledCount ? "pending" : "cancelled";
+    rules.push({
+      id: "ops_dropoff",
+      title: "High drop-off in this range",
+      value: `${dropoffPct}% of requests are not confirmed (${dominant} is the biggest factor).`,
+      tone: "warn",
+      cta_label: "Review pipeline",
+      cta_href: `/owner/${tenantSlug}?tab=bookings`,
+    });
+  }
+
   // Insights (non-actionable, just helpful signals)
-  if (repeatPct >= 50) insights.push({ id: "ins_repeat", title: "Repeat rate", value: `${repeatPct}% returning`, tone: "good" });
+  if (repeatPct >= (thresholds.repeat_good_pct || 50)) insights.push({ id: "ins_repeat", title: "Repeat rate", value: `${repeatPct}% returning`, tone: "good" });
   else insights.push({ id: "ins_repeat", title: "Repeat rate", value: `${repeatPct}% returning`, tone: "neutral" });
 
   if (utilizationPct != null) {
-    const tone = utilizationPct >= 60 ? "good" : utilizationPct < 20 ? "warn" : "neutral";
+    const tone = utilizationPct >= (thresholds.utilization_good_pct || 60) ? "good" : utilizationPct < (thresholds.utilization_low_pct || 20) ? "warn" : "neutral";
     insights.push({ id: "ins_util", title: "Utilization", value: `${utilizationPct}%`, tone });
   }
 
   if (confirmedCount > 0) {
     insights.push({ id: "ins_confirmed", title: "Confirmed bookings", value: String(confirmedCount), tone: "neutral" });
   }
+
+  if (conversionPct != null) {
+    const goodCut = 100 - (thresholds.dropoff_warn_pct || 30);
+    const tone = conversionPct >= goodCut ? "good" : conversionPct < 50 ? "warn" : "neutral";
+    insights.push({ id: "ins_conversion", title: "Conversion", value: `${conversionPct}% confirmed`, tone });
+  }
+  if (dropoffPct != null) {
+    const tone = dropoffPct >= (thresholds.dropoff_warn_pct || 30) ? "warn" : "neutral";
+    const dominant = pendingCount >= cancelledCount ? "pending" : "cancelled";
+    insights.push({ id: "ins_dropoff", title: "Drop-off points", value: `${dropoffPct}% not confirmed (${dominant} is highest)`, tone });
+  }
+
 
   // ---------------------------------------------------------------------------
   // PR-TD3: Chart-ready series (still lightweight + tenant-safe)
@@ -496,6 +576,64 @@ async function getDashboardSummary({ tenantId, tenantSlug, mode, dateStr }) {
     // The KPI + panels are more important than the chart series.
   }
 
+
+  // ---------------------------------------------------------------------------
+  // PR-TD5: Smart insights (peak time, top service)
+  // ---------------------------------------------------------------------------
+
+  // Peak bucket (hour/day) based on bookings volume
+  try {
+    let peak = null;
+    for (const r of series.bookings_over_time || []) {
+      const b = Number(r.bookings || 0);
+      if (!peak || b > peak.bookings) peak = { bucket: r.bucket, bookings: b };
+    }
+    if (peak && peak.bookings > 0 && peak.bucket) {
+      const d = new Date(peak.bucket);
+      const hh = String(d.getUTCHours()).padStart(2, "0");
+      const mm = String(d.getUTCMinutes()).padStart(2, "0");
+      const label = truncUnit === "hour" ? `${hh}:${mm}` : d.toISOString().slice(0, 10);
+      insights.push({ id: "ins_peak", title: `Peak ${truncUnit}`, value: `${label} (${peak.bookings} bookings)`, tone: "neutral" });
+    }
+  } catch {}
+
+  // Top service (prefer revenue if money cols exist; fallback to bookings count)
+  try {
+    let top = null;
+    if (hasMoneyCols && (series.revenue_by_service || []).length > 0) {
+      const first = series.revenue_by_service[0];
+      if (first) top = { name: first.service_name, revenue_amount: first.revenue_amount, bookings: null };
+    }
+
+    if (!top) {
+      const topSvc = await db.query(
+        `
+        SELECT COALESCE(s.name,'Service') AS service_name, COUNT(*)::int AS bookings
+        FROM bookings b
+        LEFT JOIN services s ON s.id=b.service_id
+        WHERE b.tenant_id=$1
+          AND ${startCol} >= $2
+          AND ${startCol} < $3
+          AND b.status='confirmed'
+        GROUP BY 1
+        ORDER BY bookings DESC
+        LIMIT 1
+        `,
+        [tenantId, rangeStart.toISOString(), rangeEnd.toISOString()]
+      );
+      const row = topSvc.rows?.[0];
+      if (row) top = { name: String(row.service_name || "Service"), revenue_amount: null, bookings: row.bookings || 0 };
+    }
+
+    if (top) {
+      if (top.revenue_amount != null && String(top.revenue_amount) !== "0") {
+                insights.push({ id: "ins_top_service", title: "Top service", value: `${top.name} (${top.revenue_amount}${currencyCode ? " " + currencyCode : ""})`, tone: "good" });
+      } else {
+        insights.push({ id: "ins_top_service", title: "Top service", value: `${top.name} (${top.bookings || 0} bookings)`, tone: "neutral" });
+      }
+    }
+  } catch {}
+
   return {
     ok: true,
     tenantId,
@@ -521,6 +659,7 @@ async function getDashboardSummary({ tenantId, tenantSlug, mode, dateStr }) {
       attention,
       rules,
       insights,
+      thresholds,
       customerPulse: { activeCustomers, returningCustomers },
     },
     series,
