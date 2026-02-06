@@ -10,6 +10,42 @@
 const db = require("../db");
 const { ensureBookingMoneyColumns, bookingMoneyColsAvailable } = require("./ensureBookingMoneyColumns");
 
+// -----------------------------------------------------------------------------
+// Schema compatibility helpers
+//
+// Postgres throws an error if a query references a missing column.
+// This codebase has lived through a few schema iterations.
+// We therefore detect the bookings time column at runtime and build SQL safely.
+// -----------------------------------------------------------------------------
+
+const _columnsCache = new Map(); // tableName -> Set(column_name)
+
+async function getExistingColumns(tableName) {
+  if (_columnsCache.has(tableName)) return _columnsCache.get(tableName);
+  const res = await db.query(
+    `SELECT column_name
+       FROM information_schema.columns
+      WHERE table_schema='public' AND table_name=$1`,
+    [tableName]
+  );
+  const set = new Set((res.rows || []).map((r) => r.column_name));
+  _columnsCache.set(tableName, set);
+  return set;
+}
+
+function firstExisting(colSet, candidates) {
+  for (const c of candidates) {
+    if (c && colSet.has(c)) return c;
+  }
+  return null;
+}
+
+async function pickCol(tableName, alias, candidates) {
+  const cols = await getExistingColumns(tableName);
+  const col = firstExisting(cols, candidates);
+  return col ? `${alias}.${col}` : null;
+}
+
 function parseISODateOnly(v) {
   const s = String(v || "").trim();
   if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return null;
@@ -75,6 +111,20 @@ function computeRange(mode, dateStr) {
 async function getDashboardSummary({ tenantId, tenantSlug, mode, dateStr }) {
   const hasMoneyCols = await ensureBookingMoneyColumns();
 
+  // bookings start column compatibility (start_time vs start_at vs start_datetime...)
+  const startCol = await pickCol("bookings", "b", [
+    "start_time",
+    "start_at",
+    "start_datetime",
+    "starts_at",
+    "start",
+  ]);
+  if (!startCol) {
+    throw new Error(
+      "Dashboard summary cannot run: bookings table has no recognized start time column (expected one of start_time/start_at/start_datetime/starts_at)."
+    );
+  }
+
   const safeMode = mode === "week" || mode === "month" ? mode : "day";
   const safeDate = parseISODateOnly(dateStr) || new Date().toISOString().slice(0, 10);
 
@@ -90,10 +140,10 @@ async function getDashboardSummary({ tenantId, tenantSlug, mode, dateStr }) {
       COUNT(*) FILTER (WHERE status='cancelled')::int AS cancelled_count,
       ${revenueSelect}
       COALESCE(SUM(duration_minutes) FILTER (WHERE status='confirmed'), 0)::int AS booked_minutes
-    FROM bookings
-    WHERE tenant_id=$1
-      AND start_time >= $2
-      AND start_time < $3
+    FROM bookings b
+    WHERE b.tenant_id=$1
+      AND ${startCol} >= $2
+      AND ${startCol} < $3
     `,
     [tenantId, rangeStart.toISOString(), rangeEnd.toISOString()]
   );
@@ -109,16 +159,16 @@ async function getDashboardSummary({ tenantId, tenantSlug, mode, dateStr }) {
   const next = await db.query(
     `
     SELECT b.id,
-           b.start_time,
+           ${startCol} AS start_time,
            COALESCE(b.customer_name,'') AS customer_name,
            COALESCE(s.name,'') AS service_name,
            b.status
     FROM bookings b
     LEFT JOIN services s ON s.id=b.service_id
     WHERE b.tenant_id=$1
-      AND b.start_time >= NOW()
+      AND ${startCol} >= NOW()
       AND b.status IN ('confirmed','pending')
-    ORDER BY b.start_time ASC
+    ORDER BY ${startCol} ASC
     LIMIT 5
     `,
     [tenantId]
@@ -128,12 +178,12 @@ async function getDashboardSummary({ tenantId, tenantSlug, mode, dateStr }) {
     `
     WITH in_range AS (
       SELECT DISTINCT customer_id
-      FROM bookings
-      WHERE tenant_id=$1 AND start_time >= $2 AND start_time < $3 AND customer_id IS NOT NULL
+      FROM bookings b
+      WHERE b.tenant_id=$1 AND ${startCol} >= $2 AND ${startCol} < $3 AND customer_id IS NOT NULL
     ), totals AS (
       SELECT customer_id, COUNT(*)::int AS total_bookings
-      FROM bookings
-      WHERE tenant_id=$1 AND customer_id IS NOT NULL
+      FROM bookings b
+      WHERE b.tenant_id=$1 AND customer_id IS NOT NULL
       GROUP BY customer_id
     )
     SELECT
@@ -228,6 +278,73 @@ async function getDashboardSummary({ tenantId, tenantSlug, mode, dateStr }) {
     attention.push({ title: "Underused capacity", value: "Utilization under 20%", tone: "neutral" });
   }
 
+  // ---------------------------------------------------------------------------
+  // PR-TD3: Chart-ready series (still lightweight + tenant-safe)
+  //
+  // - bookings_over_time: count of bookings in the selected range, grouped by hour/day
+  // - revenue_over_time: confirmed revenue grouped by hour/day (0 if no money cols)
+  // - revenue_by_service: top services by confirmed revenue (0 if no money cols)
+  // ---------------------------------------------------------------------------
+
+  const truncUnit = safeMode === "day" ? "hour" : "day";
+  const series = {
+    bookings_over_time: [],
+    revenue_over_time: [],
+    revenue_by_service: [],
+  };
+
+  try {
+    const ts = await db.query(
+      `
+      SELECT
+        date_trunc('${truncUnit}', ${startCol}) AS bucket,
+        COUNT(*)::int AS bookings,
+        ${hasMoneyCols ? "COALESCE(SUM(charge_amount) FILTER (WHERE status='confirmed'), 0)::numeric" : "0::numeric"} AS revenue
+      FROM bookings b
+      WHERE b.tenant_id=$1
+        AND ${startCol} >= $2
+        AND ${startCol} < $3
+      GROUP BY 1
+      ORDER BY 1 ASC
+      `,
+      [tenantId, rangeStart.toISOString(), rangeEnd.toISOString()]
+    );
+
+    series.bookings_over_time = (ts.rows || []).map((r) => ({
+      bucket: r.bucket,
+      bookings: r.bookings,
+    }));
+    series.revenue_over_time = (ts.rows || []).map((r) => ({
+      bucket: r.bucket,
+      revenue_amount: String(r.revenue ?? "0"),
+    }));
+
+    const svc = await db.query(
+      `
+      SELECT
+        COALESCE(s.name, 'Service') AS service_name,
+        ${hasMoneyCols ? "COALESCE(SUM(b.charge_amount) FILTER (WHERE b.status='confirmed'), 0)::numeric" : "0::numeric"} AS revenue
+      FROM bookings b
+      LEFT JOIN services s ON s.id=b.service_id
+      WHERE b.tenant_id=$1
+        AND ${startCol} >= $2
+        AND ${startCol} < $3
+      GROUP BY 1
+      ORDER BY revenue DESC
+      LIMIT 8
+      `,
+      [tenantId, rangeStart.toISOString(), rangeEnd.toISOString()]
+    );
+
+    series.revenue_by_service = (svc.rows || []).map((r) => ({
+      service_name: String(r.service_name || "Service"),
+      revenue_amount: String(r.revenue ?? "0"),
+    }));
+  } catch (e) {
+    // Never fail the dashboard if charts fail.
+    // The KPI + panels are more important than the chart series.
+  }
+
   return {
     ok: true,
     tenantId,
@@ -253,6 +370,7 @@ async function getDashboardSummary({ tenantId, tenantSlug, mode, dateStr }) {
       attention,
       customerPulse: { activeCustomers, returningCustomers },
     },
+    series,
   };
 }
 
