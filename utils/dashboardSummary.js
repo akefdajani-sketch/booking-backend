@@ -8,7 +8,7 @@
 // - Revenue is derived from bookings.charge_amount (stored at booking creation).
 
 const db = require("../db");
-const { ensureBookingMoneyColumns } = require("./ensureBookingMoneyColumns");
+const { ensureBookingMoneyColumns, bookingMoneyColsAvailable } = require("./ensureBookingMoneyColumns");
 
 function parseISODateOnly(v) {
   const s = String(v || "").trim();
@@ -73,12 +73,14 @@ function computeRange(mode, dateStr) {
 }
 
 async function getDashboardSummary({ tenantId, tenantSlug, mode, dateStr }) {
-  await ensureBookingMoneyColumns();
+  const hasMoneyCols = await ensureBookingMoneyColumns();
 
   const safeMode = mode === "week" || mode === "month" ? mode : "day";
   const safeDate = parseISODateOnly(dateStr) || new Date().toISOString().slice(0, 10);
 
   const { rangeStart, rangeEnd } = computeRange(safeMode, safeDate);
+
+  const revenueSelect = hasMoneyCols ? "COALESCE(SUM(charge_amount) FILTER (WHERE status='confirmed'), 0)::numeric AS revenue_amount," : "0::numeric AS revenue_amount,";
 
   const kpi = await db.query(
     `
@@ -86,7 +88,7 @@ async function getDashboardSummary({ tenantId, tenantSlug, mode, dateStr }) {
       COUNT(*) FILTER (WHERE status='confirmed')::int AS confirmed_count,
       COUNT(*) FILTER (WHERE status='pending')::int AS pending_count,
       COUNT(*) FILTER (WHERE status='cancelled')::int AS cancelled_count,
-      COALESCE(SUM(charge_amount) FILTER (WHERE status='confirmed'), 0)::numeric AS revenue_amount,
+      ${revenueSelect}
       COALESCE(SUM(duration_minutes) FILTER (WHERE status='confirmed'), 0)::int AS booked_minutes
     FROM bookings
     WHERE tenant_id=$1

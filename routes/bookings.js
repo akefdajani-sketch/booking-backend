@@ -1308,22 +1308,15 @@ router.post("/", requireGoogleAuth, requireTenant, async (req, res) => {
       }
       const charge_amount = finalCustomerMembershipId ? 0 : price_amount;
 
+      const hasMoneyCols = await ensureBookingMoneyColumns();
+
       let bookingId;
       let created = true;
       try {
-        const insert = await client.query(
-          `
-          INSERT INTO bookings
-            (tenant_id, service_id, staff_id, resource_id, start_time, duration_minutes,
-             customer_id, customer_name, customer_phone, customer_email, status, idempotency_key, customer_membership_id,
-             price_amount, charge_amount, currency_code)
-          VALUES
-            ($1, $2, $3, $4, $5, $6,
-             $7, $8, $9, $10, $11, $12, $13,
-             $14, $15, $16)
-          RETURNING id;
-          `,
-          [
+        const baseCols = `tenant_id, service_id, staff_id, resource_id, start_time, duration_minutes,
+             customer_id, customer_name, customer_phone, customer_email, status, idempotency_key, customer_membership_id`;
+
+        const baseVals = [
             resolvedTenantId,
             resolvedServiceId,
             staff_id,
@@ -1337,11 +1330,36 @@ router.post("/", requireGoogleAuth, requireTenant, async (req, res) => {
             initialStatus,
             idemKey,
             finalCustomerMembershipId,
-            price_amount,
-            charge_amount,
-            tenantCurrencyCode,
-          ]
-        );
+        ];
+
+        let insertSql;
+        let insertParams = baseVals;
+
+        if (hasMoneyCols) {
+          insertSql = `
+          INSERT INTO bookings
+            (${baseCols}, price_amount, charge_amount, currency_code)
+          VALUES
+            ($1, $2, $3, $4, $5, $6,
+             $7, $8, $9, $10, $11, $12, $13,
+             $14, $15, $16)
+          RETURNING id;
+          `;
+          insertParams = [...baseVals, price_amount, charge_amount, tenantCurrencyCode];
+        } else {
+          // Backwards-compatible: DB does not yet have money columns.
+          // Apply the migration to enable revenue reporting.
+          insertSql = `
+          INSERT INTO bookings
+            (${baseCols})
+          VALUES
+            ($1, $2, $3, $4, $5, $6,
+             $7, $8, $9, $10, $11, $12, $13)
+          RETURNING id;
+          `;
+        }
+
+        const insert = await client.query(insertSql, insertParams);
         bookingId = insert.rows[0].id;
       } catch (err) {
         if (idemKey && err && err.code === "23505") {
