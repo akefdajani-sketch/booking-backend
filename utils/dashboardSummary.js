@@ -331,11 +331,10 @@ async function getDashboardSummary({ tenantId, tenantSlug, mode, dateStr }) {
   const insights = [];
 
   // Config health rules
-  const [servicesCount, staffCount, resourcesCount] = await Promise.all([
-    countTableRows("services", tenantId),
-    countTableRows("staff", tenantId),
-    countTableRows("resources", tenantId),
-  ]);
+  // NOTE: staffCount and resourceCount were already computed above for utilization.
+  // Avoid redeclaring them here (Render deploy was failing with "Identifier ... has already been declared").
+  const servicesCount = await countTableRows("services", tenantId);
+  const resourcesCount = resourceCount;
 
   const whSet = await tenantHasWorkingHours(tenantId);
   if (whSet === false) {
