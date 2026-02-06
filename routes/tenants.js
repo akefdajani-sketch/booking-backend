@@ -11,6 +11,7 @@ const { requireTenant } = require("../middleware/requireTenant");
 const { upload, uploadErrorHandler } = require("../middleware/upload");
 const { uploadFileToR2, deleteFromR2, safeName } = require("../utils/r2");
 const { validateTenantPublish } = require("../utils/publish");
+const { getDashboardSummary } = require("../utils/dashboardSummary");
 
 const fs = require("fs/promises");
 
@@ -916,6 +917,31 @@ router.get("/by-slug/:slug", async (req, res) => {
   } catch (err) {
     console.error("Error loading tenant by slug:", err);
     return res.status(500).json({ error: "Failed to load tenant" });
+  }
+});
+
+// -----------------------------------------------------------------------------
+// GET /api/tenants/by-slug/:slug/dashboard-summary
+// Admin/Owner: dashboard summary for owner/[slug] Dashboard tab
+// Auth: requireAdmin (x-api-key)
+// -----------------------------------------------------------------------------
+router.get("/by-slug/:slug/dashboard-summary", requireAdmin, async (req, res) => {
+  try {
+    const slug = String(req.params.slug || "").trim();
+    if (!slug) return res.status(400).json({ error: "Missing slug" });
+
+    const t = await db.query(`SELECT id FROM tenants WHERE slug=$1 LIMIT 1`, [slug]);
+    if (!t.rows?.length) return res.status(404).json({ error: "Tenant not found" });
+    const tenantId = Number(t.rows[0].id);
+
+    const mode = String(req.query.mode || "day").toLowerCase().trim();
+    const dateStr = String(req.query.date || "");
+
+    const payload = await getDashboardSummary({ tenantId, tenantSlug: slug, mode, dateStr });
+    return res.json(payload);
+  } catch (err) {
+    console.error("admin tenant dashboard summary error:", err);
+    return res.status(500).json({ error: "Failed to load dashboard summary." });
   }
 });
 
