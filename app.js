@@ -21,6 +21,7 @@ const tenantUsersRouter = require("./routes/tenantUsers");
 const invitesRouter = require("./routes/invites");
 const tenantPlanRouter = require("./routes/tenantPlan");
 const tenantDashboardRouter = require("./routes/tenantDashboard");
+const tenantStaffScheduleRouter = require("./routes/tenantStaffSchedule");
 
 const uploadsRouter = require("./routes/uploads");
 
@@ -62,6 +63,7 @@ app.use("/api/customer-memberships", customerMembershipsRouter);
 app.use("/api/tenant", tenantUsersRouter);
 app.use("/api/tenant", tenantPlanRouter);
 app.use("/api/tenant", tenantDashboardRouter);
+app.use("/api/tenant", tenantStaffScheduleRouter);
 app.use("/api/invites", invitesRouter);
 
 // uploads

@@ -22,6 +22,56 @@ function minutesToHHMM(total) {
   return `${pad2(h)}:${pad2(m)}`;
 }
 
+async function loadEffectiveStaffBlocks({ tenantId, staffId, dateISO, weekday }) {
+  // Returns array of { start_minute, end_minute } in local minutes.
+  // Override precedence:
+  // 1) Any OFF on date => []
+  // 2) If CUSTOM_HOURS exists => use ONLY custom blocks
+  // 3) Else weekly blocks + ADD_HOURS blocks
+  try {
+    const overrides = await pool.query(
+      `
+      SELECT type, start_minute, end_minute
+      FROM staff_schedule_overrides
+      WHERE tenant_id = $1 AND staff_id = $2 AND date = $3::date
+      `,
+      [tenantId, staffId, dateISO]
+    );
+
+    const rows = overrides.rows || [];
+    if (rows.some((r) => String(r.type || "").toUpperCase() === "OFF")) return [];
+
+    const custom = rows.filter((r) => String(r.type || "").toUpperCase() === "CUSTOM_HOURS");
+    const add = rows.filter((r) => String(r.type || "").toUpperCase() === "ADD_HOURS");
+
+    if (custom.length) {
+      return custom
+        .map((r) => ({ start_minute: Number(r.start_minute), end_minute: Number(r.end_minute) }))
+        .filter((b) => Number.isFinite(b.start_minute) && Number.isFinite(b.end_minute));
+    }
+
+    const weekly = await pool.query(
+      `
+      SELECT start_minute, end_minute
+      FROM staff_schedules
+      WHERE tenant_id = $1 AND staff_id = $2 AND weekday = $3
+      ORDER BY start_minute ASC
+      `,
+      [tenantId, staffId, weekday]
+    );
+
+    return [...(weekly.rows || []), ...add]
+      .map((r) => ({ start_minute: Number(r.start_minute), end_minute: Number(r.end_minute) }))
+      .filter((b) => Number.isFinite(b.start_minute) && Number.isFinite(b.end_minute));
+  } catch (err) {
+    // If tables aren't present yet (migration not applied), keep behavior unchanged.
+    // e.g., undefined_table = 42P01
+    if (err && err.code === "42P01") return null;
+    console.error("loadEffectiveStaffBlocks error:", err);
+    return null;
+  }
+}
+
 // Accept YYYY-MM-DD (preferred). If a locale date slips through (MM/DD/YYYY),
 // normalize it to YYYY-MM-DD so day-of-week + DB queries work reliably.
 function normalizeDateInput(raw) {
@@ -316,6 +366,55 @@ let cursor = openMin;
 // Performance: avoid per-slot DB queries.
 // Query overlaps for the whole window in one SQL call using generate_series.
 
+// Staff schedule constraint (PR-S1)
+let staffBlocks = null;
+let staffWindowTrimmed = false;
+if (availabilityBasis === "staff" || availabilityBasis === "both") {
+  staffBlocks = await loadEffectiveStaffBlocks({
+    tenantId,
+    staffId,
+    dateISO: date,
+    weekday: dayOfWeek,
+  });
+  // If migration not applied yet => staffBlocks is null, preserve old behavior.
+  if (Array.isArray(staffBlocks)) {
+    // v1: staff blocks are same-day only; if tenant hours are overnight, trim to same-day.
+    if (isOvernight) {
+      staffWindowTrimmed = true;
+      closeMin = 24 * 60;
+    }
+    // Intersect staff blocks with tenant open/close window
+    staffBlocks = staffBlocks
+      .map((b) => {
+        const s = Math.max(openMin, Number(b.start_minute));
+        const e = Math.min(closeMin, Number(b.end_minute));
+        return { start_minute: s, end_minute: e };
+      })
+      .filter((b) => Number.isFinite(b.start_minute) && Number.isFinite(b.end_minute) && b.end_minute > b.start_minute);
+
+    if (!staffBlocks.length) {
+      return res.json({
+        tenantId,
+        tenantSlug: tenantSlug ?? null,
+        date,
+        times: [],
+        slots: [],
+        meta: {
+          duration_minutes: durationMin,
+          slot_interval_minutes: stepMin,
+          max_parallel_bookings: maxParallel,
+          requires_staff: reqStaff,
+          requires_resource: reqResource,
+          availability_basis: availabilityBasis,
+          derived_basis: derivedBasis,
+          reason: "staff_unavailable",
+          staff_window_trimmed: staffWindowTrimmed,
+        },
+      });
+    }
+  }
+}
+
 const windowStartLocal = `${date} ${openHHMM}:00`;
 const windowEndLocal = `${addDaysISO(date, isOvernight ? 1 : 0)} ${closeHHMM}:00`;
 
@@ -365,48 +464,115 @@ if (availabilityBasis === "none") {
     if (blackoutHits === 0) availableTimes.push(startHHMM);
   }
 } else {
-  const q = `
-    WITH slots AS (
-      SELECT
-        gs AS slot_start,
-        gs + make_interval(mins => $5) AS slot_end
-      FROM generate_series(
-        ($1::timestamp AT TIME ZONE $4),
-        ($2::timestamp AT TIME ZONE $4) - make_interval(mins => $5),
-        make_interval(mins => $5)
-      ) gs
-    )
-    SELECT
-      to_char(slot_start AT TIME ZONE $4, 'HH24:MI') AS time,
-      COUNT(b.*) FILTER (WHERE $6 IN ('resource','both') AND b.resource_id = $7)::int AS overlaps_resource,
-      COUNT(b.*) FILTER (WHERE $6 IN ('staff','both') AND b.staff_id = $8)::int AS overlaps_staff,
-      COUNT(tb.*)::int AS blackout_hits
-    FROM slots
-    LEFT JOIN bookings b
-      ON b.tenant_id = $3
-     AND b.status IN ('pending','confirmed')
-     AND b.booking_range && tstzrange(slot_start, slot_end, '[)')
-    LEFT JOIN tenant_blackouts tb
-      ON tb.tenant_id = $3
-     AND tb.is_active = TRUE
-     AND tstzrange(tb.starts_at, tb.ends_at, '[)') && tstzrange(slot_start, slot_end, '[)')
-     AND (
-       tb.resource_id IS NULL OR tb.resource_id = $7
-     )
-    GROUP BY slot_start
-    ORDER BY slot_start;
-  `;
+  let q;
+  let params;
 
-  const r = await pool.query(q, [
-    windowStartLocal,
-    windowEndLocal,
-    tenantId,
-    tenantTz,
-    stepMin,
-    availabilityBasis,
-    resourceId ?? null,
-    staffId ?? null,
-  ]);
+  const useStaffBlocks = Array.isArray(staffBlocks) && (availabilityBasis === "staff" || availabilityBasis === "both");
+
+  if (useStaffBlocks) {
+    // Build working blocks as local timestamps, then generate slots per block.
+    const values = [];
+    params = [tenantTz];
+    let p = params.length + 1;
+
+    for (const b of staffBlocks) {
+      const s = minutesToHHMM(Number(b.start_minute));
+      const e = minutesToHHMM(Number(b.end_minute));
+      params.push(`${date} ${s}:00`);
+      params.push(`${date} ${e}:00`);
+      values.push(`(($${p++})::timestamp, ($${p++})::timestamp)`);
+    }
+
+    // After blocks, append rest of params in the same order as query expects.
+    const tzIdx = 1;
+    const tenantIdIdx = p++;
+    const stepIdx = p++;
+    const basisIdx = p++;
+    const resourceIdx = p++;
+    const staffIdx = p++;
+
+    params.push(tenantId, stepMin, availabilityBasis, resourceId ?? null, staffId ?? null);
+
+    q = `
+      WITH working_blocks(start_local, end_local) AS (
+        VALUES ${values.join(",")}
+      ),
+      slots AS (
+        SELECT
+          gs AS slot_start,
+          gs + make_interval(mins => $${stepIdx}) AS slot_end
+        FROM working_blocks wb
+        CROSS JOIN LATERAL generate_series(
+          (wb.start_local AT TIME ZONE $${tzIdx}),
+          (wb.end_local   AT TIME ZONE $${tzIdx}) - make_interval(mins => $${stepIdx}),
+          make_interval(mins => $${stepIdx})
+        ) gs
+      )
+      SELECT
+        to_char(slot_start AT TIME ZONE $${tzIdx}, 'HH24:MI') AS time,
+        COUNT(b.*) FILTER (WHERE $${basisIdx} IN ('resource','both') AND b.resource_id = $${resourceIdx})::int AS overlaps_resource,
+        COUNT(b.*) FILTER (WHERE $${basisIdx} IN ('staff','both') AND b.staff_id = $${staffIdx})::int AS overlaps_staff,
+        COUNT(tb.*)::int AS blackout_hits
+      FROM slots
+      LEFT JOIN bookings b
+        ON b.tenant_id = $${tenantIdIdx}
+       AND b.status IN ('pending','confirmed')
+       AND b.booking_range && tstzrange(slot_start, slot_end, '[)')
+      LEFT JOIN tenant_blackouts tb
+        ON tb.tenant_id = $${tenantIdIdx}
+       AND tb.is_active = TRUE
+       AND tstzrange(tb.starts_at, tb.ends_at, '[)') && tstzrange(slot_start, slot_end, '[)')
+       AND (
+         tb.resource_id IS NULL OR tb.resource_id = $${resourceIdx}
+       )
+      GROUP BY slot_start
+      ORDER BY slot_start;
+    `;
+  } else {
+    q = `
+      WITH slots AS (
+        SELECT
+          gs AS slot_start,
+          gs + make_interval(mins => $5) AS slot_end
+        FROM generate_series(
+          ($1::timestamp AT TIME ZONE $4),
+          ($2::timestamp AT TIME ZONE $4) - make_interval(mins => $5),
+          make_interval(mins => $5)
+        ) gs
+      )
+      SELECT
+        to_char(slot_start AT TIME ZONE $4, 'HH24:MI') AS time,
+        COUNT(b.*) FILTER (WHERE $6 IN ('resource','both') AND b.resource_id = $7)::int AS overlaps_resource,
+        COUNT(b.*) FILTER (WHERE $6 IN ('staff','both') AND b.staff_id = $8)::int AS overlaps_staff,
+        COUNT(tb.*)::int AS blackout_hits
+      FROM slots
+      LEFT JOIN bookings b
+        ON b.tenant_id = $3
+       AND b.status IN ('pending','confirmed')
+       AND b.booking_range && tstzrange(slot_start, slot_end, '[)')
+      LEFT JOIN tenant_blackouts tb
+        ON tb.tenant_id = $3
+       AND tb.is_active = TRUE
+       AND tstzrange(tb.starts_at, tb.ends_at, '[)') && tstzrange(slot_start, slot_end, '[)')
+       AND (
+         tb.resource_id IS NULL OR tb.resource_id = $7
+       )
+      GROUP BY slot_start
+      ORDER BY slot_start;
+    `;
+    params = [
+      windowStartLocal,
+      windowEndLocal,
+      tenantId,
+      tenantTz,
+      stepMin,
+      availabilityBasis,
+      resourceId ?? null,
+      staffId ?? null,
+    ];
+  }
+
+  const r = await pool.query(q, params);
 
   for (const row of r.rows) {
     const startHHMM = row.time;
