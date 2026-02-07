@@ -31,7 +31,10 @@ async function loadEffectiveStaffBlocks({ tenantId, staffId, dateISO, weekday })
   try {
     const overrides = await pool.query(
       `
-      SELECT type, start_minute, end_minute
+      SELECT
+        type,
+        CASE WHEN start_time IS NULL THEN NULL ELSE (EXTRACT(HOUR FROM start_time)::int * 60 + EXTRACT(MINUTE FROM start_time)::int) END AS start_minute,
+        CASE WHEN end_time IS NULL THEN NULL ELSE (EXTRACT(HOUR FROM end_time)::int * 60 + EXTRACT(MINUTE FROM end_time)::int) END AS end_minute
       FROM staff_schedule_overrides
       WHERE tenant_id = $1 AND staff_id = $2 AND date = $3::date
       `,
@@ -52,10 +55,17 @@ async function loadEffectiveStaffBlocks({ tenantId, staffId, dateISO, weekday })
 
     const weekly = await pool.query(
       `
-      SELECT start_minute, end_minute
-      FROM staff_schedules
-      WHERE tenant_id = $1 AND staff_id = $2 AND weekday = $3
-      ORDER BY start_minute ASC
+      SELECT
+        (EXTRACT(HOUR FROM start_time)::int * 60 + EXTRACT(MINUTE FROM start_time)::int) AS start_minute,
+        (EXTRACT(HOUR FROM end_time)::int * 60 + EXTRACT(MINUTE FROM end_time)::int) AS end_minute
+      FROM staff_weekly_schedule
+      WHERE tenant_id = $1
+        AND staff_id = $2
+        AND day_of_week = $3
+        AND COALESCE(is_off, false) = false
+        AND start_time IS NOT NULL
+        AND end_time IS NOT NULL
+      ORDER BY start_time ASC
       `,
       [tenantId, staffId, weekday]
     );
