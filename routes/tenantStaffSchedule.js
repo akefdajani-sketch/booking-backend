@@ -58,7 +58,7 @@ function staffScheduleUser(req, res, next) {
 
 function staffScheduleRole(req, res, next) {
   if (isAdminRequest(req)) return next();
-  return requireTenantRole(["owner", "manager"])(req, res, next);
+  return requireTenantRole("manager")(req, res, next);
 }
 
 async function resolveTenantIdFromParam(req, res, next) {
@@ -145,7 +145,7 @@ function maybeEnsureUser(req, res, next) {
   return ensureUser(req, res, next);
 }
 
-const requireManagerRole = requireTenantRole(["owner", "manager"]);
+const requireManagerRole = requireTenantRole("manager");
 function maybeRequireManagerRole(req, res, next) {
   if (isAdminRequest(req)) return next();
   return requireManagerRole(req, res, next);
