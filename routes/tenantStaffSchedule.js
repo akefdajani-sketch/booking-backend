@@ -387,10 +387,15 @@ router.get(
       );
 
       return res.json({ staffId, overrides: r.rows || [] });
-    } catch (err) {
-      console.error("GET staff overrides error:", err);
-      return res.status(500).json({ error: "Failed to load overrides." });
-    }
+	    } catch (err) {
+	      // If the overrides table hasn't been migrated yet, don't hard-fail the UI.
+	      // Return an empty list so schedules can still be edited.
+	      if (err && err.code === "42P01") {
+	        return res.json({ staffId: asInt(req.params.staffId), overrides: [], warning: "overrides_table_missing" });
+	      }
+	      console.error("GET staff overrides error:", err);
+	      return res.status(500).json({ error: "Failed to load overrides." });
+	    }
   }
 );
 
@@ -458,12 +463,18 @@ router.post(
       );
 
       return res.status(201).json({ staffId, override: r.rows[0] });
-    } catch (err) {
-      const mapped = normalizePgConflict(err);
-      if (mapped) return res.status(mapped.status).json(mapped.body);
-      console.error("POST staff override error:", err);
-      return res.status(500).json({ error: "Failed to create override." });
-    }
+	    } catch (err) {
+	      if (err && err.code === "42P01") {
+	        return res.status(409).json({
+	          error: "Overrides table missing. Run the PR-S1 migration to enable exceptions.",
+	          code: "overrides_table_missing",
+	        });
+	      }
+	      const mapped = normalizePgConflict(err);
+	      if (mapped) return res.status(mapped.status).json(mapped.body);
+	      console.error("POST staff override error:", err);
+	      return res.status(500).json({ error: "Failed to create override." });
+	    }
   }
 );
 
@@ -497,10 +508,16 @@ router.delete(
 
       if (!r.rows?.length) return res.status(404).json({ error: "Override not found." });
       return res.status(204).send();
-    } catch (err) {
-      console.error("DELETE staff override error:", err);
-      return res.status(500).json({ error: "Failed to delete override." });
-    }
+	    } catch (err) {
+	      if (err && err.code === "42P01") {
+	        return res.status(409).json({
+	          error: "Overrides table missing. Run the PR-S1 migration to enable exceptions.",
+	          code: "overrides_table_missing",
+	        });
+	      }
+	      console.error("DELETE staff override error:", err);
+	      return res.status(500).json({ error: "Failed to delete override." });
+	    }
   }
 );
 
