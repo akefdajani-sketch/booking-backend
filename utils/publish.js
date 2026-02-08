@@ -91,7 +91,13 @@ async function validateTenantPublish(db, tenantId) {
       AND COALESCE(is_closed, FALSE) = FALSE
       AND open_time IS NOT NULL
       AND close_time IS NOT NULL
-      AND open_time < close_time
+      -- allow same-day and overnight hours (e.g. 10:00 -> 00:00 or 18:00 -> 02:00)
+      AND (
+        open_time < close_time
+        OR close_time = '00:00'::time
+        OR open_time > close_time
+        OR open_time = close_time
+      )
     `,
     [tid]
   );

@@ -111,7 +111,13 @@ async function computeOnboardingSnapshot(tenantId) {
       AND COALESCE(is_closed, FALSE) = FALSE
       AND open_time IS NOT NULL
       AND close_time IS NOT NULL
-      AND open_time < close_time
+      -- allow same-day and overnight hours (e.g. 10:00 -> 00:00 or 18:00 -> 02:00)
+      AND (
+        open_time < close_time
+        OR close_time = '00:00'::time
+        OR open_time > close_time
+        OR open_time = close_time
+      )
     `,
     [tid]
   );
@@ -1114,8 +1120,10 @@ router.patch("/:id/theme-key", requireAdmin, async (req, res) => {
     const themeKey = String(req.body?.theme_key || "").trim();
     if (!themeKey) return res.status(400).json({ error: "theme_key is required" });
 
-    // Ensure theme exists and is published (or allow default_v1 even if missing).
-    if (themeKey !== "default_v1") {
+    // Ensure theme exists and is published.
+    // Allow built-in theme keys even if platform_themes hasn't been seeded yet.
+    const BUILTIN_THEME_KEYS = new Set(["default_v1", "classic", "premium", "premium_light"]);
+    if (!BUILTIN_THEME_KEYS.has(themeKey)) {
       const th = await db.query(
         "SELECT key FROM platform_themes WHERE key = $1 AND is_published = TRUE LIMIT 1",
         [themeKey]
