@@ -92,11 +92,14 @@ router.get(
     const role = req.tenantRole;
     const can = {
       bookings_read: true,
-      bookings_write: role === "owner" || role === "manager",
+      // Operational actions (staff can create/manage bookings and customers)
+      bookings_write: role === "owner" || role === "manager" || role === "staff",
       customers_read: true,
-      customers_write: role === "owner" || role === "manager",
+      customers_write: role === "owner" || role === "manager" || role === "staff",
+      // Setup & configuration: keep delegated to owner/manager only
       setup_write: role === "owner" || role === "manager",
-      appearance_write: role === "owner" || role === "manager",
+      // Theme Studio / Appearance: owner only (employees cannot access)
+      appearance_write: role === "owner",
       plan_billing_write: role === "owner",
       users_roles_write: role === "owner",
     };
