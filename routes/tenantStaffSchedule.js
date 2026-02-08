@@ -104,13 +104,38 @@ function normalizePgConflict(err) {
       },
     };
   }
-  // Unique violation (duplicate override block) is 23505
+  // Unique violation is 23505
   if (err && err.code === "23505") {
+    const table = String(err.table || "");
+    const constraint = String(err.constraint || "");
+
+    // Weekly schedule duplicates
+    if (table === "staff_weekly_schedule" || constraint.includes("staff_weekly_schedule")) {
+      return {
+        status: 409,
+        body: {
+          error: "DUPLICATE_SCHEDULE_BLOCK",
+          message: "A time block with the same values already exists.",
+        },
+      };
+    }
+
+    // Overrides duplicates
+    if (table === "staff_schedule_overrides" || constraint.includes("staff_schedule_overrides")) {
+      return {
+        status: 409,
+        body: {
+          error: "DUPLICATE_OVERRIDE",
+          message: "An override with the same values already exists.",
+        },
+      };
+    }
+
     return {
       status: 409,
       body: {
-        error: "DUPLICATE_OVERRIDE",
-        message: "An override with the same values already exists.",
+        error: "DUPLICATE_RECORD",
+        message: "A record with the same values already exists.",
       },
     };
   }
