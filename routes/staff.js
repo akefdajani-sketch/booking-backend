@@ -4,7 +4,26 @@ const router = express.Router();
 const { pool } = require("../db");
 const db = pool;
 
-const requireAdmin = require("../middleware/requireAdmin");
+async function resolveTenantFromStaffId(req, res, next) {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id) || id <= 0) {
+      return res.status(400).json({ error: "Invalid staff id" });
+    }
+    const { rows } = await db.query("SELECT tenant_id FROM staff WHERE id = $1", [id]);
+    if (!rows[0]) return res.status(404).json({ error: "not found" });
+    req.tenantId = Number(rows[0].tenant_id);
+    req.body = req.body || {};
+    req.body.tenantId = req.body.tenantId || req.tenantId;
+    return next();
+  } catch (e) {
+    console.error("resolveTenantFromStaffId error:", e);
+    return res.status(500).json({ error: "Failed to resolve tenant." });
+  }
+}
+
+const requireAdminOrTenantRole = require("../middleware/requireAdminOrTenantRole");
+const { requireTenant } = require("../middleware/requireTenant");
 const { assertWithinPlanLimit } = require("../utils/planEnforcement");
 const requireGoogleAuth = require("../middleware/requireGoogleAuth");
 const { upload, uploadErrorHandler } = require("../middleware/upload");
@@ -55,7 +74,7 @@ router.get("/", async (req, res) => {
 // ---------------------------------------------------------------------------
 // POST /api/staff (admin-only create)
 // ---------------------------------------------------------------------------
-router.post("/", requireAdmin, async (req, res) => {
+router.post("/", requireTenant, requireAdminOrTenantRole("manager"), async (req, res) => {
   try {
     // Frontend uses: { tenant_id, name, role, is_active }
     // Legacy support: some older clients used `title` instead of `role`.
@@ -101,7 +120,7 @@ router.post("/", requireAdmin, async (req, res) => {
 // DELETE /api/staff/:id (admin-only delete)
 // If blocked by FK (e.g. existing bookings), we soft-disable instead of hard delete.
 // ---------------------------------------------------------------------------
-router.delete("/:id", requireAdmin, async (req, res) => {
+router.delete("/:id", resolveTenantFromStaffId, requireAdminOrTenantRole("manager"), async (req, res) => {
   try {
     const id = Number(req.params.id);
 
@@ -135,7 +154,8 @@ router.delete("/:id", requireAdmin, async (req, res) => {
 // ---------------------------------------------------------------------------
 router.post(
   "/:id/image",
-  requireAdmin,
+  resolveTenantFromStaffId,
+  requireAdminOrTenantRole("manager"),
   upload.single("file"),
   uploadErrorHandler,
   async (req, res) => {
@@ -191,7 +211,7 @@ router.post(
 // DELETE /api/staff/:id/image (admin-only)
 // Clears avatar_url + image_url. (R2 deletion is best-effort and depends on stored keys.)
 // ---------------------------------------------------------------------------
-router.delete("/:id/image", requireAdmin, async (req, res) => {
+router.delete("/:id/image", resolveTenantFromStaffId, requireAdminOrTenantRole("manager"), async (req, res) => {
   try {
     const id = Number(req.params.id);
     if (!Number.isFinite(id) || id <= 0) {

@@ -4,7 +4,7 @@ const router = express.Router();
 const { pool } = require("../db");
 const db = pool;
 
-const requireAdmin = require("../middleware/requireAdmin");
+const requireAdminOrTenantRole = require("../middleware/requireAdminOrTenantRole");
 const requireGoogleAuth = require("../middleware/requireGoogleAuth");
 const { requireTenant } = require("../middleware/requireTenant");
 
@@ -57,7 +57,7 @@ function safeIntExpr(sql) {
 // ADMIN: GET /api/customers/search?tenantSlug|tenantId&q=&limit=
 // Lightweight search endpoint for autocomplete.
 // ------------------------------------------------------------
-router.get("/search", requireAdmin, requireTenant, async (req, res) => {
+router.get("/search", requireAdminOrTenantRole("staff"), requireTenant, async (req, res) => {
   try {
     const tenantId = req.tenantId;
     const q = req.query.q ? String(req.query.q).trim() : "";
@@ -95,7 +95,7 @@ router.get("/search", requireAdmin, requireTenant, async (req, res) => {
 // ADMIN: GET /api/customers?tenantSlug|tenantId&q=
 // P1: tenant is REQUIRED.
 // ------------------------------------------------------------
-router.get("/", requireAdmin, requireTenant, async (req, res) => {
+router.get("/", requireAdminOrTenantRole("staff"), requireTenant, async (req, res) => {
   try {
     const tenantId = req.tenantId;
     const q = req.query.q ? String(req.query.q).trim() : "";
@@ -836,7 +836,7 @@ router.post("/me/memberships/subscribe", requireGoogleAuth, requireTenant, async
   }
 });
 
-router.post("/", requireAdmin, async (req, res) => {
+router.post("/", requireTenant, requireAdminOrTenantRole("staff"), async (req, res) => {
   try {
     const { tenantSlug, tenantId, name, phone, email, notes } = req.body || {};
     if (!name || !String(name).trim()) {

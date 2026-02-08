@@ -11,7 +11,8 @@ const router = express.Router();
 const { pool } = require("../db");
 const db = pool;
 
-const requireAdmin = require("../middleware/requireAdmin");
+const requireAdminOrTenantRole = require("../middleware/requireAdminOrTenantRole");
+const { requireTenant } = require("../middleware/requireTenant");
 const { getTenantIdFromSlug } = require("../utils/tenants");
 
 async function resolveTenantIdFromQuery(query) {
@@ -104,7 +105,7 @@ router.get("/", async (req, res) => {
 });
 
 // POST create
-router.post("/", requireAdmin, async (req, res) => {
+router.post("/", requireTenant, requireAdminOrTenantRole("manager"), async (req, res) => {
   try {
     const body = req.body || {};
 
@@ -202,7 +203,7 @@ router.post("/", requireAdmin, async (req, res) => {
 });
 
 // PUT update
-router.put("/:id", requireAdmin, async (req, res) => {
+router.put("/:id", requireTenant, requireAdminOrTenantRole("manager"), async (req, res) => {
   try {
     const id = Number(req.params.id);
     if (!Number.isFinite(id) || id <= 0) return res.status(400).json({ error: "Invalid id." });
@@ -297,7 +298,7 @@ router.put("/:id", requireAdmin, async (req, res) => {
 });
 
 // DELETE (soft)
-router.delete("/:id", requireAdmin, async (req, res) => {
+router.delete("/:id", requireTenant, requireAdminOrTenantRole("manager"), async (req, res) => {
   try {
     const id = Number(req.params.id);
     if (!Number.isFinite(id) || id <= 0) return res.status(400).json({ error: "Invalid id." });

@@ -78,8 +78,21 @@ function summarizeDiff(changes) {
 
 
 const db = require("../db");
-const requireAdmin = require("../middleware/requireAdmin");
+const requireAdminOrTenantRole = require("../middleware/requireAdminOrTenantRole");
 const { getPlanSummaryForTenant } = require("../utils/planEnforcement");
+
+function setTenantIdFromParam(req, res, next) {
+  const tid = Number(req.params.tenantId);
+  if (!Number.isFinite(tid) || tid <= 0) {
+    return res.status(400).json({ error: "Invalid tenantId" });
+  }
+  req.tenantId = tid;
+  req.body = req.body || {};
+  // Some middlewares look for tenantId/tenant_id in body.
+  req.body.tenantId = req.body.tenantId || tid;
+  req.body.tenant_id = req.body.tenant_id || tid;
+  return next();
+}
 
 // -----------------------------------------------------------------------------
 // Schema hardening (idempotent)
@@ -162,7 +175,7 @@ function parseJsonBody(req) {
 // - branding (draft + published + timestamps)
 // - theme_schema (draft + published + timestamps)
 // -----------------------------------------------------------------------------
-router.get("/:tenantId/appearance", requireAdmin, async (req, res) => {
+router.get("/:tenantId/appearance", setTenantIdFromParam, requireAdminOrTenantRole("owner"), async (req, res) => {
   try {
     const tenantId = Number(req.params.tenantId);
     if (!Number.isFinite(tenantId) || tenantId <= 0) {
@@ -222,7 +235,7 @@ router.get("/:tenantId/appearance", requireAdmin, async (req, res) => {
  */
 // Diff viewer endpoint: compare published vs draft for branding + theme_schema
 // Returns normalized { diff: { counts, changes } } per section, with truncation safety.
-router.get("/:tenantId/appearance/diff", requireAdmin, async (req, res) => {
+router.get("/:tenantId/appearance/diff", setTenantIdFromParam, requireAdminOrTenantRole("owner"), async (req, res) => {
   try {
     const tenantId = Number(req.params.tenantId);
     if (!Number.isFinite(tenantId) || tenantId <= 0) {
@@ -303,7 +316,7 @@ router.get("/:tenantId/appearance/diff", requireAdmin, async (req, res) => {
   }
 });
 
-router.post("/:tenantId/appearance/reset-to-inherit", requireAdmin, async (req, res) => {
+router.post("/:tenantId/appearance/reset-to-inherit", setTenantIdFromParam, requireAdminOrTenantRole("owner"), async (req, res) => {
   try {
     const tenantId = Number(req.params.tenantId);
     if (!Number.isFinite(tenantId) || tenantId <= 0) {
@@ -356,7 +369,7 @@ router.post("/:tenantId/appearance/reset-to-inherit", requireAdmin, async (req, 
 });
 
 
-router.post("/:tenantId/theme-key", requireAdmin, async (req, res) => {
+router.post("/:tenantId/theme-key", setTenantIdFromParam, requireAdminOrTenantRole("owner"), async (req, res) => {
   try {
     const tenantId = Number(req.params.tenantId);
     if (!Number.isFinite(tenantId) || tenantId <= 0) {
@@ -388,7 +401,7 @@ router.post("/:tenantId/theme-key", requireAdmin, async (req, res) => {
 // -----------------------------------------------------------------------------
 // Theme schema (existing endpoints, kept stable)
 // -----------------------------------------------------------------------------
-router.get("/:tenantId/theme-schema", requireAdmin, async (req, res) => {
+router.get("/:tenantId/theme-schema", setTenantIdFromParam, requireAdminOrTenantRole("owner"), async (req, res) => {
   const tenantId = Number(req.params.tenantId);
   if (!tenantId) return res.status(400).json({ error: "Invalid tenantId" });
 
@@ -416,7 +429,7 @@ router.get("/:tenantId/theme-schema", requireAdmin, async (req, res) => {
   });
 });
 
-router.post("/:tenantId/theme-schema/save-draft", requireAdmin, async (req, res) => {
+router.post("/:tenantId/theme-schema/save-draft", setTenantIdFromParam, requireAdminOrTenantRole("owner"), async (req, res) => {
   const tenantId = Number(req.params.tenantId);
   if (!tenantId) return res.status(400).json({ error: "Invalid tenantId" });
 
@@ -438,7 +451,7 @@ router.post("/:tenantId/theme-schema/save-draft", requireAdmin, async (req, res)
   res.json({ ok: true });
 });
 
-router.post("/:tenantId/theme-schema/publish", requireAdmin, async (req, res) => {
+router.post("/:tenantId/theme-schema/publish", setTenantIdFromParam, requireAdminOrTenantRole("owner"), async (req, res) => {
   const tenantId = Number(req.params.tenantId);
   if (!tenantId) return res.status(400).json({ error: "Invalid tenantId" });
 
@@ -479,7 +492,7 @@ router.post("/:tenantId/theme-schema/publish", requireAdmin, async (req, res) =>
   res.json({ ok: true, published_at: rows[0].theme_schema_published_at });
 });
 
-router.post("/:tenantId/theme-schema/rollback", requireAdmin, async (req, res) => {
+router.post("/:tenantId/theme-schema/rollback", setTenantIdFromParam, requireAdminOrTenantRole("owner"), async (req, res) => {
   const tenantId = Number(req.params.tenantId);
   if (!tenantId) return res.status(400).json({ error: "Invalid tenantId" });
 
@@ -503,7 +516,7 @@ router.post("/:tenantId/theme-schema/rollback", requireAdmin, async (req, res) =
   res.json({ ok: true });
 });
 
-router.get("/:tenantId/theme-schema/changelog", requireAdmin, async (req, res) => {
+router.get("/:tenantId/theme-schema/changelog", setTenantIdFromParam, requireAdminOrTenantRole("owner"), async (req, res) => {
   const tenantId = Number(req.params.tenantId);
   if (!tenantId) return res.status(400).json({ error: "Invalid tenantId" });
 
@@ -527,7 +540,7 @@ router.get("/:tenantId/theme-schema/changelog", requireAdmin, async (req, res) =
 // - branding_published (published snapshot)
 // - publish_status ("draft"|"published")
 // -----------------------------------------------------------------------------
-router.get("/:tenantId/branding", requireAdmin, async (req, res) => {
+router.get("/:tenantId/branding", setTenantIdFromParam, requireAdminOrTenantRole("owner"), async (req, res) => {
   try {
     const tenantId = Number(req.params.tenantId);
     if (!Number.isFinite(tenantId) || tenantId <= 0) {
@@ -559,7 +572,7 @@ router.get("/:tenantId/branding", requireAdmin, async (req, res) => {
   }
 });
 
-router.post("/:tenantId/branding/save-draft", requireAdmin, async (req, res) => {
+router.post("/:tenantId/branding/save-draft", setTenantIdFromParam, requireAdminOrTenantRole("owner"), async (req, res) => {
   try {
     const tenantId = Number(req.params.tenantId);
     if (!Number.isFinite(tenantId) || tenantId <= 0) {
@@ -589,7 +602,7 @@ router.post("/:tenantId/branding/save-draft", requireAdmin, async (req, res) => 
   }
 });
 
-router.post("/:tenantId/branding/publish", requireAdmin, async (req, res) => {
+router.post("/:tenantId/branding/publish", setTenantIdFromParam, requireAdminOrTenantRole("owner"), async (req, res) => {
   try {
     const tenantId = Number(req.params.tenantId);
     if (!Number.isFinite(tenantId) || tenantId <= 0) {
@@ -619,7 +632,7 @@ router.post("/:tenantId/branding/publish", requireAdmin, async (req, res) => {
   }
 });
 
-router.post("/:tenantId/branding/rollback", requireAdmin, async (req, res) => {
+router.post("/:tenantId/branding/rollback", setTenantIdFromParam, requireAdminOrTenantRole("owner"), async (req, res) => {
   try {
     const tenantId = Number(req.params.tenantId);
     if (!Number.isFinite(tenantId) || tenantId <= 0) {
@@ -656,7 +669,7 @@ router.post("/:tenantId/branding/rollback", requireAdmin, async (req, res) => {
 // GET /api/admin/tenants/:tenantId/plan-summary
 // - Used by Owner/Tenant setup UI to show plan, limits, usage, and trial state.
 // ---------------------------------------------------------------------------
-router.get("/:tenantId/plan-summary", requireAdmin, async (req, res) => {
+router.get("/:tenantId/plan-summary", setTenantIdFromParam, requireAdminOrTenantRole("manager"), async (req, res) => {
   try {
     const tenantId = Number(req.params.tenantId);
     if (!Number.isFinite(tenantId) || tenantId <= 0) {

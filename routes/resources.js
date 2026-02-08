@@ -4,7 +4,23 @@ const router = express.Router();
 const { pool } = require("../db");
 const db = pool;
 
-const requireAdmin = require("../middleware/requireAdmin");
+const requireAdminOrTenantRole = require("../middleware/requireAdminOrTenantRole");
+const { requireTenant } = require("../middleware/requireTenant");
+async function resolveTenantFromResourceId(req, res, next) {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id) || id <= 0) return res.status(400).json({ error: "invalid id" });
+    const { rows } = await db.query("SELECT tenant_id FROM resources WHERE id = $1", [id]);
+    if (!rows[0]) return res.status(404).json({ error: "not found" });
+    req.tenantId = Number(rows[0].tenant_id);
+    req.body = req.body || {};
+    req.body.tenantId = req.body.tenantId || req.tenantId;
+    return next();
+  } catch (e) {
+    console.error("resolveTenantFromResourceId error:", e);
+    return res.status(500).json({ error: "Failed to resolve tenant." });
+  }
+}
 const { assertWithinPlanLimit } = require("../utils/planEnforcement");
 const requireGoogleAuth = require("../middleware/requireGoogleAuth");
 const { upload, uploadErrorHandler } = require("../middleware/upload");
@@ -55,7 +71,7 @@ router.get("/", async (req, res) => {
 // ---------------------------------------------------------------------------
 // POST /api/resources (admin-only create)
 // ---------------------------------------------------------------------------
-router.post("/", requireAdmin, async (req, res) => {
+router.post("/", requireTenant, requireAdminOrTenantRole("manager"), async (req, res) => {
   try {
     const { tenant_id, name, type, is_active } = req.body;
 
@@ -97,7 +113,7 @@ router.post("/", requireAdmin, async (req, res) => {
 // DELETE /api/resources/:id (admin-only delete)
 // If blocked by FK (e.g. existing bookings), we soft-disable instead of hard delete.
 // ---------------------------------------------------------------------------
-router.delete("/:id", requireAdmin, async (req, res) => {
+router.delete("/:id", resolveTenantFromResourceId, requireAdminOrTenantRole("manager"), async (req, res) => {
   try {
     const id = Number(req.params.id);
 
@@ -131,7 +147,8 @@ router.delete("/:id", requireAdmin, async (req, res) => {
 // ---------------------------------------------------------------------------
 router.post(
   "/:id/image",
-  requireAdmin,
+  resolveTenantFromResourceId,
+  requireAdminOrTenantRole("manager"),
   upload.single("file"),
   uploadErrorHandler,
   async (req, res) => {
@@ -183,7 +200,7 @@ router.post(
 // DELETE /api/resources/:id/image (admin-only)
 // Clears image_url. (R2 deletion is best-effort and depends on stored keys.)
 // ---------------------------------------------------------------------------
-router.delete("/:id/image", requireAdmin, async (req, res) => {
+router.delete("/:id/image", resolveTenantFromResourceId, requireAdminOrTenantRole("manager"), async (req, res) => {
   try {
     const id = Number(req.params.id);
     if (!Number.isFinite(id) || id <= 0) {

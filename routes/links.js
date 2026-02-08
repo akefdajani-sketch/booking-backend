@@ -10,7 +10,39 @@ const router = express.Router();
 const { pool } = require("../db");
 const db = pool;
 
-const requireAdmin = require("../middleware/requireAdmin");
+const requireAdminOrTenantRole = require("../middleware/requireAdminOrTenantRole");
+const { requireTenant } = require("../middleware/requireTenant");
+async function resolveTenantFromStaffId(req, res, next) {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id) || id <= 0) return res.status(400).json({ error: "invalid id" });
+    const { rows } = await db.query("SELECT tenant_id FROM staff WHERE id = $1", [id]);
+    if (!rows[0]) return res.status(404).json({ error: "not found" });
+    req.tenantId = Number(rows[0].tenant_id);
+    req.body = req.body || {};
+    req.body.tenantId = req.body.tenantId || req.tenantId;
+    return next();
+  } catch (e) {
+    console.error("resolveTenantFromStaffId error:", e);
+    return res.status(500).json({ error: "Failed to resolve tenant" });
+  }
+}
+
+async function resolveTenantFromResourceId(req, res, next) {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id) || id <= 0) return res.status(400).json({ error: "invalid id" });
+    const { rows } = await db.query("SELECT tenant_id FROM resources WHERE id = $1", [id]);
+    if (!rows[0]) return res.status(404).json({ error: "not found" });
+    req.tenantId = Number(rows[0].tenant_id);
+    req.body = req.body || {};
+    req.body.tenantId = req.body.tenantId || req.tenantId;
+    return next();
+  } catch (e) {
+    console.error("resolveTenantFromResourceId error:", e);
+    return res.status(500).json({ error: "Failed to resolve tenant" });
+  }
+}
 const { ensureLinksSchema } = require("../utils/ensureLinksSchema");
 
 let schemaEnsured = false;
@@ -84,7 +116,7 @@ router.get("/service", async (req, res) => {
 // GET /api/links/tenant?tenantSlug=&tenantId=
 // Admin: returns the full mapping for a tenant.
 // ---------------------------------------------------------------------------
-router.get("/tenant", requireAdmin, async (req, res) => {
+router.get("/tenant", requireTenant, requireAdminOrTenantRole("manager"), async (req, res) => {
   try {
     await ensureOnce();
     const { tenantSlug, tenantId } = req.query;
@@ -116,7 +148,7 @@ router.get("/tenant", requireAdmin, async (req, res) => {
 // Admin: replace the services linked to a staff member.
 // Body: { service_ids: number[] }
 // ---------------------------------------------------------------------------
-router.post("/staff/:id/services", requireAdmin, async (req, res) => {
+router.post("/staff/:id/services", resolveTenantFromStaffId, requireAdminOrTenantRole("manager"), async (req, res) => {
   const client = await db.connect();
   try {
     await ensureOnce();
@@ -176,7 +208,7 @@ router.post("/staff/:id/services", requireAdmin, async (req, res) => {
 // Admin: replace the services linked to a resource.
 // Body: { service_ids: number[] }
 // ---------------------------------------------------------------------------
-router.post("/resource/:id/services", requireAdmin, async (req, res) => {
+router.post("/resource/:id/services", resolveTenantFromResourceId, requireAdminOrTenantRole("manager"), async (req, res) => {
   const client = await db.connect();
   try {
     await ensureOnce();

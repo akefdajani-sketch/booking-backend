@@ -3,8 +3,27 @@ const express = require("express");
 const router = express.Router();
 
 const db = require("../db");
-const requireAdmin = require("../middleware/requireAdmin");
+const requireAdminOrTenantRole = require("../middleware/requireAdminOrTenantRole");
+const { requireTenant } = require("../middleware/requireTenant");
 const { getTenantIdFromSlug } = require("../utils/tenants");
+
+async function resolveTenantFromDomainRow(req, res, next) {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id) || id <= 0) {
+      return res.status(400).json({ error: "Invalid id" });
+    }
+    const { rows } = await db.query("SELECT tenant_id FROM tenant_domains WHERE id = $1", [id]);
+    if (!rows[0]) return res.status(404).json({ error: "not found" });
+    req.tenantId = Number(rows[0].tenant_id);
+    req.body = req.body || {};
+    req.body.tenantId = req.body.tenantId || req.tenantId;
+    return next();
+  } catch (e) {
+    console.error("resolveTenantFromDomainRow error:", e);
+    return res.status(500).json({ error: "Failed to resolve tenant." });
+  }
+}
 
 /**
  * Tenant Custom Domains (v1)
@@ -34,7 +53,7 @@ async function ensureTableExists() {
 }
 
 // Admin: list domains for a tenant
-router.get("/", requireAdmin, async (req, res) => {
+router.get("/", requireTenant, requireAdminOrTenantRole("owner"), async (req, res) => {
   try {
     if (!(await ensureTableExists())) {
       return res.status(500).json({
@@ -75,7 +94,7 @@ router.get("/", requireAdmin, async (req, res) => {
 });
 
 // Admin: add/update domain for a tenant
-router.post("/", requireAdmin, async (req, res) => {
+router.post("/", requireTenant, requireAdminOrTenantRole("owner"), async (req, res) => {
   try {
     if (!(await ensureTableExists())) {
       return res.status(500).json({
@@ -145,7 +164,7 @@ router.post("/", requireAdmin, async (req, res) => {
 });
 
 // Admin: delete domain mapping
-router.delete("/:id", requireAdmin, async (req, res) => {
+router.delete("/:id", resolveTenantFromDomainRow, requireAdminOrTenantRole("owner"), async (req, res) => {
   try {
     if (!(await ensureTableExists())) {
       return res.status(500).json({ error: "tenant_domains table missing." });

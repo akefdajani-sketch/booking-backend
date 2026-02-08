@@ -5,7 +5,26 @@ const router = express.Router();
 const { pool } = require("../db");
 const db = pool;
 
-const requireAdmin = require("../middleware/requireAdmin");
+const requireAdminOrTenantRole = require("../middleware/requireAdminOrTenantRole");
+const { requireTenant } = require("../middleware/requireTenant");
+async function resolveTenantFromServiceId(req, res, next) {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id) || id <= 0) {
+      return res.status(400).json({ error: "invalid id" });
+    }
+    const { rows } = await db.query("SELECT tenant_id FROM services WHERE id = $1", [id]);
+    if (!rows[0]) return res.status(404).json({ error: "not found" });
+    req.tenantId = Number(rows[0].tenant_id);
+    // also set body/query for any downstream helpers
+    req.body = req.body || {};
+    req.body.tenantId = req.body.tenantId || req.tenantId;
+    return next();
+  } catch (e) {
+    console.error("resolveTenantFromServiceId error:", e);
+    return res.status(500).json({ error: "Failed to resolve tenant." });
+  }
+}
 const { assertWithinPlanLimit } = require("../utils/planEnforcement");
 
 // Upload middleware (multer) + error handler
@@ -176,7 +195,7 @@ router.get("/", async (req, res) => {
 //         slot_interval_minutes, max_consecutive_slots, max_parallel_bookings,
 //         requires_staff, requires_resource, availability_basis, is_active }
 // ---------------------------------------------------------------------------
-router.post("/", requireAdmin, async (req, res) => {
+router.post("/", requireTenant, requireAdminOrTenantRole("manager"), async (req, res) => {
   try {
     const {
       tenantSlug,
@@ -302,7 +321,7 @@ router.post("/", requireAdmin, async (req, res) => {
 //                max_consecutive_slots, max_parallel_bookings,
 //                requires_staff, requires_resource, availability_basis, is_active }
 // ---------------------------------------------------------------------------
-router.patch("/:id", requireAdmin, async (req, res) => {
+router.patch("/:id", requireTenant, requireAdminOrTenantRole("manager"), async (req, res) => {
   try {
     const id = Number(req.params.id);
     if (!id) return res.status(400).json({ error: "invalid id" });
@@ -399,7 +418,7 @@ router.patch("/:id", requireAdmin, async (req, res) => {
 // DELETE /api/services/:id
 // Admin-only delete
 // ---------------------------------------------------------------------------
-router.delete("/:id", requireAdmin, async (req, res) => {
+router.delete("/:id", requireTenant, requireAdminOrTenantRole("manager"), async (req, res) => {
   try {
     const id = Number(req.params.id);
     if (!id) return res.status(400).json({ error: "invalid id" });
@@ -419,7 +438,8 @@ router.delete("/:id", requireAdmin, async (req, res) => {
 // ---------------------------------------------------------------------------
 router.post(
   "/:id/image",
-  requireAdmin,
+  resolveTenantFromServiceId,
+  requireAdminOrTenantRole("manager"),
   upload.single("file"),
   uploadErrorHandler,
   async (req, res) => {
@@ -494,7 +514,7 @@ router.post(
 // DELETE /api/services/:id/image (admin-only)
 // Clears image_url/photo_url and deletes R2 object if image_key exists.
 // ---------------------------------------------------------------------------
-router.delete("/:id/image", requireAdmin, async (req, res) => {
+router.delete("/:id/image", resolveTenantFromServiceId, requireAdminOrTenantRole("manager"), async (req, res) => {
   try {
     const id = Number(req.params.id);
     if (!id) return res.status(400).json({ error: "invalid id" });

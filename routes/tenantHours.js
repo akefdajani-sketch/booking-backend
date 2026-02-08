@@ -4,7 +4,8 @@ const router = express.Router();
 const { pool } = require("../db");
 const db = pool;
 
-const requireAdmin = require("../middleware/requireAdmin");
+const requireAdminOrTenantRole = require("../middleware/requireAdminOrTenantRole");
+const { requireTenant } = require("../middleware/requireTenant");
 const { getTenantIdFromSlug } = require("../utils/tenants");
 
 // ---------------------------------------------------------------------------
@@ -78,7 +79,7 @@ router.get("/", async (req, res) => {
 //     sat: { open: "08:00", close: "22:00", closed: false }
 //   }
 // }
-router.post("/", requireAdmin, async (req, res) => {
+router.post("/", requireTenant, requireAdminOrTenantRole("manager"), async (req, res) => {
   try {
     const body = req.body || {};
 
