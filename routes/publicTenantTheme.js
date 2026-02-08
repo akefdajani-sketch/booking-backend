@@ -28,18 +28,35 @@ router.get("/:slug", async (req, res) => {
   const tenant = t.rows[0];
   const themeKey = tenant.theme_key || "default_v1";
 
-  let th = await db.query(
-    "SELECT key, tokens_json, layout_key FROM platform_themes WHERE key = $1 AND is_published = TRUE",
-    [themeKey]
-  );
+  // Built-in theme keys that ship with the frontend layouts.
+  // These must work even if `platform_themes` rows haven't been seeded yet.
+  const BUILTIN_THEME_KEYS = new Set(["default_v1", "classic", "premium", "premium_light"]);
 
-  if (!th.rows[0]) {
-    th = await db.query(
-      "SELECT key, tokens_json, layout_key FROM platform_themes WHERE key = 'default_v1' AND is_published = TRUE"
+  let theme = null;
+
+  // 1) If it's a builtin theme, prefer DB row if published, otherwise fall back to builtin.
+  if (BUILTIN_THEME_KEYS.has(themeKey)) {
+    const th = await db.query(
+      "SELECT key, tokens_json, layout_key FROM platform_themes WHERE key = $1 AND is_published = TRUE LIMIT 1",
+      [themeKey]
     );
+    theme = th.rows[0] || { key: themeKey, tokens_json: {}, layout_key: themeKey === "default_v1" ? "classic" : themeKey };
+  } else {
+    // 2) Non-builtin themes MUST exist and be published (SaaS-grade).
+    const th = await db.query(
+      "SELECT key, tokens_json, layout_key FROM platform_themes WHERE key = $1 AND is_published = TRUE LIMIT 1",
+      [themeKey]
+    );
+    if (th.rows[0]) theme = th.rows[0];
   }
 
-  const theme = th.rows[0] || { key: "default_v1", tokens_json: {}, layout_key: "classic" };
+  // Final fallback: default_v1 if nothing else exists.
+  if (!theme) {
+    const th = await db.query(
+      "SELECT key, tokens_json, layout_key FROM platform_themes WHERE key = 'default_v1' AND is_published = TRUE LIMIT 1"
+    );
+    theme = th.rows[0] || { key: "default_v1", tokens_json: {}, layout_key: "classic" };
+  }
 
   // Cache theme payload briefly (themes change rarely, but reduce flicker + load).
   res.set("Cache-Control", "public, max-age=60, stale-while-revalidate=300");
