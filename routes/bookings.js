@@ -415,7 +415,9 @@ router.get(
 );
 
 // ADMIN: bookings list (owner dashboard)
-router.get("/", requireAdminOrTenantRole("staff"), requireTenant, async (req, res) => {
+// IMPORTANT: requireTenant must run BEFORE requireAdminOrTenantRole, because
+// requireTenantRole depends on req.tenantId and will otherwise 400 "Missing tenant context."
+router.get("/", requireTenant, requireAdminOrTenantRole("staff"), async (req, res) => {
   try {
     const tenantId = req.tenantId;
 
@@ -621,7 +623,7 @@ router.get("/", requireAdminOrTenantRole("staff"), requireTenant, async (req, re
 // (unchanged)
 // ---------------------------------------------------------------------------
 // ADMIN: bookings count (owner dashboard)
-router.get("/count", requireAdminOrTenantRole("staff"), requireTenant, async (req, res) => {
+router.get("/count", requireTenant, requireAdminOrTenantRole("staff"), async (req, res) => {
   try {
     const tenantId = req.tenantId;
 
@@ -723,7 +725,7 @@ router.get("/count", requireAdminOrTenantRole("staff"), requireTenant, async (re
 // IMPORTANT: Do NOT bump heartbeat on reads.
 // ---------------------------------------------------------------------------
 // ADMIN: booking detail (owner dashboard)
-router.get("/:id", requireAdminOrTenantRole("staff"), requireTenant, async (req, res) => {
+router.get("/:id", requireTenant, requireAdminOrTenantRole("staff"), async (req, res) => {
   try {
     const tenantId = req.tenantId;
     const bookingId = Number(req.params.id);
@@ -752,7 +754,7 @@ router.get("/:id", requireAdminOrTenantRole("staff"), requireTenant, async (req,
 // PATCH /api/bookings/:id/status?tenantSlug|tenantId=
 // ---------------------------------------------------------------------------
 // ADMIN: change booking status
-router.patch("/:id/status", requireAdminOrTenantRole("staff"), requireTenant, async (req, res) => {
+router.patch("/:id/status", requireTenant, requireAdminOrTenantRole("staff"), async (req, res) => {
   try {
     if (!mustHaveTenantSlug(req, res)) return;
 
@@ -813,7 +815,7 @@ router.patch("/:id/status", requireAdminOrTenantRole("staff"), requireTenant, as
 // DELETE /api/bookings/:id?tenantSlug|tenantId=
 // ---------------------------------------------------------------------------
 // ADMIN: cancel booking (DELETE used as cancel)
-router.delete("/:id", requireAdminOrTenantRole("staff"), requireTenant, async (req, res) => {
+router.delete("/:id", requireTenant, requireAdminOrTenantRole("staff"), async (req, res) => {
   try {
     if (!mustHaveTenantSlug(req, res)) return;
 

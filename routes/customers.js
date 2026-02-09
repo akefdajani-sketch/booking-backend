@@ -57,7 +57,7 @@ function safeIntExpr(sql) {
 // ADMIN: GET /api/customers/search?tenantSlug|tenantId&q=&limit=
 // Lightweight search endpoint for autocomplete.
 // ------------------------------------------------------------
-router.get("/search", requireAdminOrTenantRole("staff"), requireTenant, async (req, res) => {
+router.get("/search", requireTenant, requireAdminOrTenantRole("staff"), async (req, res) => {
   try {
     const tenantId = req.tenantId;
     const q = req.query.q ? String(req.query.q).trim() : "";
@@ -95,7 +95,7 @@ router.get("/search", requireAdminOrTenantRole("staff"), requireTenant, async (r
 // ADMIN: GET /api/customers?tenantSlug|tenantId&q=
 // P1: tenant is REQUIRED.
 // ------------------------------------------------------------
-router.get("/", requireAdminOrTenantRole("staff"), requireTenant, async (req, res) => {
+router.get("/", requireTenant, requireAdminOrTenantRole("staff"), async (req, res) => {
   try {
     const tenantId = req.tenantId;
     const q = req.query.q ? String(req.query.q).trim() : "";
