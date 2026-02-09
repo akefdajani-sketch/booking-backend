@@ -873,4 +873,35 @@ router.post("/", requireTenant, requireAdminOrTenantRole("staff"), async (req, r
   }
 });
 
+
+// Delete a customer (tenant staff/admin)
+router.delete("/:customerId", requireGoogleAuth, requireTenant, requireAdminOrTenantRole, async (req, res) => {
+  try {
+    const tenantId = req.tenantId;
+    const customerId = Number(req.params.customerId);
+    if (!Number.isFinite(customerId)) {
+      return res.status(400).json({ error: "Invalid customerId" });
+    }
+
+    try {
+      const del = await pool.query(
+        `DELETE FROM customers WHERE id = $1 AND tenant_id = $2`,
+        [customerId, tenantId]
+      );
+      if (!del.rowCount) {
+        return res.status(404).json({ error: "Customer not found." });
+      }
+      return res.json({ ok: true });
+    } catch (dbErr) {
+      // Postgres FK violation
+      if (getErrorCode(dbErr) == "23503") {
+        return res.status(409).json({ error: "Customer has related records (e.g., bookings). Remove those first." });
+      }
+      throw dbErr;
+    }
+  } catch (err) {
+    console.error("Error deleting customer:", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
 module.exports = router;
