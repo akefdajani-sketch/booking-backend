@@ -172,6 +172,57 @@ router.get(
 );
 
 // -----------------------------------------------------------------------------
+// GET /api/tenant/:slug/publish-status
+// Tenant-accessible publish readiness/status.
+// This avoids forcing tenant staff flows to call the platform-admin-only
+// /api/tenants/publish-status endpoint.
+router.get(
+  "/:slug/publish-status",
+  requireTenantMeAuth,
+  maybeEnsureUser,
+  resolveTenantIdFromParam,
+  maybeRequireViewerRole,
+  async (req, res) => {
+    try {
+      const tenantId = req.tenantId;
+      const slug = req.params.slug;
+
+      // Reuse the same publish validation logic the platform admin uses
+      const status = await validateTenantPublish(pool, tenantId);
+
+      return res.json({ tenantId, tenantSlug: slug, ...status });
+    } catch (err) {
+      console.error("tenant publish-status error:", err);
+      return res.status(500).json({ error: "Internal server error" });
+    }
+  }
+);
+
+// -----------------------------------------------------------------------------
+// GET /api/tenant/:slug/publish-status
+// Tenant-accessible publish readiness/status.
+// IMPORTANT: This does NOT require platform admin.
+// It is safe for tenant staff/owners (Google auth) and also works via
+// server-side admin proxy for platform owner flows.
+// -----------------------------------------------------------------------------
+router.get(
+  "/:slug/publish-status",
+  requireTenantMeAuth,
+  maybeEnsureUser,
+  resolveTenantIdFromParam,
+  maybeRequireViewerRole,
+  async (req, res) => {
+    try {
+      const status = await validateTenantPublish(db, req.tenantId);
+      return res.json({ tenantId: req.tenantId, tenantSlug: req.tenantSlug, ...status });
+    } catch (err) {
+      console.error("Tenant publish-status error:", err);
+      return res.status(500).json({ error: "Failed to load publish status." });
+    }
+  }
+);
+
+// -----------------------------------------------------------------------------
 // GET /api/tenant/:slug/users
 // Lists users for a tenant
 // -----------------------------------------------------------------------------
