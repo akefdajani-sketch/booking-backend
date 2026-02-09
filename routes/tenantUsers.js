@@ -22,11 +22,46 @@ const crypto = require("crypto");
 
 const db = require("../db");
 const requireGoogleAuth = require("../middleware/requireGoogleAuth");
+const requireAdmin = require("../middleware/requireAdmin");
 const ensureUser = require("../middleware/ensureUser");
 const { getTenantIdFromSlug } = require("../utils/tenants");
 const { requireTenantRole, normalizeRole } = require("../middleware/requireTenantRole");
 
 const ALLOWED_ROLES = new Set(["owner", "manager", "staff", "viewer"]);
+
+function isAdminRequest(req) {
+  const expected = String(process.env.ADMIN_API_KEY || "").trim();
+  if (!expected) return false;
+
+  const rawAuth = String(req.headers.authorization || "");
+  const bearer = rawAuth.toLowerCase().startsWith("bearer ")
+    ? rawAuth.slice(7).trim()
+    : "";
+
+  const key =
+    String(bearer || "").trim() ||
+    String(req.headers["x-admin-key"] || "").trim() ||
+    String(req.headers["x-api-key"] || "").trim();
+
+  return !!key && key === expected;
+}
+
+// For GET /me only: allow either Google (tenant staff) OR ADMIN_API_KEY (owner proxy-admin).
+function requireTenantMeAuth(req, res, next) {
+  if (isAdminRequest(req)) return requireAdmin(req, res, next);
+  return requireGoogleAuth(req, res, next);
+}
+
+function maybeEnsureUser(req, res, next) {
+  if (isAdminRequest(req)) return next();
+  return ensureUser(req, res, next);
+}
+
+const requireViewerRole = requireTenantRole("viewer");
+function maybeRequireViewerRole(req, res, next) {
+  if (isAdminRequest(req)) return next();
+  return requireViewerRole(req, res, next);
+}
 
 async function resolveTenantIdFromParam(req, res, next) {
   try {
@@ -84,11 +119,31 @@ async function countOwners(tenantId) {
 // -----------------------------------------------------------------------------
 router.get(
   "/:slug/me",
-  requireGoogleAuth,
-  ensureUser,
+  requireTenantMeAuth,
+  maybeEnsureUser,
   resolveTenantIdFromParam,
-  requireTenantRole("viewer"),
+  maybeRequireViewerRole,
   async (req, res) => {
+    // Owner proxy-admin calls this endpoint using ADMIN_API_KEY (no Google login).
+    // In that mode, we treat the caller as an "owner" with full capabilities.
+    if (isAdminRequest(req)) {
+      return res.json({
+        tenant: { id: req.tenantId, slug: req.tenantSlug },
+        user: null,
+        role: "owner",
+        can: {
+          bookings_read: true,
+          bookings_write: true,
+          customers_read: true,
+          customers_write: true,
+          setup_write: true,
+          appearance_write: true,
+          plan_billing_write: true,
+          users_roles_write: true,
+        },
+      });
+    }
+
     const role = req.tenantRole;
     const can = {
       bookings_read: true,
