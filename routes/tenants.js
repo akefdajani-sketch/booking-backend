@@ -6,6 +6,8 @@ const db = pool;
 
 const requireAdmin = require("../middleware/requireAdmin");
 const { requireTenant } = require("../middleware/requireTenant");
+const maybeEnsureUser = require("../middleware/maybeEnsureUser");
+const requireAdminOrTenantRole = require("../middleware/requireAdminOrTenantRole");
 
 // ✅ IMPORTANT: destructure these (do NOT do: const upload = require(...))
 const { upload, uploadErrorHandler } = require("../middleware/upload");
@@ -468,7 +470,7 @@ router.get("/publish-status", requireAdmin, requireTenant, async (req, res) => {
 
 // POST /api/tenants/publish?tenantSlug=...
 // Body: optional { dryRun?: boolean }
-router.post("/publish", requireAdmin, requireTenant, async (req, res) => {
+router.post("/publish", maybeEnsureUser, requireTenant, requireAdminOrTenantRole("staff"), requireTenant, async (req, res) => {
   try {
     const tenantId = Number(req.tenantId);
     const dryRun = Boolean(req.body?.dryRun);

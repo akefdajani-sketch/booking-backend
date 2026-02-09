@@ -876,6 +876,7 @@ router.post("/", requireTenant, requireAdminOrTenantRole("staff"), async (req, r
 
 // Delete a customer (tenant staff/admin)
 router.delete("/:customerId", requireGoogleAuth, requireTenant, requireAdminOrTenantRole, async (req, res) => {
+const maybeEnsureUser = require("../middleware/maybeEnsureUser");
   try {
     const tenantId = req.tenantId;
     const customerId = Number(req.params.customerId);
