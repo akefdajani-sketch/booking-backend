@@ -25,6 +25,7 @@ const requireGoogleAuth = require("../middleware/requireGoogleAuth");
 const requireAdmin = require("../middleware/requireAdmin");
 const ensureUser = require("../middleware/ensureUser");
 const { getTenantIdFromSlug } = require("../utils/tenants");
+const { validateTenantPublish } = require("../../utils/publish");
 const { requireTenantRole, normalizeRole } = require("../middleware/requireTenantRole");
 
 const ALLOWED_ROLES = new Set(["owner", "manager", "staff", "viewer"]);
@@ -168,33 +169,6 @@ router.get(
       role,
       can,
     });
-  }
-);
-
-// -----------------------------------------------------------------------------
-// GET /api/tenant/:slug/publish-status
-// Tenant-accessible publish readiness/status.
-// This avoids forcing tenant staff flows to call the platform-admin-only
-// /api/tenants/publish-status endpoint.
-router.get(
-  "/:slug/publish-status",
-  requireTenantMeAuth,
-  maybeEnsureUser,
-  resolveTenantIdFromParam,
-  maybeRequireViewerRole,
-  async (req, res) => {
-    try {
-      const tenantId = req.tenantId;
-      const slug = req.params.slug;
-
-      // Reuse the same publish validation logic the platform admin uses
-      const status = await validateTenantPublish(pool, tenantId);
-
-      return res.json({ tenantId, tenantSlug: slug, ...status });
-    } catch (err) {
-      console.error("tenant publish-status error:", err);
-      return res.status(500).json({ error: "Internal server error" });
-    }
   }
 );
 
