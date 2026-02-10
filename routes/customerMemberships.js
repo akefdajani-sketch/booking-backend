@@ -10,7 +10,12 @@ const { requireTenant } = require("../middleware/requireTenant");
 
 function shouldUseCustomerView(req) {
   const q = req.query || {};
-  return Boolean(q.customerId || q.customerEmail);
+  // Customer self-service calls this endpoint without a customerId (it uses the
+  // authenticated Google identity). Staff/owner/admin calls it with a customerId
+  // to fetch a specific customer's memberships.
+  //
+  // If customerId is present, we must use the admin route (role/API-key auth).
+  return !q.customerId;
 }
 
 // GET /api/customer-memberships?tenantSlug|tenantId&customerId=
