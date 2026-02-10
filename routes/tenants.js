@@ -1,6 +1,14 @@
 // routes/tenants.js
 const express = require("express");
 const router = express.Router();
+
+function setTenantIdFromParamForRole(req, res, next) {
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id) || id <= 0) return res.status(400).json({ error: 'Invalid tenant id' });
+  req.tenantId = id;
+  return next();
+}
+
 const { pool } = require("../db");
 const db = pool;
 
@@ -1114,7 +1122,7 @@ router.get("/:id/onboarding", requireAdmin, async (req, res) => {
 // Admin/Owner: set tenant.theme_key (drives booking page layout without ?layout=...)
 // Body: { theme_key: "default_v1" }
 // -----------------------------------------------------------------------------
-router.patch("/:id/theme-key", requireAdmin, async (req, res) => {
+router.patch("/:id/theme-key", setTenantIdFromParamForRole, requireAdminOrTenantRole("owner"), async (req, res) => {
   try {
     const id = Number(req.params.id);
     if (!Number.isFinite(id) || id <= 0) return res.status(400).json({ error: "Invalid tenant id" });

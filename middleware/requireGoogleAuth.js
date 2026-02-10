@@ -54,8 +54,31 @@ async function fetchGoogleUserInfo(accessToken) {
   return json;
 }
 
+
+
+function isValidAdminKey(req) {
+  const rawAuth = String(req.headers.authorization || req.headers.Authorization || '');
+  const bearer = rawAuth.toLowerCase().startsWith('bearer ')
+    ? rawAuth.slice(7).trim()
+    : null;
+
+  const key = bearer || String(req.headers['x-admin-key'] || '').trim() || String(req.headers['x-api-key'] || '').trim();
+  const expected = String(process.env.ADMIN_API_KEY || '').trim();
+  if (!expected) return false;
+  if (!key) return false;
+  return key == expected;
+}
+
 module.exports = async function requireGoogleAuth(req, res, next) {
   try {
+    // Allow server-to-server / owner-proxy calls using ADMIN_API_KEY to bypass Google auth.
+    // This is required for staff/admin actions that shouldn't depend on a customer's Google token.
+    if (isValidAdminKey(req)) {
+      req.adminBypass = true;
+      req.googleUser = { email: null, email_verified: false, name: 'Admin', picture: null, sub: null };
+      req.user = req.googleUser;
+      return next();
+    }
     const token =
       extractBearer(req) ||
       req.body?.googleIdToken ||

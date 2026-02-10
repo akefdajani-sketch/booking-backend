@@ -53,6 +53,10 @@ function safeIntExpr(sql) {
   return `COALESCE((${sql})::int, 0)`;
 }
 
+function getErrorCode(err) {
+  return err?.code || err?.sqlState || err?.original?.code || null;
+}
+
 // ------------------------------------------------------------
 // ADMIN: GET /api/customers/search?tenantSlug|tenantId&q=&limit=
 // Lightweight search endpoint for autocomplete.
@@ -875,8 +879,7 @@ router.post("/", requireTenant, requireAdminOrTenantRole("staff"), async (req, r
 
 
 // Delete a customer (tenant staff/admin)
-router.delete("/:customerId", requireGoogleAuth, requireTenant, requireAdminOrTenantRole, async (req, res) => {
-const maybeEnsureUser = require("../middleware/maybeEnsureUser");
+router.delete("/:customerId", requireTenant, requireAdminOrTenantRole("staff"), async (req, res) => {
   try {
     const tenantId = req.tenantId;
     const customerId = Number(req.params.customerId);
@@ -885,7 +888,7 @@ const maybeEnsureUser = require("../middleware/maybeEnsureUser");
     }
 
     try {
-      const del = await pool.query(
+      const del = await db.query(
         `DELETE FROM customers WHERE id = $1 AND tenant_id = $2`,
         [customerId, tenantId]
       );
@@ -895,8 +898,11 @@ const maybeEnsureUser = require("../middleware/maybeEnsureUser");
       return res.json({ ok: true });
     } catch (dbErr) {
       // Postgres FK violation
-      if (getErrorCode(dbErr) == "23503") {
-        return res.status(409).json({ error: "Customer has related records (e.g., bookings). Remove those first." });
+      if (getErrorCode(dbErr) === "23503") {
+        return res.status(409).json({
+          error: "Customer has related records (e.g., bookings). Remove those first.",
+          code: "FK_VIOLATION",
+        });
       }
       throw dbErr;
     }
@@ -905,4 +911,5 @@ const maybeEnsureUser = require("../middleware/maybeEnsureUser");
     return res.status(500).json({ error: "Internal server error" });
   }
 });
+
 module.exports = router;

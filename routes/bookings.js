@@ -900,9 +900,22 @@ router.post("/", requireGoogleAuth, requireTenant, async (req, res) => {
 
     const idemKey = getIdempotencyKey(req);
 
+    const isAdminBypass = !!req.adminBypass;
+
     const googleEmail = (req.googleUser?.email || "").toString().trim().toLowerCase();
     const googleName = (req.googleUser?.name || req.googleUser?.given_name || "").toString().trim();
-    if (!googleEmail) return res.status(401).json({ error: "Unauthorized" });
+
+    // Public booking requires the *customer* Google identity.
+    // Owner/tenant dashboards may create bookings on behalf of customers via ADMIN_API_KEY proxy.
+    if (!isAdminBypass && !googleEmail) return res.status(401).json({ error: "Unauthorized" });
+
+    const requestedCustomerEmail = (isAdminBypass ? String(customerEmail || "") : String(googleEmail || ""))
+      .trim()
+      .toLowerCase();
+
+    if (isAdminBypass && !requestedCustomerEmail) {
+      return res.status(400).json({ error: "customerEmail is required for staff/admin bookings." });
+    }
 
     if (!startTime) {
       return res.status(400).json({ error: "Missing required fields (startTime)." });
@@ -923,19 +936,27 @@ router.post("/", requireGoogleAuth, requireTenant, async (req, res) => {
       // keep default
     }
 
-    // Resolve or create customer for this tenant using Google email.
+    // Resolve or create customer for this tenant.
+    // - Public booking: customer identity comes from Google.
+    // - Staff/admin booking (owner proxy): customer identity comes from request payload.
     // IMPORTANT: we NEVER trust customerId from the client for authenticated flows.
     let finalCustomerId = null;
-    let finalCustomerName = googleName || String(customerName || "").trim() || "Customer";
+
+    let finalCustomerName = (
+      isAdminBypass
+        ? String(customerName || "").trim()
+        : (googleName || "").trim()
+    ) || "Customer";
+
     let finalCustomerPhone = String(customerPhone || "").trim() || null;
-    let finalCustomerEmail = googleEmail;
+    let finalCustomerEmail = requestedCustomerEmail;
 
     const existingCust = await db.query(
       `SELECT id, name, phone, email
        FROM customers
        WHERE tenant_id=$1 AND LOWER(email)=LOWER($2)
        LIMIT 1`,
-      [resolvedTenantId, googleEmail]
+      [resolvedTenantId, finalCustomerEmail]
     );
 
     if (existingCust.rows.length) {
@@ -950,7 +971,7 @@ router.post("/", requireGoogleAuth, requireTenant, async (req, res) => {
         `INSERT INTO customers (tenant_id, name, phone, email, created_at)
          VALUES ($1,$2,$3,$4,NOW())
          RETURNING id`,
-        [resolvedTenantId, finalCustomerName, finalCustomerPhone, googleEmail]
+        [resolvedTenantId, finalCustomerName, finalCustomerPhone, finalCustomerEmail]
       );
       finalCustomerId = ins.rows?.[0]?.id || null;
     }
