@@ -321,7 +321,7 @@ router.post("/", requireTenant, requireAdminOrTenantRole("manager"), async (req,
 //                max_consecutive_slots, max_parallel_bookings,
 //                requires_staff, requires_resource, availability_basis, is_active }
 // ---------------------------------------------------------------------------
-router.patch("/:id", requireTenant, requireAdminOrTenantRole("manager"), async (req, res) => {
+router.patch("/:id", resolveTenantFromServiceId, requireAdminOrTenantRole("manager"), async (req, res) => {
   try {
     const id = Number(req.params.id);
     if (!id) return res.status(400).json({ error: "invalid id" });
@@ -418,7 +418,7 @@ router.patch("/:id", requireTenant, requireAdminOrTenantRole("manager"), async (
 // DELETE /api/services/:id
 // Admin-only delete
 // ---------------------------------------------------------------------------
-router.delete("/:id", requireTenant, requireAdminOrTenantRole("manager"), async (req, res) => {
+router.delete("/:id", resolveTenantFromServiceId, requireAdminOrTenantRole("manager"), async (req, res) => {
   try {
     const id = Number(req.params.id);
     if (!id) return res.status(400).json({ error: "invalid id" });
