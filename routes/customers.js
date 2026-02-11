@@ -390,6 +390,12 @@ router.get("/me/bookings", requireGoogleAuth, requireTenant, async (req, res) =>
         ${notes} AS notes,
         ${createdAt} AS created_at,
         ${bookingCode} AS booking_code,
+        b.customer_membership_id,
+        mp.name AS membership_plan_name,
+        cmem.minutes_remaining AS membership_minutes_remaining,
+        cmem.uses_remaining AS membership_uses_remaining,
+        mu.minutes_used AS membership_minutes_used_for_booking,
+        mu.uses_used AS membership_uses_used_for_booking,
         COALESCE(${customerName}, c.name) AS customer_name,
         COALESCE(${customerEmail}, c.email) AS customer_email,
         COALESCE(${customerPhone}, c.phone) AS customer_phone,
@@ -401,6 +407,16 @@ router.get("/me/bookings", requireGoogleAuth, requireTenant, async (req, res) =>
       LEFT JOIN services s ON s.id = b.service_id
       LEFT JOIN staff st ON st.id = b.staff_id
       LEFT JOIN resources r ON r.id = b.resource_id
+      LEFT JOIN customer_memberships cmem ON cmem.id = b.customer_membership_id
+      LEFT JOIN membership_plans mp ON mp.id = cmem.plan_id
+      LEFT JOIN LATERAL (
+        SELECT
+          SUM(CASE WHEN ml.minutes_delta < 0 THEN -ml.minutes_delta ELSE 0 END)::int AS minutes_used,
+          SUM(CASE WHEN ml.uses_delta < 0 THEN -ml.uses_delta ELSE 0 END)::int AS uses_used
+        FROM membership_ledger ml
+        WHERE ml.booking_id = b.id
+          AND (b.customer_membership_id IS NULL OR ml.customer_membership_id = b.customer_membership_id)
+      ) mu ON true
       WHERE b.tenant_id = $1
         AND b.customer_id = $2
       ORDER BY ${startTime} DESC

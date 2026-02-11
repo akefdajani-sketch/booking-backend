@@ -142,12 +142,28 @@ async function loadJoinedBookingById(bookingId, tenantId) {
       b.duration_minutes,
       b.status,
       b.created_at,
-      b.booking_code
+      b.booking_code,
+
+      mp.name AS membership_plan_name,
+      cm.minutes_remaining AS membership_minutes_remaining,
+      cm.uses_remaining AS membership_uses_remaining,
+      mu.minutes_used AS membership_minutes_used_for_booking,
+      mu.uses_used AS membership_uses_used_for_booking
     FROM bookings b
     JOIN tenants t ON t.id = b.tenant_id
     LEFT JOIN services s ON s.tenant_id = b.tenant_id AND s.id = b.service_id
     LEFT JOIN staff st ON st.tenant_id = b.tenant_id AND st.id = b.staff_id
     LEFT JOIN resources r ON r.tenant_id = b.tenant_id AND r.id = b.resource_id
+    LEFT JOIN customer_memberships cm ON cm.id = b.customer_membership_id
+    LEFT JOIN membership_plans mp ON mp.id = cm.plan_id
+    LEFT JOIN LATERAL (
+      SELECT
+        SUM(CASE WHEN ml.minutes_delta < 0 THEN -ml.minutes_delta ELSE 0 END)::int AS minutes_used,
+        SUM(CASE WHEN ml.uses_delta < 0 THEN -ml.uses_delta ELSE 0 END)::int AS uses_used
+      FROM membership_ledger ml
+      WHERE ml.booking_id = b.id
+        AND (b.customer_membership_id IS NULL OR ml.customer_membership_id = b.customer_membership_id)
+    ) mu ON true
     WHERE b.id = $1
       AND ($2::int IS NULL OR b.tenant_id = $2::int)
     LIMIT 1
