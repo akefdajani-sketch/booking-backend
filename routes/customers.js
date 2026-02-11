@@ -367,6 +367,14 @@ router.get("/me/bookings", requireGoogleAuth, requireTenant, async (req, res) =>
     const serviceName = await pickCol("bookings", "b", ["service_name"], "NULL");
     const resourceName = await pickCol("bookings", "b", ["resource_name"], "NULL");
 
+    // Newer DBs: invoice metadata + customer/staff fields.
+    // Keep schema-tolerant via pickCol.
+    const bookingCode = await pickCol("bookings", "b", ["booking_code"], "NULL");
+    const customerName = await pickCol("bookings", "b", ["customer_name"], "NULL");
+    const customerEmail = await pickCol("bookings", "b", ["customer_email"], "NULL");
+    const customerPhone = await pickCol("bookings", "b", ["customer_phone"], "NULL");
+    const staffName = await pickCol("bookings", "b", ["staff_name"], "NULL");
+
     const q = await pool.query(
       `
       SELECT
@@ -374,16 +382,24 @@ router.get("/me/bookings", requireGoogleAuth, requireTenant, async (req, res) =>
         b.tenant_id,
         b.customer_id,
         b.service_id,
+        b.staff_id,
         b.resource_id,
         ${startTime} AS start_time,
         ${duration} AS duration_minutes,
         ${status} AS status,
         ${notes} AS notes,
         ${createdAt} AS created_at,
+        ${bookingCode} AS booking_code,
+        COALESCE(${customerName}, c.name) AS customer_name,
+        COALESCE(${customerEmail}, c.email) AS customer_email,
+        COALESCE(${customerPhone}, c.phone) AS customer_phone,
         COALESCE(s.name, ${serviceName}) AS service_name,
+        COALESCE(st.name, ${staffName}) AS staff_name,
         COALESCE(r.name, ${resourceName}) AS resource_name
       FROM bookings b
+      LEFT JOIN customers c ON c.id = b.customer_id
       LEFT JOIN services s ON s.id = b.service_id
+      LEFT JOIN staff st ON st.id = b.staff_id
       LEFT JOIN resources r ON r.id = b.resource_id
       WHERE b.tenant_id = $1
         AND b.customer_id = $2
