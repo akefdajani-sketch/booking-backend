@@ -23,6 +23,29 @@ function normalizeRole(role) {
   return ROLE_RANK[r] ? r : null;
 }
 
+function normalizeRoleList(input) {
+  // Accept an allowlist in multiple forms:
+  //   - ['owner','manager']
+  //   - 'owner,manager'
+  // Returns an array of normalized roles, or null if not an allowlist.
+  if (Array.isArray(input)) {
+    const roles = input
+      .map(normalizeRole)
+      .filter(Boolean);
+    return roles.length ? roles : null;
+  }
+
+  if (typeof input === "string" && input.includes(",")) {
+    const roles = input
+      .split(",")
+      .map((s) => normalizeRole(s))
+      .filter(Boolean);
+    return roles.length ? roles : null;
+  }
+
+  return null;
+}
+
 async function fetchTenantRole(tenantId, userId) {
   await ensureRbacTables();
   const q = await db.query(
@@ -33,8 +56,9 @@ async function fetchTenantRole(tenantId, userId) {
 }
 
 function requireTenantRole(minRole) {
-  const required = normalizeRole(minRole);
-  if (!required) {
+  const allowlist = normalizeRoleList(minRole);
+  const required = allowlist ? null : normalizeRole(minRole);
+  if (!allowlist && !required) {
     throw new Error(`Invalid minRole passed to requireTenantRole: ${minRole}`);
   }
 
@@ -63,7 +87,9 @@ function requireTenantRole(minRole) {
         return res.status(403).json({ error: "No access to this tenant." });
       }
 
-      const ok = ROLE_RANK[normalized] >= ROLE_RANK[required];
+      const ok = allowlist
+        ? allowlist.includes(normalized)
+        : ROLE_RANK[normalized] >= ROLE_RANK[required];
       if (!ok) {
         return res.status(403).json({ error: "Forbidden." });
       }
