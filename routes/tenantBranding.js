@@ -1,6 +1,8 @@
 const express = require("express");
 const router = express.Router();
 
+const db = require("../db");
+
 const requireGoogleAuth = require("../middleware/requireGoogleAuth");
 const ensureUser = require("../middleware/ensureUser");
 const { requireTenantRole } = require("../middleware/requireTenantRole");
@@ -12,7 +14,7 @@ async function resolveTenantIdFromParam(req, res, next) {
     const raw = req.params && req.params.slug;
     const slug = typeof raw === "string" ? raw.trim() : String(raw || "").trim();
     if (!slug) return res.status(400).json({ error: "Missing tenant slug" });
-    const tenantId = await getTenantIdFromSlug(req.pool, slug);
+    const tenantId = await getTenantIdFromSlug(slug);
     req.tenantId = tenantId;
     req.tenantSlug = slug;
     next();
@@ -28,7 +30,7 @@ async function resolveTenantIdFromParam(req, res, next) {
 // GET branding for tenant (auth optional, but we keep it open like other by-slug routes)
 router.get("/:slug/branding", resolveTenantIdFromParam, async (req, res) => {
   try {
-    const { rows } = await req.pool.query(
+    const { rows } = await db.query(
       `SELECT id, slug, branding
        FROM tenants
        WHERE id = $1`,
@@ -57,10 +59,9 @@ router.patch(
       }
 
       // Merge patch into existing branding JSONB
-      const { rows } = await req.pool.query(
+      const { rows } = await db.query(
         `UPDATE tenants
-         SET branding = COALESCE(branding, '{}'::jsonb) || $1::jsonb,
-             updated_at = NOW()
+         SET branding = COALESCE(branding, '{}'::jsonb) || $1::jsonb
          WHERE id = $2
          RETURNING id, slug, branding`,
         [JSON.stringify(patch), req.tenantId]

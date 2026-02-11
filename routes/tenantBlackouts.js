@@ -155,6 +155,17 @@ router.post("/", requireTenant, requireAdminOrTenantRole("manager"), async (req,
       return res.status(400).json({ error: "startsLocal/endsLocal (recommended) or startsAt/endsAt are required." });
     }
 
+    // Range validation: prevent Postgres range_serialize 22000 errors
+    const sDate = new Date(startsAt);
+    const eDate = new Date(endsAt);
+    if (Number.isNaN(sDate.getTime()) || Number.isNaN(eDate.getTime())) {
+      return res.status(400).json({ error: "Invalid startsAt/endsAt." });
+    }
+    if (eDate.getTime() <= sDate.getTime()) {
+      return res.status(400).json({ error: "endsAt must be after startsAt." });
+    }
+
+
     const reason = clampText(body.reason, 500);
 
     const resourceId = body.resourceId ?? body.resource_id ?? null;
@@ -256,6 +267,16 @@ router.put("/:id", requireTenant, requireAdminOrTenantRole("manager"), async (re
     const cur = current.rows[0];
     const finalStarts = startsAt || cur.starts_at;
     const finalEnds = endsAt || cur.ends_at;
+
+    const fsDate = new Date(finalStarts);
+    const feDate = new Date(finalEnds);
+    if (Number.isNaN(fsDate.getTime()) || Number.isNaN(feDate.getTime())) {
+      return res.status(400).json({ error: "Invalid startsAt/endsAt." });
+    }
+    if (feDate.getTime() <= fsDate.getTime()) {
+      return res.status(400).json({ error: "endsAt must be after startsAt." });
+    }
+
 
     const existingOverlap = await findOverlappingBlackout({
       tenantId: resolvedTenantId,

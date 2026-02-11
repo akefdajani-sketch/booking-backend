@@ -55,7 +55,7 @@ async function resolveTenantIdFromParam(req, res, next) {
     const slug = String(req.params.slug || "").trim();
     if (!slug) return res.status(400).json({ error: "Missing tenant slug." });
 
-    const tenantId = await getTenantIdFromSlug(db, slug);
+    const tenantId = await getTenantIdFromSlug(slug);
     if (!tenantId) return res.status(404).json({ error: "Tenant not found." });
 
     req.tenantId = tenantId;
@@ -122,8 +122,7 @@ router.put(
       const r = await db.query(
         `
         UPDATE tenants
-        SET branding = COALESCE(branding, '{}'::jsonb) || jsonb_build_object('homeLanding', $2::jsonb),
-            updated_at = NOW()
+        SET branding = COALESCE(branding, '{}'::jsonb) || jsonb_build_object('homeLanding', $2::jsonb)
         WHERE id = $1
         RETURNING COALESCE(branding, '{}'::jsonb) #> '{homeLanding}' AS home_landing
         `,
