@@ -3,7 +3,7 @@ const router = express.Router();
 
 const requireGoogleAuth = require("../middleware/requireGoogleAuth");
 const ensureUser = require("../middleware/ensureUser");
-const requireTenantRole = require("../middleware/requireTenantRole");
+const { requireTenantRole } = require("../middleware/requireTenantRole");
 const { getTenantIdFromSlug } = require("../utils/tenants");
 
 // Resolve tenantId from :slug safely
