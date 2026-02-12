@@ -16,6 +16,7 @@ const requireAdmin = require("../middleware/requireAdmin");
 const { requireTenant } = require("../middleware/requireTenant");
 const maybeEnsureUser = require("../middleware/maybeEnsureUser");
 const requireAdminOrTenantRole = require("../middleware/requireAdminOrTenantRole");
+const { updateTenantThemeKey } = require("../utils/tenantThemeKey");
 
 // ✅ IMPORTANT: destructure these (do NOT do: const upload = require(...))
 const { upload, uploadErrorHandler } = require("../middleware/upload");
@@ -1130,29 +1131,16 @@ router.patch("/:id/theme-key", setTenantIdFromParamForRole, requireAdminOrTenant
     const themeKey = String(req.body?.theme_key || "").trim();
     if (!themeKey) return res.status(400).json({ error: "theme_key is required" });
 
-    // Ensure theme exists and is published.
-    // Allow built-in theme keys even if platform_themes hasn't been seeded yet.
-    const BUILTIN_THEME_KEYS = new Set(["default_v1", "classic", "premium", "premium_light"]);
-    if (!BUILTIN_THEME_KEYS.has(themeKey)) {
-      const th = await db.query(
-        "SELECT key FROM platform_themes WHERE key = $1 AND is_published = TRUE LIMIT 1",
-        [themeKey]
-      );
-      if (!th.rows[0]) return res.status(400).json({ error: "Theme is not published or does not exist" });
-    }
-
-    const result = await db.query(
-      "UPDATE tenants SET theme_key = $2 WHERE id = $1 RETURNING id, slug, theme_key",
-      [id, themeKey]
-    );
-    if (!result.rows.length) return res.status(404).json({ error: "Tenant not found" });
-
-    return res.json({ tenant: result.rows[0] });
+    const tenant = await updateTenantThemeKey(db, id, themeKey);
+    return res.json({ tenant });
   } catch (err) {
-    console.error("Error updating tenant theme_key:", err);
-    return res.status(500).json({ error: "Failed to update theme" });
+    const status = Number(err?.status) || 500;
+    const msg = err?.message || "Failed to update theme";
+    if (status >= 500) console.error("Error updating tenant theme_key:", err);
+    return res.status(status).json({ error: status >= 500 ? "Failed to update theme" : msg });
   }
 });
+
 
 // -----------------------------------------------------------------------------
 // PATCH /api/tenants/:id/branding

@@ -379,24 +379,21 @@ router.post("/:tenantId/theme-key", setTenantIdFromParam, requireAdminOrTenantRo
     await ensureThemeKeyColumn();
 
     const themeKey = String((req.body && (req.body.theme_key ?? req.body.themeKey)) || "").trim();
-    if (!themeKey) return res.status(400).json({ error: "Missing theme_key" });
+    if (!themeKey) return res.status(400).json({ error: "theme_key is required" });
 
-    const th = await db.query(
-      `SELECT key FROM platform_themes WHERE key = $1 AND is_published = TRUE LIMIT 1`,
-      [themeKey]
-    );
-    if (!th.rows[0]) return res.status(400).json({ error: "Theme key not found or not published" });
-
-    await db.query(`UPDATE tenants SET theme_key = $1 WHERE id = $2`, [themeKey, tenantId]);
+    const tenant = await updateTenantThemeKey(db, tenantId, themeKey);
 
     await logChange(tenantId, "THEME_KEY_SET", getActor(req), { theme_key: themeKey });
 
-    return res.json({ ok: true });
+    return res.json({ ok: true, tenant });
   } catch (e) {
-    console.error("POST /api/admin/tenants/:tenantId/theme-key error:", e);
-    return res.status(500).json({ error: "Failed to set theme key" });
+    const status = Number(e?.status) || 500;
+    const msg = e?.message || "Failed to set theme key";
+    if (status >= 500) console.error("POST /api/admin/tenants/:tenantId/theme-key error:", e);
+    return res.status(status).json({ error: status >= 500 ? "Failed to set theme key" : msg });
   }
 });
+
 
 // -----------------------------------------------------------------------------
 // Theme schema (existing endpoints, kept stable)

@@ -64,14 +64,15 @@ Returns:
 
 ### Theme selection
 
-- `POST /api/admin/tenants/:tenantId/theme-key`
+- **Canonical:** `PATCH /api/tenants/:id/theme-key`
+- **Legacy admin alias (kept for backwards compatibility):** `POST /api/admin/tenants/:tenantId/theme-key`
 
 Body:
 ```json
 { "theme_key": "premium_v1" }
 ```
 
-Validates that `platform_themes.key` exists and is `is_published = true`.
+Validates that the theme is published in `platform_themes` **or** is one of the built-in keys (`default_v1`, `classic`, `premium`, `premium_light`).
 
 ### Theme schema
 
