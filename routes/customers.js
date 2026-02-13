@@ -175,7 +175,8 @@ router.post("/me", requireGoogleAuth, async (req, res) => {
       ON CONFLICT (tenant_id, email)
       DO UPDATE SET
         name = EXCLUDED.name,
-        phone = EXCLUDED.phone
+        -- Preserve existing phone if client sends null/empty
+        phone = COALESCE(NULLIF(EXCLUDED.phone, ''), customers.phone)
       RETURNING id, tenant_id, name, phone, email, created_at
       `,
       [
