@@ -111,13 +111,11 @@ const authToken: string | null =
   // Central/localStorage token (for cross-domain flows)
   getStoredGoogleToken() ||
   null;
-
-// Treat "signed in" as "we have a usable token".
-const isSignedIn = !!authToken;
-
-
   // Phase C: detect silent Google logout and prevent ghost bookings.
   const [sessionExpired, setSessionExpired] = useState(false);
+
+  // Treat "signed in" as "we have a usable token" (and session not expired).
+  const isSignedIn = !!authToken && !sessionExpired;
 
   // Phase D: tenant booking policy — require phone (tenant controlled, defaults to true)
   const initialRequirePhone =
@@ -639,13 +637,22 @@ useEffect(() => {
 }, [tenantRequirePhone, isSignedIn, sessionExpired, profileLoaded, autoUpsertDone, customer, authEmail, slug, phoneOnboardingDismissed]);
 
   const {
-    // Expose the internal loader so we can refresh membership balance after a booking succeeds
-    // (without requiring a full page refresh)
+    // Membership plans (what can be purchased)
+    membershipPlans,
+    loadingPlans,
+    plansError,
+
+    // Customer memberships (what the signed-in customer owns)
+    customerMemberships,
+    loadingMemberships,
+    membershipsError,
     loadCustomerMemberships,
 
+    // Purchase / subscription flow
     subscribingPlanId,
     subscribeToPlan,
 
+    // Ledger modal
     ledgerOpenFor,
     setLedgerOpenFor,
     ledgerItems,
@@ -656,9 +663,9 @@ useEffect(() => {
   } = useMemberships({
     slug,
     // Only load customer memberships when authenticated.
-    customerId: (isSignedIn && !sessionExpired) ? ((customer as any)?.id ?? null) : null,
+    customerId: isSignedIn ? ((customer as any)?.id ?? null) : null,
     authToken: sessionExpired ? null : (authToken ?? null),
-    autoLoadMemberships: isSignedIn && !sessionExpired,
+    autoLoadMemberships: isSignedIn,
   });
 
   // ------------------------------------------------------------------------
@@ -888,6 +895,25 @@ const filteredStaff = useMemo(() => {
       }
 
       // Adding
+
+      // Auto-select the minimum required consecutive slots on the first pick.
+      // This prevents the CTA from looking "broken" when a service requires 2+ slots.
+      if (sorted.length === 0 && minSlots > 1) {
+        const idx = timeSlots.findIndex((s) => s.time === time);
+        if (idx >= 0) {
+          const auto: string[] = [];
+          for (let i = idx; i < idx + minSlots; i++) {
+            const s = timeSlots[i];
+            if (!s || !s.available || isPastSlot(s.time)) {
+              setSubmitError(`This service requires ${minSlots} consecutive slot(s). Please choose a start time with enough availability.`);
+              return prev;
+            }
+            auto.push(s.time);
+          }
+          return auto;
+        }
+      }
+
       if (sorted.length >= maxSlots) {
         setSubmitError(
           `You can select up to ${maxSlots} slot(s) for this service.`
@@ -2112,6 +2138,12 @@ const content = (
     </>
   );
 
+  const needsPhoneOnboarding =
+    tenantRequirePhone &&
+    isSignedIn &&
+    !sessionExpired &&
+    (!customer || !isProfileComplete(customer));
+
   const handleTabPress = (tab: ActiveTab) => {
     // Require sign-in for customer-private views
     const needsAuth = tab === "account" || tab === "history" || tab === "memberships";
@@ -2122,9 +2154,16 @@ const content = (
         redirectToCentralGoogleAuth(returnUrl);
         return;
       }
+
+      // Phone is required (or customer not hydrated yet) — keep customer on the booking flow,
+      // and prompt for phone via the modal (not via the Account tab).
+      if (needsPhoneOnboarding) {
+        setPhoneOnboardingOpen(true);
+        return;
+      }
     }
 
-    // If signed in but customer isn't created yet, allow Account but not others
+    // If signed in but customer isn't created yet, allow Account but not others (non-phone-required tenants).
     if ((tab === "history" || tab === "memberships") && !customer) {
       setActiveTab("account");
       return;
@@ -2137,6 +2176,11 @@ const content = (
     const locked: ActiveTab[] = [];
     const needsAuth: ActiveTab[] = ["account", "history", "memberships"];
     if (!isSignedIn || sessionExpired) return needsAuth;
+
+    // If phone is required and profile is incomplete, lock customer-private tabs until phone is saved.
+    // (Booking remains available.)
+    if (needsPhoneOnboarding) return needsAuth;
+
     // Signed in but customer not hydrated yet: keep the user in Account to finish onboarding/profile.
     if (!customer) return ["history", "memberships"];
     return locked;
@@ -2149,6 +2193,13 @@ const content = (
       redirectToCentralGoogleAuth(returnUrl);
       return;
     }
+
+    // If phone is required and profile isn't complete, re-open the phone modal.
+    if (needsPhoneOnboarding && (tab === "account" || tab === "history" || tab === "memberships")) {
+      setPhoneOnboardingOpen(true);
+      return;
+    }
+
     // If customer isn't created yet, route to account.
     if ((tab === "history" || tab === "memberships") && !customer) {
       setActiveTab("account");
