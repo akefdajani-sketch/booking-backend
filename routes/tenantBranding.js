@@ -7,6 +7,7 @@ const requireGoogleAuth = require("../middleware/requireGoogleAuth");
 const ensureUser = require("../middleware/ensureUser");
 const { requireTenantRole } = require("../middleware/requireTenantRole");
 const { getTenantIdFromSlug } = require("../utils/tenants");
+const { updateTenantThemeKey } = require("../utils/tenantThemeKey");
 
 // Resolve tenantId from :slug safely
 async function resolveTenantIdFromParam(req, res, next) {
@@ -71,6 +72,30 @@ router.patch(
     } catch (err) {
       console.error("PATCH tenant branding error:", err);
       return res.status(500).json({ error: "Internal server error" });
+    }
+  }
+);
+
+// PATCH theme-key for tenant (tenant owner)
+// Body: { theme_key: "default_v1" }
+router.patch(
+  "/:slug/theme-key",
+  requireGoogleAuth,
+  ensureUser,
+  resolveTenantIdFromParam,
+  requireTenantRole(["owner"]),
+  async (req, res) => {
+    try {
+      const themeKey = String(req.body?.theme_key || "").trim();
+      if (!themeKey) return res.status(400).json({ error: "theme_key is required" });
+
+      const tenant = await updateTenantThemeKey(db, req.tenantId, themeKey);
+      return res.json({ tenant });
+    } catch (err) {
+      const status = Number(err?.status) || 500;
+      const msg = err?.message || "Failed to update theme";
+      if (status >= 500) console.error("PATCH /api/tenant/:slug/theme-key error:", err);
+      return res.status(status).json({ error: status >= 500 ? "Failed to update theme" : msg });
     }
   }
 );
