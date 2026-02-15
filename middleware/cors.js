@@ -10,17 +10,26 @@ const allowedOrigins = [
   "https://auth.flexrz.com",
 ];
 
-// Allow Vercel preview URLs automatically
+const nodeEnv = String(process.env.NODE_ENV || "").toLowerCase();
+const isProd = nodeEnv === "production";
+
+// Allow Vercel preview URLs ONLY when explicitly enabled (or when not prod).
+// In production, default is OFF.
+const ALLOW_VERCEL_PREVIEWS =
+  String(process.env.ALLOW_VERCEL_PREVIEWS || "").toLowerCase() === "true";
+
 function isAllowed(origin) {
-  if (!origin) return true; // Postman/curl/no-origin
+  if (!origin) return true; // Postman/curl/no-origin (not a browser CORS case)
 
   if (allowedOrigins.includes(origin)) return true;
 
-  // Allow any *.vercel.app (previews + new deployments)
-  try {
-    const { hostname } = new URL(origin);
-    if (hostname.endsWith(".vercel.app")) return true;
-  } catch {}
+  // Allow *.vercel.app only in non-prod, or when explicitly enabled.
+  if (!isProd || ALLOW_VERCEL_PREVIEWS) {
+    try {
+      const { hostname } = new URL(origin);
+      if (hostname.endsWith(".vercel.app")) return true;
+    } catch {}
+  }
 
   return false;
 }
