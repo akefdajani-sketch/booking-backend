@@ -40,6 +40,8 @@ const tenantDomainsRouter = require("./routes/tenantDomains");
 const debugGoogleAuthRouter = require("./routes/debugGoogleAuth");
 
 const app = express();
+const ENABLE_DEBUG_ROUTES =
+  String(process.env.ENABLE_DEBUG_ROUTES || "").toLowerCase() === "true";
 
 app.use(corsMiddleware);
 app.options("*", cors(corsOptions));
@@ -86,8 +88,9 @@ app.use("/api/tenant-domains", tenantDomainsRouter);
 
 app.get("/health", (req, res) => res.json({ ok: true }));
 // TEMP: auth debug endpoint (remove after fix)
-app.use("/api/debug", debugGoogleAuthRouter);
-
+if (ENABLE_DEBUG_ROUTES && process.env.NODE_ENV !== "production") {
+  app.use("/api/debug", debugGoogleAuthRouter);
+}
 
 app.use("/api", (req, res) => res.status(404).json({ error: "Not found" }));
 
@@ -97,3 +100,4 @@ app.use((err, req, res, next) => {
 });
 
 module.exports = app;
+
