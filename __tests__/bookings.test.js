@@ -2,15 +2,22 @@ const express = require('express');
 const request = require('supertest');
 
 jest.mock('../db', () => ({ pool: { query: jest.fn() } }));
-jest.mock('../middleware/requireTenant', () => ({ requireTenant: (req,_res,next) => (req.tenantId=1, next()) }));
-jest.mock('../utils/bookings', () => ({ checkConflicts: jest.fn(), loadJoinedBookingById: jest.fn() }));
+jest.mock('../middleware/requireTenant', () => ({
+  requireTenant: (req, res, next) => next()
+}));
+jest.mock('../utils/bookings', () => ({
+  checkConflicts: jest.fn(),
+  loadJoinedBookingById: jest.fn()
+}));
 
 const { pool } = require('../db');
 const router = require('../routes/bookings');
 
-test('tenant mismatch -> 400', async () => {
+test('tenant mismatch → 400', async () => {
   pool.query.mockImplementation(async (sql) => {
-    if (String(sql).includes('FROM tenants WHERE slug')) return { rows: [{ id: 1 }] };
+    if (String(sql).includes('FROM tenants WHERE slug')) {
+      return { rows: [{ id: 1 }] };
+    }
     return { rows: [] };
   });
 
@@ -23,24 +30,4 @@ test('tenant mismatch -> 400', async () => {
     .send({ tenantSlug: 't1', tenantId: 999 });
 
   expect(res.status).toBe(400);
-});
-
-const { pool } = require('../db');
-const router = require('../routes/bookings');
-
-test('tenant mismatch -> 400', async () => {
-  pool.query.mockImplementation(async (sql) => {
-    if (String(sql).includes('FROM tenants WHERE slug')) return { rows: [{ id: 1 }] };
-    return { rows: [] };
-  });
-
-  const app = express();
-  app.use(express.json());
-  app.use('/api/bookings', router);
-
-  const r = await request(app)
-    .post('/api/bookings')
-    .send({ tenantSlug: 't1', tenantId: 999, startTime: new Date().toISOString() });
-
-  expect(r.status).toBe(400);
 });
