@@ -347,6 +347,78 @@ router.post(
 );
 
 // -----------------------------------------------------------------------------
+// POST /api/tenant/:slug/users/manual-add
+// Manually adds an *existing* user to the tenant (no invite flow).
+// Body: { email, role }
+// Notes:
+//   - The target user must already exist in the `users` table.
+//   - If the user does not exist yet, use the invite flow.
+// -----------------------------------------------------------------------------
+router.post(
+  "/:slug/users/manual-add",
+  requireGoogleAuth,
+  ensureUser,
+  resolveTenantIdFromParam,
+  requireTenantRole("owner"),
+  async (req, res) => {
+    try {
+      const email = String(req.body?.email || "")
+        .trim()
+        .toLowerCase();
+      const roleRaw = String(req.body?.role || "viewer").trim();
+      const role = normalizeRole(roleRaw) || "viewer";
+
+      if (!email || !email.includes("@")) {
+        return res.status(400).json({ error: "Invalid email." });
+      }
+      if (!ALLOWED_ROLES.has(role)) {
+        return res.status(400).json({ error: "Invalid role." });
+      }
+
+      // Find the user by email
+      const u = await db.query(
+        `SELECT id, email FROM users WHERE lower(email) = $1 LIMIT 1`,
+        [email]
+      );
+      if (!u.rows.length) {
+        return res.status(404).json({
+          error:
+            "User not found. They need to sign up / log in at least once, or you can send an invite instead.",
+        });
+      }
+      const userId = Number(u.rows[0].id);
+
+      // Already a member?
+      const exists = await db.query(
+        `SELECT 1 FROM tenant_users WHERE tenant_id = $1 AND user_id = $2 LIMIT 1`,
+        [req.tenantId, userId]
+      );
+      if (exists.rows.length) {
+        return res.status(409).json({ error: "User already belongs to this tenant." });
+      }
+
+      const ins = await db.query(
+        `
+        INSERT INTO tenant_users (tenant_id, user_id, role, is_primary)
+        VALUES ($1, $2, $3, false)
+        RETURNING tenant_id, user_id, role
+        `,
+        [req.tenantId, userId, role]
+      );
+
+      return res.status(201).json({ ok: true, membership: ins.rows[0] });
+    } catch (err) {
+      // unique violation race
+      if (err && err.code === "23505") {
+        return res.status(409).json({ error: "User already belongs to this tenant." });
+      }
+      console.error("Manual add tenant user error:", err);
+      return res.status(500).json({ error: "Failed to add user." });
+    }
+  }
+);
+
+// -----------------------------------------------------------------------------
 // GET /api/tenant/:slug/users/invites
 // Lists invites for a tenant
 // Query:
