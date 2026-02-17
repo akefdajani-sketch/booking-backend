@@ -223,4 +223,40 @@ router.delete("/:id/image", resolveTenantFromResourceId, requireAdminOrTenantRol
   }
 });
 
+// ---------------------------------------------------------------------------
+// PATCH /api/resources/:id (admin/manager)
+// Allows updating resource fields (name/type/is_active).
+// `type` is stored as free text (so "Other" can be a custom value).
+// ---------------------------------------------------------------------------
+router.patch("/:id", resolveTenantFromResourceId, requireAdminOrTenantRole("manager"), async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id) || id <= 0) return res.status(400).json({ error: "invalid id" });
+
+    const { name, type, is_active } = req.body || {};
+
+    const sets = [];
+    const params = [];
+    const add = (col, val) => {
+      params.push(val);
+      sets.push(`${col} = $${params.length}`);
+    };
+
+    if (name !== undefined) add("name", name == null ? null : String(name).trim());
+    if (type !== undefined) add("type", type == null ? null : String(type).trim());
+    if (is_active !== undefined) add("is_active", !!is_active);
+
+    if (!sets.length) return res.status(400).json({ error: "No fields to update" });
+
+    params.push(id);
+    const q = `UPDATE resources SET ${sets.join(", ")} WHERE id = $${params.length} RETURNING *`;
+    const result = await db.query(q, params);
+    if (!result.rows.length) return res.status(404).json({ error: "Resource not found" });
+    return res.json({ ok: true, resource: result.rows[0] });
+  } catch (err) {
+    console.error("PATCH /api/resources/:id error:", err);
+    return res.status(500).json({ error: "Failed to update resource" });
+  }
+});
+
 module.exports = router;
