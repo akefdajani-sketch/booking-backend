@@ -58,8 +58,10 @@ router.get("/:slug", async (req, res) => {
     theme = th.rows[0] || { key: "default_v1", tokens_json: {}, layout_key: "classic" };
   }
 
-  // Cache theme payload briefly (themes change rarely, but reduce flicker + load).
-  res.set("Cache-Control", "public, max-age=60, stale-while-revalidate=300");
+  // IMPORTANT:
+  // Banner images are updated frequently during setup and should reflect immediately
+  // on the public booking pages. Avoid caching this payload.
+  res.set("Cache-Control", "no-store");
 
   // Phase 1.5: Lock down public contract (published-only)
   // Public endpoints must NEVER leak draft/working snapshots.
@@ -70,6 +72,30 @@ router.get("/:slug", async (req, res) => {
   const hasPublished = publishedObj && Object.keys(publishedObj).length > 0;
   const isPublished = String(tenant.publish_status || "") === "published";
   const effectiveBranding = (isPublished && hasPublished) ? publishedObj : null;
+
+  // Always overlay the latest banner URLs onto the effective branding.
+  // Tenants can keep a published branding snapshot for tokens, but still expect
+  // banner uploads (stored on the tenant row) to show right away.
+  const tenantBanners = {
+    home: tenant.banner_home_url,
+    book: tenant.banner_book_url,
+    account: tenant.banner_account_url,
+    reservations: tenant.banner_reservations_url,
+    memberships: tenant.banner_memberships_url,
+  };
+
+  const effectiveBrandingWithBanners = effectiveBranding
+    ? {
+        ...effectiveBranding,
+        assets: {
+          ...(effectiveBranding.assets || {}),
+          banners: {
+            ...((effectiveBranding.assets && effectiveBranding.assets.banners) || {}),
+            ...tenantBanners,
+          },
+        },
+      }
+    : null;
 
   // Theme schema is served as the *published* snapshot only.
   // If tenant isn't published yet, this must be null.
@@ -96,15 +122,9 @@ router.get("/:slug", async (req, res) => {
           return true;
         })(),
       },
-      banners: {
-        home: tenant.banner_home_url,
-        book: tenant.banner_book_url,
-        account: tenant.banner_account_url,
-        reservations: tenant.banner_reservations_url,
-        memberships: tenant.banner_memberships_url,
-      },
+      banners: tenantBanners,
       brand_overrides: tenant.brand_overrides_json || {},
-      branding: effectiveBranding,
+      branding: effectiveBrandingWithBanners,
       theme_schema: effectiveThemeSchema,
     },
     theme: {
