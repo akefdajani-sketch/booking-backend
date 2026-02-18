@@ -49,10 +49,12 @@ async function getTenantColumnSet() {
     "banner_reservations_url",
     "banner_account_url",
     "banner_home_url",
+    "banner_memberships_url",
     "banner_book_url1",
     "banner_reservations_url1",
     "banner_account_url1",
     "banner_home_url1",
+    "banner_memberships_url1",
     "theme_key",
     "layout_key",
     "currency_code",
@@ -768,6 +770,11 @@ router.get("/", async (req, res) => {
         : cols.has("banner_home_url1")
           ? "banner_home_url1 AS banner_home_url"
           : "NULL::text AS banner_home_url",
+      cols.has("banner_memberships_url")
+        ? "banner_memberships_url"
+        : cols.has("banner_memberships_url1")
+          ? "banner_memberships_url1 AS banner_memberships_url"
+          : "NULL::text AS banner_memberships_url",
       cols.has("theme_key") ? "theme_key" : "NULL::text AS theme_key",
       cols.has("layout_key") ? "layout_key" : "NULL::text AS layout_key",
       cols.has("currency_code") ? "currency_code" : "NULL::text AS currency_code",
@@ -910,6 +917,11 @@ router.get("/by-slug/:slug", async (req, res) => {
         : cols.has("banner_home_url1")
           ? "banner_home_url1 AS banner_home_url"
           : "NULL::text AS banner_home_url",
+      cols.has("banner_memberships_url")
+        ? "banner_memberships_url"
+        : cols.has("banner_memberships_url1")
+          ? "banner_memberships_url1 AS banner_memberships_url"
+          : "NULL::text AS banner_memberships_url",
       cols.has("theme_key") ? "theme_key" : "NULL::text AS theme_key",
       cols.has("layout_key") ? "layout_key" : "NULL::text AS layout_key",
       cols.has("currency_code") ? "currency_code" : "NULL::text AS currency_code",
@@ -1414,7 +1426,7 @@ router.post(
         return res.status(400).json({ error: "Invalid tenant id" });
       }
 
-      const allowed = new Set(["book", "reservations", "account", "home"]);
+      const allowed = new Set(["book", "reservations", "account", "home", "memberships"]);
       if (!allowed.has(slot)) {
         return res.status(400).json({
           error: "Invalid slot. Must be one of: book, reservations, account, home",
@@ -1490,7 +1502,7 @@ router.delete("/:id/banner/:slot", requireAdmin, async (req, res) => {
       return res.status(400).json({ error: "Invalid tenant id" });
     }
 
-    const allowed = new Set(["book", "reservations", "account", "home"]);
+    const allowed = new Set(["book", "reservations", "account", "home", "memberships"]);
     if (!allowed.has(slot)) {
       return res.status(400).json({
         error: "Invalid slot. Must be one of: book, reservations, account, home",

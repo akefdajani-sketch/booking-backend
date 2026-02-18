@@ -16,7 +16,7 @@ router.get("/:slug", async (req, res) => {
             branding_published,
             publish_status,
             theme_schema_published_json,
-            banner_home_url, banner_book_url, banner_account_url, banner_reservations_url,
+            banner_home_url, banner_book_url, banner_account_url, banner_reservations_url, banner_memberships_url,
             logo_url
      FROM tenants
      WHERE slug = $1`,
@@ -101,6 +101,7 @@ router.get("/:slug", async (req, res) => {
         book: tenant.banner_book_url,
         account: tenant.banner_account_url,
         reservations: tenant.banner_reservations_url,
+        memberships: tenant.banner_memberships_url,
       },
       brand_overrides: tenant.brand_overrides_json || {},
       branding: effectiveBranding,
