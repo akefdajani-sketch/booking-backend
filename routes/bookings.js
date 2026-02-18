@@ -8,6 +8,8 @@ const requireAdminOrTenantRole = require("../middleware/requireAdminOrTenantRole
 const requireGoogleAuth = require("../middleware/requireGoogleAuth");
 const { requireTenant } = require("../middleware/requireTenant");
 const { ensureBookingMoneyColumns } = require("../utils/ensureBookingMoneyColumns");
+const { ensureBookingRateColumns } = require("../utils/ensureBookingRateColumns");
+const { computeRateForBookingLike } = require("../utils/ratesEngine");
 const { checkConflicts, loadJoinedBookingById } = require("../utils/bookings");
 
 function shouldUseCustomerHistory(req) {
@@ -1329,9 +1331,36 @@ router.post("/", requireGoogleAuth, requireTenant, async (req, res) => {
           price_amount = Math.round(base * 100) / 100;
         }
       }
-      const charge_amount = finalCustomerMembershipId ? 0 : price_amount;
+      
+      // Apply dynamic Rates rules (if configured).
+      // Non-fatal: if rate_rules table is not present yet, bookings still succeed.
+      let applied_rate_rule_id = null;
+      let applied_rate_snapshot = null;
+      try {
+        if (price_amount != null && Number.isFinite(Number(price_amount))) {
+          const computed = await computeRateForBookingLike({
+            tenantId: resolvedTenantId,
+            serviceId: resolvedServiceId,
+            staffId: staff_id,
+            resourceId: resource_id,
+            start,
+            durationMinutes: Number(duration),
+            basePriceAmount: Number(price_amount),
+          });
+          if (computed && computed.adjusted_price_amount != null) {
+            price_amount = Number(computed.adjusted_price_amount);
+          }
+          applied_rate_rule_id = computed?.applied_rate_rule_id ?? null;
+          applied_rate_snapshot = computed?.applied_rate_snapshot ?? null;
+        }
+      } catch (e) {
+        console.warn("ratesEngine non-fatal error (booking create):", e?.message || e);
+      }
+
+const charge_amount = finalCustomerMembershipId ? 0 : price_amount;
 
       const hasMoneyCols = await ensureBookingMoneyColumns();
+      const hasRateCols = await ensureBookingRateColumns();
 
       let bookingId;
       let created = true;
@@ -1358,7 +1387,18 @@ router.post("/", requireGoogleAuth, requireTenant, async (req, res) => {
         let insertSql;
         let insertParams = baseVals;
 
-        if (hasMoneyCols) {
+        if (hasMoneyCols && hasRateCols) {
+          insertSql = `
+          INSERT INTO bookings
+            (${baseCols}, price_amount, charge_amount, currency_code, applied_rate_rule_id, applied_rate_snapshot)
+          VALUES
+            ($1, $2, $3, $4, $5, $6,
+             $7, $8, $9, $10, $11, $12, $13,
+             $14, $15, $16, $17, $18)
+          RETURNING id;
+          `;
+          insertParams = [...baseVals, price_amount, charge_amount, tenantCurrencyCode, applied_rate_rule_id, applied_rate_snapshot];
+        } else if (hasMoneyCols) {
           insertSql = `
           INSERT INTO bookings
             (${baseCols}, price_amount, charge_amount, currency_code)
