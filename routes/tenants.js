@@ -1429,7 +1429,8 @@ router.post(
       const allowed = new Set(["book", "reservations", "account", "home", "memberships"]);
       if (!allowed.has(slot)) {
         return res.status(400).json({
-          error: "Invalid slot. Must be one of: book, reservations, account, home",
+          error:
+            "Invalid slot. Must be one of: home, book, reservations, memberships, account",
         });
       }
 
@@ -1505,7 +1506,8 @@ router.delete("/:id/banner/:slot", requireAdmin, async (req, res) => {
     const allowed = new Set(["book", "reservations", "account", "home", "memberships"]);
     if (!allowed.has(slot)) {
       return res.status(400).json({
-        error: "Invalid slot. Must be one of: book, reservations, account, home",
+        error:
+          "Invalid slot. Must be one of: home, book, reservations, memberships, account",
       });
     }
 
