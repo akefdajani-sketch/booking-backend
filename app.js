@@ -26,6 +26,7 @@ const tenantHomeLandingRouter = require("./routes/tenantHomeLanding");
 const tenantBrandingRouter = require("./routes/tenantBranding");
 const tenantMembershipCheckoutRouter = require("./routes/tenantMembershipCheckout");
 const tenantRatesRouter = require("./routes/tenantRates");
+const tenantBookingsRouter = require("./routes/tenantBookings");
 
 const uploadsRouter = require("./routes/uploads");
 
@@ -74,6 +75,7 @@ app.use("/api/tenant", tenantHomeLandingRouter);
 app.use("/api/tenant", tenantBrandingRouter);
 app.use("/api/tenant", tenantMembershipCheckoutRouter);
 app.use("/api/tenant", tenantRatesRouter);
+app.use("/api/tenant", tenantBookingsRouter);
 app.use("/api/invites", invitesRouter);
 
 // uploads
