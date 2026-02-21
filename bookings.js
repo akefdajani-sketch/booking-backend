@@ -217,7 +217,7 @@ router.get(
           `SELECT id, email FROM customers WHERE tenant_id = $1 AND id = $2 LIMIT 1`,
           [tenantId, customerId]
         );
-        if (c.rows.length === 0) return res.json({ bookings: [] });
+        if (c.rows.length === 0) return res.json({ ok: true, data: { bookings: [] } });
         const rowEmail = String(c.rows[0].email || "").trim().toLowerCase();
         if (rowEmail !== googleEmail) return res.status(403).json({ error: "Forbidden" });
       } else {
@@ -229,7 +229,7 @@ router.get(
         customerId = c.rows[0]?.id ?? null;
       }
 
-      if (!customerId) return res.json({ bookings: [] });
+      if (!customerId) return res.json({ ok: true, data: { bookings: [] } });
 
       const result = await db.query(
         `
@@ -250,7 +250,7 @@ router.get(
         [tenantId, customerId]
       );
 
-      return res.json({ bookings: result.rows || [] });
+      return res.json({ ok: true, data: { bookings: result.rows || [] } });
     } catch (err) {
       console.error("Customer bookings history error:", err);
       return res.status(500).json({ error: "Failed to load bookings" });
@@ -447,12 +447,15 @@ router.get("/", requireAdmin, requireTenant, async (req, res) => {
     const last = rows.length ? rows[rows.length - 1] : null;
 
     return res.json({
-      bookings: rows,
-      nextCursor: last
-        ? (isLatest
-            ? { created_at: last.created_at, id: last.id }
-            : { start_time: last.start_time, id: last.id })
-        : null,
+      ok: true,
+      data: {
+        bookings: rows,
+        nextCursor: last
+          ? (isLatest
+              ? { created_at: last.created_at, id: last.id }
+              : { start_time: last.start_time, id: last.id })
+          : null,
+      },
     });
   } catch (err) {
     console.error("Error loading bookings:", err);
@@ -554,7 +557,7 @@ router.get("/count", requireAdmin, requireTenant, async (req, res) => {
     `;
 
     const result = await db.query(sql, params);
-    return res.json({ total: result.rows?.[0]?.total ?? 0 });
+    return res.json({ ok: true, data: { total: result.rows?.[0]?.total ?? 0 } });
   } catch (err) {
     console.error("Error counting bookings:", err);
     return res.status(500).json({ error: "Failed to count bookings" });
@@ -585,7 +588,7 @@ router.get("/:id", requireAdmin, requireTenant, async (req, res) => {
     }
 
     const joined = await loadJoinedBookingById(bookingId, tenantId);
-    return res.json({ booking: joined });
+    return res.json({ ok: true, data: { booking: joined } });
   } catch (err) {
     console.error("Error loading booking:", err);
     return res.status(500).json({ error: "Failed to load booking" });
@@ -630,7 +633,7 @@ router.patch("/:id/status", requireAdmin, requireTenant, async (req, res) => {
 
     if (currentStatus === nextStatus) {
       const joined = await loadJoinedBookingById(bookingId, tenantId);
-      return res.json({ booking: joined });
+      return res.json({ ok: true, data: { booking: joined } });
     }
 
     const upd = await db.query(
@@ -646,7 +649,7 @@ router.patch("/:id/status", requireAdmin, requireTenant, async (req, res) => {
     await bumpTenantBookingChange(tenantId);
 
     const joined = await loadJoinedBookingById(bookingId, tenantId);
-    return res.json({ booking: joined });
+    return res.json({ ok: true, data: { booking: joined } });
   } catch (err) {
     console.error("Error updating booking status:", err);
     return res.status(500).json({ error: "Failed to update booking status." });
@@ -697,7 +700,7 @@ router.delete("/:id", requireAdmin, requireTenant, async (req, res) => {
     await bumpTenantBookingChange(tenantId);
 
     const joined = await loadJoinedBookingById(bookingId, tenantId);
-    return res.json({ booking: joined });
+    return res.json({ ok: true, data: { booking: joined } });
   } catch (err) {
     console.error("Error cancelling booking:", err);
     return res.status(500).json({ error: "Failed to cancel booking." });
