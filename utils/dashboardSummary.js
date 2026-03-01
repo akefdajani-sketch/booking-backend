@@ -371,7 +371,9 @@ const kpi = await db.query(
         if (!/^\d{2}:\d{2}$/.test(st) || !/^\d{2}:\d{2}$/.test(et)) continue;
         const [sh, sm] = st.split(":").map(Number);
         const [eh, em] = et.split(":").map(Number);
-        const mins = (eh * 60 + em) - (sh * 60 + sm);
+        let mins = (eh * 60 + em) - (sh * 60 + sm);
+        // Support overnight hours (e.g., 10:00 -> 00:00 means close at midnight next day)
+        if (mins <= 0) mins += 24 * 60;
         if (mins > 0) openMinutes += mins;
       }
       cursor.setUTCDate(cursor.getUTCDate() + 1);
@@ -379,6 +381,142 @@ const kpi = await db.query(
 
     const capacityMinutes = openMinutes * capacityUnits;
     if (capacityMinutes > 0) utilizationPct = Math.round((bookedMinutes / capacityMinutes) * 100);
+  }
+
+
+  // ---------------------------------------------------------------------------
+  // Utilization over time series (hourly/daily)
+  // Adds: summary.series.utilization_over_time = [{ bucket, label, utilization_pct, booked_minutes, capacity_minutes }]
+  // SaaS-grade notes:
+  // - Uses booking overlap with each bucket interval.
+  // - Uses tenant_hours overlap with each bucket interval (supports overnight hours).
+  // - If capacity minutes are 0 for a bucket, utilization_pct is null.
+  // ---------------------------------------------------------------------------
+
+  let utilizationOverTime = [];
+
+  try {
+    if (hoursReg.rows?.[0]?.reg && capacityUnits > 0) {
+      // Pull confirmed bookings in range with duration so we can compute overlaps.
+      const bRows = await db.query(
+        `
+        SELECT ${startCol} AS start_time,
+               COALESCE(CASE WHEN b.status='confirmed' THEN (${bookedMinutesExpr}) ELSE 0 END, 0)::int AS minutes
+        FROM bookings b
+        WHERE b.tenant_id=$1
+          AND b.status='confirmed'
+          AND ${startCol} >= $2
+          AND ${startCol} < $3
+        `,
+        [tenantId, rangeStart.toISOString(), rangeEnd.toISOString()]
+      );
+
+      const bookingsInRange = (bRows.rows || [])
+        .map((r) => {
+          const st = new Date(r.start_time);
+          const mins = Number(r.minutes) || 0;
+          const en = new Date(st.getTime() + mins * 60 * 1000);
+          return { st, en, mins };
+        })
+        .filter((b) => b.mins > 0 && b.en > b.st);
+
+      const hoursRows = hours.rows || [];
+
+      const minutesBetween = (a, b) => Math.max(0, Math.round((b.getTime() - a.getTime()) / 60000));
+
+      const overlapMins = (a0, a1, b0, b1) => {
+        const s = a0 > b0 ? a0 : b0;
+        const e = a1 < b1 ? a1 : b1;
+        return e > s ? minutesBetween(s, e) : 0;
+      };
+
+      const getBusinessIntervalsForDayUTC = (dayStartUtc) => {
+        // returns array of [openDateUtc, closeDateUtc] for this day, handling overnight.
+        const dow = dayStartUtc.getUTCDay();
+        const todays = hoursRows.filter((r) => Number(r.day_of_week) === dow);
+        const intervals = [];
+        for (const r of todays) {
+          if (r.is_closed === true) continue;
+          const st = String(r.open_time || "").slice(0, 5);
+          const et = String(r.close_time || "").slice(0, 5);
+          if (!/^\d{2}:\d{2}$/.test(st) || !/^\d{2}:\d{2}$/.test(et)) continue;
+          const [sh, sm] = st.split(":").map(Number);
+          const [eh, em] = et.split(":").map(Number);
+          const open = new Date(dayStartUtc.getTime());
+          open.setUTCHours(sh, sm, 0, 0);
+          const close = new Date(dayStartUtc.getTime());
+          close.setUTCHours(eh, em, 0, 0);
+          // Overnight: close <= open means close on next day.
+          if (close.getTime() <= open.getTime()) close.setUTCDate(close.getUTCDate() + 1);
+          intervals.push([open, close]);
+        }
+        return intervals;
+      };
+
+      const addBucket = (bucketStart, bucketEnd, label) => {
+        // booked overlap
+        let booked = 0;
+        for (const b of bookingsInRange) {
+          booked += overlapMins(bucketStart, bucketEnd, b.st, b.en);
+        }
+
+        // capacity overlap (open minutes) for this bucket
+        let openMins = 0;
+        // For hourly buckets, bucketStart is within a single day, but hours can be overnight -> might overlap next day too.
+        // We'll compute overlap against today's intervals and also previous day's intervals (for overnight spill into current day).
+        const day0 = new Date(bucketStart.getTime());
+        day0.setUTCHours(0, 0, 0, 0);
+        const dayPrev = new Date(day0.getTime());
+        dayPrev.setUTCDate(dayPrev.getUTCDate() - 1);
+
+        const intervals = [
+          ...getBusinessIntervalsForDayUTC(day0),
+          ...getBusinessIntervalsForDayUTC(dayPrev),
+        ];
+
+        for (const [open, close] of intervals) {
+          openMins += overlapMins(bucketStart, bucketEnd, open, close);
+        }
+
+        const capacityMins = openMins * capacityUnits;
+        const utilPct = capacityMins > 0 ? Math.round((booked / capacityMins) * 100) : null;
+
+        utilizationOverTime.push({
+          bucket: bucketStart.toISOString(),
+          label,
+          utilization_pct: utilPct,
+          booked_minutes: booked,
+          capacity_minutes: capacityMins,
+        });
+      };
+
+      if (safeMode === "day") {
+        // 24 hourly buckets
+        for (let i = 0; i < 24; i++) {
+          const s = new Date(rangeStart.getTime() + i * 3600 * 1000);
+          const e = new Date(rangeStart.getTime() + (i + 1) * 3600 * 1000);
+          const hh = String(s.getUTCHours()).padStart(2, "0");
+          addBucket(s, e, `${hh}:00`);
+        }
+      } else {
+        // daily buckets across the range
+        const cursor2 = new Date(rangeStart.getTime());
+        while (cursor2.getTime() < rangeEnd.getTime()) {
+          const s = new Date(cursor2.getTime());
+          const e = new Date(cursor2.getTime());
+          e.setUTCDate(e.getUTCDate() + 1);
+          const label = s.toISOString().slice(0, 10); // YYYY-MM-DD
+          addBucket(s, e, label);
+          cursor2.setUTCDate(cursor2.getUTCDate() + 1);
+        }
+      }
+
+      // If all utilPct are null (capacity not configured), return empty to avoid misleading charts.
+      const anyNonNull = utilizationOverTime.some((p) => p.utilization_pct != null);
+      if (!anyNonNull) utilizationOverTime = [];
+    }
+  } catch (e) {
+    utilizationOverTime = [];
   }
 
   const nextBookings = (next.rows || []).map((r) => {
@@ -547,6 +685,7 @@ const kpi = await db.query(
     bookings_over_time: [],
     revenue_over_time: [],
     revenue_by_service: [],
+    utilization_over_time: utilizationOverTime || [],
   };
 
   try {
