@@ -216,21 +216,46 @@ async function getDashboardSummary({ tenantId, tenantSlug, mode, dateStr }) {
     );
   }
 
-  const safeMode = mode === "week" || mode === "month" ? mode : "day";
+  
+  const endCol = await pickCol("bookings", "b", [
+    "end_time",
+    "end_at",
+    "end_datetime",
+    "ends_at",
+    "end",
+  ]);
+
+  const durationCol = await pickCol("bookings", "b", [
+    "duration_minutes",
+    "duration_mins",
+    "duration_min",
+    "duration",
+    "minutes",
+  ]);
+
+const safeMode = mode === "week" || mode === "month" ? mode : "day";
   const safeDate = parseISODateOnly(dateStr) || new Date().toISOString().slice(0, 10);
 
   const { rangeStart, rangeEnd } = computeRange(safeMode, safeDate);
 
   const revenueSelect = hasMoneyCols ? "COALESCE(SUM(charge_amount) FILTER (WHERE status='confirmed'), 0)::numeric AS revenue_amount," : "0::numeric AS revenue_amount,";
 
-  const kpi = await db.query(
+  
+  // Booked minutes: prefer stored duration_minutes; fallback to (end-start) if available.
+  // If neither exists, we cannot compute utilization reliably, so treat as 0.
+  const bookedMinutesExpr =
+    durationCol ? `${durationCol}` :
+    endCol ? `GREATEST(0, ROUND(EXTRACT(EPOCH FROM (${endCol} - ${startCol})) / 60.0))` :
+    "0";
+
+const kpi = await db.query(
     `
     SELECT
       COUNT(*) FILTER (WHERE status='confirmed')::int AS confirmed_count,
       COUNT(*) FILTER (WHERE status='pending')::int AS pending_count,
       COUNT(*) FILTER (WHERE status='cancelled')::int AS cancelled_count,
       ${revenueSelect}
-      COALESCE(SUM(duration_minutes) FILTER (WHERE status='confirmed'), 0)::int AS booked_minutes
+      COALESCE(SUM(CASE WHEN b.status='confirmed' THEN (${bookedMinutesExpr}) ELSE 0 END), 0)::int AS booked_minutes
     FROM bookings b
     WHERE b.tenant_id=$1
       AND ${startCol} >= $2
