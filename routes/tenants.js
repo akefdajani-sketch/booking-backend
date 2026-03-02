@@ -944,6 +944,18 @@ router.get("/by-slug/:slug", async (req, res) => {
       cols.has("theme_key") ? "theme_key" : "NULL::text AS theme_key",
       cols.has("layout_key") ? "layout_key" : "NULL::text AS layout_key",
       cols.has("currency_code") ? "currency_code" : "NULL::text AS currency_code",
+      // General settings (optional columns; schema-compat)
+      cols.has("default_phone_country_code")
+        ? "default_phone_country_code"
+        : "NULL::text AS default_phone_country_code",
+      cols.has("address_line1") ? "address_line1" : "NULL::text AS address_line1",
+      cols.has("address_line2") ? "address_line2" : "NULL::text AS address_line2",
+      cols.has("city") ? "city" : "NULL::text AS city",
+      cols.has("region") ? "region" : "NULL::text AS region",
+      cols.has("postal_code") ? "postal_code" : "NULL::text AS postal_code",
+      cols.has("country_code") ? "country_code" : "NULL::text AS country_code",
+      cols.has("admin_name") ? "admin_name" : "NULL::text AS admin_name",
+      cols.has("admin_email") ? "admin_email" : "NULL::text AS admin_email",
       "created_at",
     ].join(",\n        ");
 
