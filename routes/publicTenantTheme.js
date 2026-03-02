@@ -2,6 +2,30 @@ const express = require("express");
 const router = express.Router();
 const db = require("../db");
 
+// Schema-compat: public endpoints must not crash if a newer optional column
+// doesn't exist yet in an environment.
+let __tenantColCache = null;
+async function hasTenantColumn(col) {
+  if (!__tenantColCache) {
+    try {
+      const r = await db.query(
+        `
+        SELECT column_name
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'tenants'
+          AND column_name = ANY($1::text[])
+        `,
+        [["default_phone_country_code"]]
+      );
+      __tenantColCache = new Set(r.rows.map((x) => x.column_name));
+    } catch {
+      __tenantColCache = new Set();
+    }
+  }
+  return __tenantColCache.has(col);
+}
+
 // Public, cacheable tenant appearance payload for /book/[slug]
 //
 // IMPORTANT:
@@ -10,12 +34,17 @@ const db = require("../db");
 router.get("/:slug", async (req, res) => {
   const { slug } = req.params;
 
+  const defaultPhoneSel = (await hasTenantColumn("default_phone_country_code"))
+    ? "default_phone_country_code"
+    : "NULL::text AS default_phone_country_code";
+
   const t = await db.query(
     `SELECT id, slug, theme_key, brand_overrides_json,
             branding,
             branding_published,
             publish_status,
             theme_schema_published_json,
+            ${defaultPhoneSel},
             banner_home_url, banner_book_url, banner_account_url, banner_reservations_url, banner_memberships_url,
             logo_url
      FROM tenants
@@ -120,6 +149,12 @@ router.get("/:slug", async (req, res) => {
             return ["1", "true", "yes", "y"].includes(v.trim().toLowerCase());
           }
           return true;
+        })(),
+
+        // Optional. Used for prefilling customer phone fields.
+        default_phone_country_code: (() => {
+          const s = String(tenant.default_phone_country_code || "").trim();
+          return s || null;
         })(),
       },
       banners: tenantBanners,
