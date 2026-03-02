@@ -58,7 +58,16 @@ async function getTenantColumnSet() {
     "theme_key",
     "layout_key",
     "currency_code",
-  ];
+
+    "default_phone_country_code",
+    "address_line1",
+    "address_line2",
+    "city",
+    "region",
+    "postal_code",
+    "country_code",
+    "admin_name",
+    "admin_email",  ];
   const r = await db.query(
     `
     SELECT column_name
@@ -778,6 +787,15 @@ router.get("/", async (req, res) => {
       cols.has("theme_key") ? "theme_key" : "NULL::text AS theme_key",
       cols.has("layout_key") ? "layout_key" : "NULL::text AS layout_key",
       cols.has("currency_code") ? "currency_code" : "NULL::text AS currency_code",
+    cols.has("default_phone_country_code") ? "default_phone_country_code" : "NULL::text AS default_phone_country_code",
+    cols.has("address_line1") ? "address_line1" : "NULL::text AS address_line1",
+    cols.has("address_line2") ? "address_line2" : "NULL::text AS address_line2",
+    cols.has("city") ? "city" : "NULL::text AS city",
+    cols.has("region") ? "region" : "NULL::text AS region",
+    cols.has("postal_code") ? "postal_code" : "NULL::text AS postal_code",
+    cols.has("country_code") ? "country_code" : "NULL::text AS country_code",
+    cols.has("admin_name") ? "admin_name" : "NULL::text AS admin_name",
+    cols.has("admin_email") ? "admin_email" : "NULL::text AS admin_email",
       "created_at",
     ].join(",\n        ");
 
@@ -1045,6 +1063,91 @@ router.get("/:id", requireAdmin, async (req, res) => {
   } catch (err) {
     console.error("Error loading tenant by id:", err);
     return res.status(500).json({ error: "Failed to load tenant" });
+  }
+});
+
+
+
+// -----------------------------------------------------------------------------
+// PATCH /api/tenants/:id/general
+// Admin or Tenant Owner: update core tenant settings (General tab)
+// -----------------------------------------------------------------------------
+router.patch("/:id/general", setTenantIdFromParamForRole, requireAdminOrTenantRole("owner"), async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id) || id <= 0) {
+      return res.status(400).json({ error: "Invalid tenant id" });
+    }
+
+    const cols = await getTenantColumnSet();
+
+    // Always-available core fields
+    const name = String(req.body?.name ?? "").trim();
+    const slug = String(req.body?.slug ?? "").trim();
+    const kind = String(req.body?.kind ?? "").trim();
+    const timezone = String(req.body?.timezone ?? "").trim();
+
+    // Optional columns (schema compat)
+    const default_phone_country_code = String(req.body?.default_phone_country_code ?? "").trim();
+    const address_line1 = String(req.body?.address_line1 ?? "").trim();
+    const address_line2 = String(req.body?.address_line2 ?? "").trim();
+    const city = String(req.body?.city ?? "").trim();
+    const region = String(req.body?.region ?? "").trim();
+    const postal_code = String(req.body?.postal_code ?? "").trim();
+    const country_code = String(req.body?.country_code ?? "").trim();
+    const admin_name = String(req.body?.admin_name ?? "").trim();
+    const admin_email = String(req.body?.admin_email ?? "").trim();
+
+    if (!name) return res.status(400).json({ error: "Tenant name is required." });
+    if (!slug) return res.status(400).json({ error: "Tenant slug is required." });
+    if (!timezone) return res.status(400).json({ error: "Time zone is required." });
+
+    // Build safe update statement based on existing columns
+    const sets = [];
+    const vals = [];
+    let i = 1;
+
+    const push = (col, val) => {
+      sets.push(`${col} = $${i++}`);
+      vals.push(val);
+    };
+
+    push("name", name);
+    push("slug", slug);
+    if (kind) push("kind", kind);
+    push("timezone", timezone);
+
+    if (cols.has("default_phone_country_code")) push("default_phone_country_code", default_phone_country_code || null);
+    if (cols.has("address_line1")) push("address_line1", address_line1 || null);
+    if (cols.has("address_line2")) push("address_line2", address_line2 || null);
+    if (cols.has("city")) push("city", city || null);
+    if (cols.has("region")) push("region", region || null);
+    if (cols.has("postal_code")) push("postal_code", postal_code || null);
+    if (cols.has("country_code")) push("country_code", country_code || null);
+    if (cols.has("admin_name")) push("admin_name", admin_name || null);
+    if (cols.has("admin_email")) push("admin_email", admin_email || null);
+
+    if (sets.length === 0) return res.status(400).json({ error: "No fields to update." });
+
+    vals.push(id);
+
+    const r = await db.query(
+      `
+      UPDATE tenants
+      SET ${sets.join(", ")}, updated_at = NOW()
+      WHERE id = $${i}
+      RETURNING *
+      `,
+      vals
+    );
+
+    const updated = r.rows?.[0];
+    if (!updated) return res.status(404).json({ error: "Tenant not found." });
+
+    return res.json({ tenant: updated });
+  } catch (err) {
+    console.error("Error updating tenant general:", err);
+    return res.status(500).json({ error: "Failed to update tenant settings." });
   }
 });
 
