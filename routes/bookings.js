@@ -578,6 +578,13 @@ router.get("/", requireTenant, requireAdminOrTenantRole("staff"), async (req, re
         b.start_time,
         b.duration_minutes,
 
+        -- Money + applied Rates snapshot (for booking details modals / receipts)
+        b.price_amount,
+        b.charge_amount,
+        b.currency_code,
+        b.applied_rate_rule_id,
+        b.applied_rate_snapshot,
+
         b.customer_id,
         COALESCE(c.name, b.customer_name)   AS customer_name,
         COALESCE(c.phone, b.customer_phone) AS customer_phone,
