@@ -144,6 +144,14 @@ async function loadJoinedBookingById(bookingId, tenantId) {
       b.created_at,
       b.booking_code,
 
+      -- Money + applied Rates snapshot (optional columns; present in v1 hardened schema)
+      b.price_amount,
+      b.charge_amount,
+      b.currency_code,
+      b.applied_rate_rule_id,
+      b.applied_rate_snapshot,
+      rr.name AS applied_rate_rule_name,
+
       mp.name AS membership_plan_name,
       cm.minutes_remaining AS membership_minutes_remaining,
       cm.uses_remaining AS membership_uses_remaining,
@@ -154,6 +162,7 @@ async function loadJoinedBookingById(bookingId, tenantId) {
     LEFT JOIN services s ON s.tenant_id = b.tenant_id AND s.id = b.service_id
     LEFT JOIN staff st ON st.tenant_id = b.tenant_id AND st.id = b.staff_id
     LEFT JOIN resources r ON r.tenant_id = b.tenant_id AND r.id = b.resource_id
+    LEFT JOIN rate_rules rr ON rr.tenant_id = b.tenant_id AND rr.id = b.applied_rate_rule_id
     LEFT JOIN customer_memberships cm ON cm.id = b.customer_membership_id
     LEFT JOIN membership_plans mp ON mp.id = cm.plan_id
     LEFT JOIN LATERAL (

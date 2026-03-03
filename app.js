@@ -28,6 +28,9 @@ const tenantMembershipCheckoutRouter = require("./routes/tenantMembershipCheckou
 const tenantRatesRouter = require("./routes/tenantRates");
 const tenantBookingsRouter = require("./routes/tenantBookings");
 
+// Public endpoints (no auth): pricing quote, etc.
+const publicPricingRouter = require("./routes/publicPricing");
+
 const uploadsRouter = require("./routes/uploads");
 
 // NEW theme routers
@@ -77,6 +80,9 @@ app.use("/api/tenant", tenantMembershipCheckoutRouter);
 app.use("/api/tenant", tenantRatesRouter);
 app.use("/api/tenant", tenantBookingsRouter);
 app.use("/api/invites", invitesRouter);
+
+// Public APIs (tenant slug in path)
+app.use("/api/public", publicPricingRouter);
 
 // uploads
 app.use("/api/uploads", uploadsRouter);
