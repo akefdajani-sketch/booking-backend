@@ -1149,6 +1149,47 @@ async function getDashboardSummary({ tenantId, tenantSlug, mode, dateStr }) {
       customerPulseSupported: true,
       staffUtilizationSupported: staffCount > 0,
       resourceUtilizationSupported: resourceCount > 0,
+      widgetSupport: {
+        bookingsOverTime: true,
+        revenueByService: true,
+        utilization: true,
+        customerPulse: true,
+        alerts: Array.isArray(rules) && rules.length > 0,
+        insights: Array.isArray(insights) && insights.length > 0,
+      },
+      widgetVisibilityDefaults: {
+        bookings_over_time: true,
+        revenue_by_service: true,
+        utilization: true,
+        customer_pulse: true,
+        next_up: true,
+        customer_pulse_panel: true,
+        rules_alerts: true,
+        insights: true,
+      },
+    },
+    drilldowns: {
+      bookings: {
+        href: `/${encodeURIComponent(tenantSlug)}?tab=bookings&from=${encodeURIComponent(rangeStart.toISOString())}&to=${encodeURIComponent(rangeEnd.toISOString())}`,
+      },
+      revenue: {
+        href: `/${encodeURIComponent(tenantSlug)}?tab=bookings&from=${encodeURIComponent(rangeStart.toISOString())}&to=${encodeURIComponent(rangeEnd.toISOString())}`,
+      },
+      utilization: {
+        href: `/${encodeURIComponent(tenantSlug)}?tab=dayview&date=${encodeURIComponent(safeDate)}&focus=utilization`,
+      },
+      repeatCustomers: {
+        href: `/${encodeURIComponent(tenantSlug)}?tab=customers&segment=returning`,
+      },
+      customerPulse: {
+        href: `/${encodeURIComponent(tenantSlug)}?tab=customers`,
+      },
+      alerts: {
+        href: `/${encodeURIComponent(tenantSlug)}?tab=bookings&from=${encodeURIComponent(rangeStart.toISOString())}&to=${encodeURIComponent(rangeEnd.toISOString())}`,
+      },
+      noShow: {
+        href: `/${encodeURIComponent(tenantSlug)}?tab=bookings&status=no_show&from=${encodeURIComponent(rangeStart.toISOString())}&to=${encodeURIComponent(rangeEnd.toISOString())}`,
+      },
     },
   };
 }
