@@ -642,6 +642,169 @@ async function getDashboardSummary({ tenantId, tenantSlug, mode, dateStr }) {
     }
   } catch {}
 
+  // Top returning customers in the selected range.
+  let topReturning = [];
+  try {
+    const topRet = await db.query(
+      `
+      WITH lifetime AS (
+        SELECT customer_id, COUNT(*)::int AS lifetime_bookings
+        FROM bookings b
+        WHERE b.tenant_id=$1 AND b.customer_id IS NOT NULL
+        GROUP BY customer_id
+      )
+      SELECT
+        COALESCE(NULLIF(TRIM(COALESCE(c.name, MAX(b.customer_name))), ''), 'Customer') AS customer_name,
+        COUNT(*)::int AS range_bookings
+      FROM bookings b
+      LEFT JOIN customers c ON c.tenant_id=b.tenant_id AND c.id=b.customer_id
+      JOIN lifetime l ON l.customer_id=b.customer_id
+      WHERE b.tenant_id=$1
+        AND ${startCol} >= $2
+        AND ${startCol} < $3
+        AND b.customer_id IS NOT NULL
+        AND l.lifetime_bookings >= 2
+      GROUP BY b.customer_id
+      ORDER BY range_bookings DESC, customer_name ASC
+      LIMIT 5
+      `,
+      [tenantId, rangeStart.toISOString(), rangeEnd.toISOString()]
+    );
+    topReturning = (topRet.rows || []).map((r) => ({
+      name: String(r.customer_name || 'Customer'),
+      count: Number(r.range_bookings || 0),
+    }));
+  } catch {}
+
+  // Customer mix over time: distinct active customers by bucket, split into new vs returning.
+  let customerMixOverTime = [];
+  try {
+    const cm = await db.query(
+      `
+      WITH totals AS (
+        SELECT customer_id, COUNT(*)::int AS lifetime_bookings
+        FROM bookings b
+        WHERE b.tenant_id=$1 AND b.customer_id IS NOT NULL
+        GROUP BY customer_id
+      ), bucketed AS (
+        SELECT
+          date_trunc('${truncUnit}', ${startCol}) AS bucket,
+          b.customer_id,
+          MAX(CASE WHEN COALESCE(t.lifetime_bookings, 0) >= 2 THEN 1 ELSE 0 END) AS is_returning
+        FROM bookings b
+        LEFT JOIN totals t ON t.customer_id=b.customer_id
+        WHERE b.tenant_id=$1
+          AND ${startCol} >= $2
+          AND ${startCol} < $3
+          AND b.customer_id IS NOT NULL
+        GROUP BY 1, 2
+      )
+      SELECT
+        bucket,
+        COUNT(*) FILTER (WHERE is_returning = 0)::int AS new_customers,
+        COUNT(*) FILTER (WHERE is_returning = 1)::int AS returning_customers
+      FROM bucketed
+      GROUP BY 1
+      ORDER BY 1 ASC
+      `,
+      [tenantId, rangeStart.toISOString(), rangeEnd.toISOString()]
+    );
+    customerMixOverTime = (cm.rows || []).map((r) => ({
+      bucket: r.bucket,
+      new_customers: Number(r.new_customers || 0),
+      returning_customers: Number(r.returning_customers || 0),
+    }));
+  } catch {}
+
+  // Staff utilization / load in the selected range.
+  let staffUtilization = [];
+  try {
+    if (staffCount > 0) {
+      const staffHoursReg = await db.query(`SELECT to_regclass('public.staff_weekly_schedule') AS reg`);
+      let openMinutesPerStaff = 0;
+      if (staffHoursReg.rows?.[0]?.reg) {
+        const staffHours = await db.query(
+          `SELECT day_of_week, start_time, end_time, is_off FROM staff_weekly_schedule WHERE tenant_id=$1`,
+          [tenantId]
+        );
+        const rows = staffHours.rows || [];
+        const cursor = new Date(rangeStart.getTime());
+        while (cursor.getTime() < rangeEnd.getTime()) {
+          const dow = cursor.getUTCDay();
+          const todays = rows.filter((r) => Number(r.day_of_week) === dow);
+          for (const r of todays) {
+            if (r.is_off === true) continue;
+            const st = String(r.start_time || '').slice(0, 5);
+            const et = String(r.end_time || '').slice(0, 5);
+            if (!/^\d{2}:\d{2}$/.test(st) || !/^\d{2}:\d{2}$/.test(et)) continue;
+            const [sh, sm] = st.split(':').map(Number);
+            const [eh, em] = et.split(':').map(Number);
+            const startMin = sh * 60 + sm;
+            let endMin = eh * 60 + em;
+            if (endMin <= startMin) endMin += 24 * 60;
+            const mins = endMin - startMin;
+            if (mins > 0) openMinutesPerStaff += mins;
+          }
+          cursor.setUTCDate(cursor.getUTCDate() + 1);
+        }
+      }
+
+      if (!openMinutesPerStaff) {
+        const hoursReg2 = await db.query(`SELECT to_regclass('public.tenant_hours') AS reg`);
+        if (hoursReg2.rows?.[0]?.reg) {
+          const hours = await db.query(`SELECT day_of_week, open_time, close_time, is_closed FROM tenant_hours WHERE tenant_id=$1`, [tenantId]);
+          const rows = hours.rows || [];
+          const cursor = new Date(rangeStart.getTime());
+          while (cursor.getTime() < rangeEnd.getTime()) {
+            const dow = cursor.getUTCDay();
+            const todays = rows.filter((r) => Number(r.day_of_week) === dow);
+            for (const r of todays) {
+              if (r.is_closed === true) continue;
+              const st = String(r.open_time || '').slice(0, 5);
+              const et = String(r.close_time || '').slice(0, 5);
+              if (!/^\d{2}:\d{2}$/.test(st) || !/^\d{2}:\d{2}$/.test(et)) continue;
+              const [sh, sm] = st.split(':').map(Number);
+              const [eh, em] = et.split(':').map(Number);
+              const startMin = sh * 60 + sm;
+              let endMin = eh * 60 + em;
+              if (endMin <= startMin) endMin += 24 * 60;
+              const mins = endMin - startMin;
+              if (mins > 0) openMinutesPerStaff += mins;
+            }
+            cursor.setUTCDate(cursor.getUTCDate() + 1);
+          }
+        }
+      }
+
+      const staffLoad = await db.query(
+        `
+        SELECT
+          st.id AS staff_id,
+          COALESCE(NULLIF(TRIM(st.name), ''), 'Staff') AS staff_name,
+          COALESCE(SUM(b.duration_minutes) FILTER (WHERE b.status='confirmed' AND ${startCol} >= $2 AND ${startCol} < $3), 0)::int AS booked_minutes
+        FROM staff st
+        LEFT JOIN bookings b
+          ON b.tenant_id=st.tenant_id
+         AND b.staff_id=st.id
+        WHERE st.tenant_id=$1
+        GROUP BY st.id, st.name
+        ORDER BY booked_minutes DESC, staff_name ASC
+        LIMIT 6
+        `,
+        [tenantId, rangeStart.toISOString(), rangeEnd.toISOString()]
+      );
+      staffUtilization = (staffLoad.rows || []).map((r) => {
+        const booked = Number(r.booked_minutes || 0);
+        return {
+          staff_id: Number(r.staff_id),
+          staff_name: String(r.staff_name || 'Staff'),
+          booked_minutes: booked,
+          utilization_pct: openMinutesPerStaff > 0 ? Math.round((booked / openMinutesPerStaff) * 100) : null,
+        };
+      });
+    }
+  } catch {}
+
   return {
     ok: true,
     tenantId,
@@ -669,9 +832,14 @@ async function getDashboardSummary({ tenantId, tenantSlug, mode, dateStr }) {
       insights,
       thresholds,
       customerPulse: { activeCustomers, returningCustomers },
+      topReturning,
     },
-    series,
+    series: {
+      ...series,
+      customer_mix_over_time: customerMixOverTime,
+      staff_utilization: staffUtilization,
+    },
   };
 }
 
-module.exports = { getDashboardSummary, parseISODateOnly };
+module.exports = { getDashboardSummary, parseISODateOnly, computeRange };
