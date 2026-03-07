@@ -55,6 +55,96 @@ function buildDashboardAlerts(metrics = {}, thresholds = {}, options = {}) {
   const drilldowns = options?.drilldowns || {};
   const setupRules = Array.isArray(options?.setupRules) ? options.setupRules : [];
 
+
+  const targetBenchmarks = metrics?.targets || {};
+  const bookingsTarget = targetBenchmarks?.bookings;
+  if (bookingsTarget?.target && (bookingsTarget?.status === 'behind' || bookingsTarget?.status === 'critical')) {
+    alerts.push(mkAlert({
+      id: 'bookings_target_off_pace',
+      severity: bookingsTarget?.status === 'critical' ? 'critical' : 'warning',
+      title: 'Bookings are behind target',
+      body: bookingsTarget?.pacePct != null
+        ? `Bookings are at ${bookingsTarget.pacePct}% of pace against the current target.`
+        : `Bookings are below the configured target of ${bookingsTarget.target}.`,
+      why: 'This is the clearest early signal that demand generation or conversion needs help.',
+      ctaLabel: 'Open bookings',
+      ctaAction: 'view_bookings',
+      href: drilldowns?.bookings?.href,
+      metricValue: num(bookingsTarget?.actual, 0),
+      thresholdValue: num(bookingsTarget?.target, 0),
+    }));
+  }
+
+  const revenueTarget = targetBenchmarks?.revenue;
+  if (revenueTarget?.target && (revenueTarget?.status === 'behind' || revenueTarget?.status === 'critical')) {
+    alerts.push(mkAlert({
+      id: 'revenue_target_off_pace',
+      severity: revenueTarget?.status === 'critical' ? 'critical' : 'warning',
+      title: 'Revenue is behind target',
+      body: revenueTarget?.pacePct != null
+        ? `Revenue is at ${revenueTarget.pacePct}% of pace against the current target.`
+        : `Revenue is below the configured target.`,
+      why: 'Falling behind target usually needs action on pricing, bundles, or conversion.',
+      ctaLabel: 'Open revenue',
+      ctaAction: 'open_revenue',
+      href: drilldowns?.revenue?.href || drilldowns?.bookings?.href,
+      metricValue: num(revenueTarget?.actual, 0),
+      thresholdValue: num(revenueTarget?.target, 0),
+    }));
+  }
+
+  const utilTarget = targetBenchmarks?.utilization;
+  if (utilTarget?.target && (utilTarget?.status === 'behind' || utilTarget?.status === 'critical')) {
+    alerts.push(mkAlert({
+      id: 'utilization_target_off_pace',
+      severity: utilTarget?.status === 'critical' ? 'critical' : 'warning',
+      title: 'Utilization is behind target',
+      body: utilTarget?.pacePct != null
+        ? `Utilization is at ${utilTarget.pacePct}% of target pace.`
+        : `Utilization is below the configured target of ${utilTarget.target}%.`,
+      why: 'Low utilization usually means empty sellable time is being left on the table.',
+      ctaLabel: 'Open utilization',
+      ctaAction: 'open_utilization',
+      href: drilldowns?.utilization?.href || drilldowns?.bookings?.href,
+      metricValue: num(utilTarget?.actual, 0),
+      thresholdValue: num(utilTarget?.target, 0),
+    }));
+  }
+
+  const repeatTarget = targetBenchmarks?.repeat;
+  if (repeatTarget?.target && (repeatTarget?.status === 'behind' || repeatTarget?.status === 'critical')) {
+    alerts.push(mkAlert({
+      id: 'repeat_target_off_pace',
+      severity: 'warning',
+      title: 'Repeat rate is behind target',
+      body: repeatTarget?.pacePct != null
+        ? `Repeat rate is at ${repeatTarget.pacePct}% of target pace.`
+        : `Repeat rate is below the configured target of ${repeatTarget.target}%.`,
+      why: 'Retention weakness often shows up here before it becomes a bigger revenue problem.',
+      ctaLabel: 'Open customers',
+      ctaAction: 'open_customers',
+      href: drilldowns?.repeatCustomers?.href || drilldowns?.customerPulse?.href,
+      metricValue: num(repeatTarget?.actual, 0),
+      thresholdValue: num(repeatTarget?.target, 0),
+    }));
+  }
+
+  const noShowTarget = targetBenchmarks?.noShow;
+  if (noShowTarget?.target && (noShowTarget?.status === 'behind' || noShowTarget?.status === 'critical')) {
+    alerts.push(mkAlert({
+      id: 'no_show_target_breached',
+      severity: noShowTarget?.status === 'critical' ? 'critical' : 'warning',
+      title: 'No-show ceiling has been breached',
+      body: `No-show rate is ${num(noShowTarget?.actual, 0).toFixed(1)}% against a ceiling of ${num(noShowTarget?.target, 0).toFixed(1)}%.`,
+      why: 'This directly burns sellable capacity and often needs reminder or deposit changes.',
+      ctaLabel: 'Open no-shows',
+      ctaAction: 'view_no_shows',
+      href: drilldowns?.noShow?.href || drilldowns?.bookings?.href,
+      metricValue: num(noShowTarget?.actual, 0),
+      thresholdValue: num(noShowTarget?.target, 0),
+    }));
+  }
+
   const utilizationValue = num(metrics?.utilization?.value, null);
   if (utilizationValue != null && utilizationValue < t.veryLowUtilizationPct) {
     alerts.push(mkAlert({
