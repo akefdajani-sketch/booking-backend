@@ -155,6 +155,113 @@ async function resolveDashboardThresholds(tenantId) {
 }
 
 
+async function resolveDashboardTargets(tenantId, mode) {
+  const defaults = {
+    day: { bookings: null, revenue_amount: null, utilizationPct: null, repeatPct: null, noShowRateMax: null },
+    week: { bookings: null, revenue_amount: null, utilizationPct: null, repeatPct: null, noShowRateMax: null },
+    month: { bookings: null, revenue_amount: null, utilizationPct: null, repeatPct: null, noShowRateMax: null },
+  };
+  try {
+    const hasBranding = await db.query(
+      `SELECT 1 FROM information_schema.columns
+       WHERE table_schema='public' AND table_name='tenants' AND column_name='branding' LIMIT 1`
+    );
+    if (hasBranding.rowCount <= 0) return defaults[mode] || defaults.day;
+    const r = await db.query(`SELECT branding FROM tenants WHERE id=$1 LIMIT 1`, [tenantId]);
+    let branding = r.rows?.[0]?.branding;
+    if (!branding) return defaults[mode] || defaults.day;
+    if (typeof branding === 'string') {
+      try { branding = JSON.parse(branding); } catch { return defaults[mode] || defaults.day; }
+    }
+    const rawTargets =
+      (branding && branding.dashboard_widgets && branding.dashboard_widgets.targets) ||
+      (branding && branding.dashboard && branding.dashboard.targets) ||
+      null;
+    if (!rawTargets || typeof rawTargets !== 'object') return defaults[mode] || defaults.day;
+    const raw = rawTargets?.[mode] && typeof rawTargets[mode] === 'object' ? rawTargets[mode] : {};
+    const cleaned = {};
+    for (const key of ['bookings', 'revenue_amount', 'utilizationPct', 'repeatPct', 'noShowRateMax']) {
+      const value = raw[key];
+      if (value == null || value === '') {
+        cleaned[key] = null;
+        continue;
+      }
+      const n = Number(value);
+      cleaned[key] = Number.isFinite(n) ? n : null;
+    }
+    return { ...defaults[mode], ...cleaned };
+  } catch {
+    return defaults[mode] || defaults.day;
+  }
+}
+
+function computePeriodElapsedFraction(rangeStart, rangeEnd, now = new Date()) {
+  const start = rangeStart instanceof Date ? rangeStart.getTime() : new Date(rangeStart).getTime();
+  const end = rangeEnd instanceof Date ? rangeEnd.getTime() : new Date(rangeEnd).getTime();
+  const current = now instanceof Date ? now.getTime() : new Date(now).getTime();
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return 1;
+  if (current <= start) return 0;
+  if (current >= end) return 1;
+  return Number(((current - start) / (end - start)).toFixed(4));
+}
+
+function buildTargetBenchmark({ actual, target, elapsedFraction = 1, direction = 'at_least' }) {
+  const safeActual = Number(actual);
+  const safeTarget = Number(target);
+  if (!Number.isFinite(safeActual) || !Number.isFinite(safeTarget) || safeTarget <= 0) {
+    return {
+      target: Number.isFinite(safeTarget) ? safeTarget : null,
+      actual: Number.isFinite(safeActual) ? safeActual : null,
+      progressPct: null,
+      pacePct: null,
+      paceTarget: null,
+      status: 'no_target',
+      remaining: null,
+      aheadBehind: null,
+      direction,
+    };
+  }
+  const fraction = Math.max(0, Math.min(1, Number.isFinite(elapsedFraction) ? elapsedFraction : 1));
+  const paceTarget = safeTarget * fraction;
+  if (direction === 'at_most') {
+    const progressPct = Math.max(0, Math.min(100, Math.round((safeTarget / Math.max(safeActual || 0.0001, 0.0001)) * 100)));
+    return {
+      target: safeTarget,
+      actual: safeActual,
+      progressPct,
+      pacePct: null,
+      paceTarget,
+      status: safeActual <= safeTarget ? 'on_track' : safeActual <= safeTarget * 1.15 ? 'behind' : 'critical',
+      remaining: Math.max(0, safeTarget - safeActual),
+      aheadBehind: safeTarget - safeActual,
+      direction,
+    };
+  }
+  const progressPct = Math.max(0, Math.round((safeActual / safeTarget) * 100));
+  const pacePct = paceTarget > 0 ? Math.round((safeActual / paceTarget) * 100) : null;
+  let status = 'on_track';
+  if (fraction >= 1) {
+    status = safeActual >= safeTarget ? 'ahead' : 'behind';
+  } else if (pacePct != null) {
+    if (pacePct >= 102) status = 'ahead';
+    else if (pacePct >= 95) status = 'on_track';
+    else if (pacePct >= 80) status = 'behind';
+    else status = 'critical';
+  }
+  return {
+    target: safeTarget,
+    actual: safeActual,
+    progressPct,
+    pacePct,
+    paceTarget,
+    status,
+    remaining: Math.max(0, safeTarget - safeActual),
+    aheadBehind: safeActual - safeTarget,
+    direction,
+  };
+}
+
+
 async function tenantHasWorkingHours(tenantId) {
   // Many deployments store working hours as JSON in tenants.working_hours
   const hasWH = await db.query(
@@ -320,6 +427,7 @@ async function getDashboardSummary({ tenantId, tenantSlug, mode, dateStr }) {
 
   const currencyCode = await resolveTenantCurrencyCode(tenantId);
   const thresholds = await resolveDashboardThresholds(tenantId);
+  const targetGoals = await resolveDashboardTargets(tenantId, safeMode);
 
 
   const next = await db.query(
@@ -1170,6 +1278,15 @@ async function getDashboardSummary({ tenantId, tenantSlug, mode, dateStr }) {
   const bookingsDeltaPct = previousConfirmedCount > 0 ? Number((((confirmedCount - previousConfirmedCount) / previousConfirmedCount) * 100).toFixed(1)) : 0;
   const repeatDeltaPct = Number((repeatPct - previousRepeatPct).toFixed(1));
 
+  const elapsedFraction = computePeriodElapsedFraction(rangeStart, rangeEnd, new Date());
+  const targetBenchmarks = {
+    bookings: buildTargetBenchmark({ actual: confirmedCount, target: targetGoals.bookings, elapsedFraction, direction: 'at_least' }),
+    revenue: buildTargetBenchmark({ actual: Number(revenueAmount || 0), target: targetGoals.revenue_amount, elapsedFraction, direction: 'at_least' }),
+    utilization: buildTargetBenchmark({ actual: Number(utilizationPct || 0), target: targetGoals.utilizationPct, elapsedFraction, direction: 'at_least' }),
+    repeat: buildTargetBenchmark({ actual: Number(repeatPct || 0), target: targetGoals.repeatPct, elapsedFraction, direction: 'at_least' }),
+    noShow: buildTargetBenchmark({ actual: Number(noShowRate || 0), target: targetGoals.noShowRateMax, elapsedFraction, direction: 'at_most' }),
+  };
+
   const dashboardDrilldowns = {
     bookings: {
       href: `/${encodeURIComponent(tenantSlug)}?tab=bookings&from=${encodeURIComponent(rangeStart.toISOString())}&to=${encodeURIComponent(rangeEnd.toISOString())}`,
@@ -1204,6 +1321,7 @@ async function getDashboardSummary({ tenantId, tenantSlug, mode, dateStr }) {
       pending: { value: pendingCount },
       cancelled: { value: cancelledCount },
       atRisk: { value: Array.isArray(atRisk) ? atRisk.length : 0 },
+      targets: targetBenchmarks,
     },
     {
       lowUtilizationPct: thresholds.utilization_low_pct,
@@ -1246,6 +1364,12 @@ async function getDashboardSummary({ tenantId, tenantSlug, mode, dateStr }) {
       repeatPct,
       activeMemberships,
       noShowRate,
+    },
+    targets: {
+      mode: safeMode,
+      elapsedFraction,
+      goals: targetGoals,
+      benchmarks: targetBenchmarks,
     },
     panels: {
       nextBookings,
@@ -1309,6 +1433,7 @@ async function getDashboardSummary({ tenantId, tenantSlug, mode, dateStr }) {
         alerts: Array.isArray(dashboardAlerts) && dashboardAlerts.length > 0,
         insights: Array.isArray(insights) && insights.length > 0,
       },
+      targetSupport: true,
       widgetVisibilityDefaults: {
         bookings_over_time: true,
         revenue_by_service: true,
@@ -1318,13 +1443,6 @@ async function getDashboardSummary({ tenantId, tenantSlug, mode, dateStr }) {
         customer_pulse_panel: true,
         rules_alerts: true,
         insights: true,
-      },
-      personalizationDefaults: {
-        density: 'comfortable',
-        sectionOrder: ['trends', 'deep_dive', 'operations'],
-        trendsOrder: ['bookings_over_time', 'revenue_by_service'],
-        deepDiveOrder: ['utilization', 'customer_pulse'],
-        operationsOrder: ['next_up', 'customer_pulse_panel', 'rules_alerts', 'insights'],
       },
     },
     drilldowns: dashboardDrilldowns,
