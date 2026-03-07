@@ -1319,6 +1319,13 @@ async function getDashboardSummary({ tenantId, tenantSlug, mode, dateStr }) {
         rules_alerts: true,
         insights: true,
       },
+      personalizationDefaults: {
+        density: 'comfortable',
+        sectionOrder: ['trends', 'deep_dive', 'operations'],
+        trendsOrder: ['bookings_over_time', 'revenue_by_service'],
+        deepDiveOrder: ['utilization', 'customer_pulse'],
+        operationsOrder: ['next_up', 'customer_pulse_panel', 'rules_alerts', 'insights'],
+      },
     },
     drilldowns: dashboardDrilldowns,
   };
