@@ -9,6 +9,7 @@
 
 const db = require("../db");
 const { ensureBookingMoneyColumns, bookingMoneyColsAvailable } = require("./ensureBookingMoneyColumns");
+const { buildDashboardAlerts } = require("./buildDashboardAlerts");
 
 // -----------------------------------------------------------------------------
 // Schema compatibility helpers
@@ -98,11 +99,21 @@ async function resolveDashboardThresholds(tenantId) {
   // This keeps TD5 "SaaS-safe" without requiring a schema migration.
   const defaults = {
     utilization_low_pct: 20,
+    utilization_critical_low_pct: 10,
     utilization_good_pct: 60,
     repeat_good_pct: 50,
+    repeat_drop_warn_pct: 10,
     dropoff_warn_pct: 30,
-    pending_warn_count: 1,
-    cancel_warn_count: 1,
+    revenue_drop_warn_pct: 15,
+    revenue_drop_critical_pct: 30,
+    booking_drop_warn_pct: 15,
+    no_show_warn_pct: 10,
+    no_show_critical_pct: 18,
+    pending_warn_count: 2,
+    pending_critical_count: 6,
+    cancel_warn_count: 2,
+    at_risk_warn_count: 3,
+    alert_cooldown_hours: 24,
   };
 
   try {
@@ -123,6 +134,7 @@ async function resolveDashboardThresholds(tenantId) {
 
     const raw =
       (branding && branding.dashboard && branding.dashboard.thresholds) ||
+      (branding && branding.dashboard_widgets && branding.dashboard_widgets.alerts_thresholds) ||
       (branding && branding.dashboard_thresholds) ||
       (branding && branding.thresholds && branding.thresholds.dashboard) ||
       null;
@@ -363,6 +375,62 @@ async function getDashboardSummary({ tenantId, tenantSlug, mode, dateStr }) {
   const conversionPct = totalRequests > 0 ? Math.round((confirmedCount / totalRequests) * 100) : null;
   const dropoffPct = totalRequests > 0 ? Math.max(0, 100 - conversionPct) : null;
 
+  // Previous-period comparison snapshot for DSH-5 alerts.
+  const rangeSpanDays = Math.max(1, Math.round((rangeEnd.getTime() - rangeStart.getTime()) / 86400000));
+  const compareStart = addDays(rangeStart, -rangeSpanDays);
+  const compareEnd = rangeStart;
+  let previousConfirmedCount = 0;
+  let previousRevenueAmount = 0;
+  let previousNoShowRate = 0;
+  let previousRepeatPct = 0;
+  try {
+    const prevAgg = await db.query(
+      `
+      SELECT
+        COUNT(*) FILTER (WHERE status='confirmed')::int AS confirmed_count,
+        COALESCE(SUM(charge_amount) FILTER (WHERE status='confirmed'), 0)::numeric AS revenue_amount,
+        COUNT(*) FILTER (WHERE LOWER(COALESCE(status, '')) IN ('confirmed','checked_in','completed','no_show','noshow','completed_absent'))::int AS eligible_count,
+        COUNT(*) FILTER (WHERE LOWER(COALESCE(status, '')) IN ('no_show','noshow','completed_absent'))::int AS no_show_count
+      FROM bookings b
+      WHERE b.tenant_id=$1
+        AND ${startCol} >= $2
+        AND ${startCol} < $3
+      `,
+      [tenantId, compareStart.toISOString(), compareEnd.toISOString()]
+    );
+    previousConfirmedCount = Number(prevAgg.rows?.[0]?.confirmed_count || 0);
+    previousRevenueAmount = Number(prevAgg.rows?.[0]?.revenue_amount || 0);
+    const prevEligible = Number(prevAgg.rows?.[0]?.eligible_count || 0);
+    const prevNoShows = Number(prevAgg.rows?.[0]?.no_show_count || 0);
+    previousNoShowRate = prevEligible > 0 ? Number(((prevNoShows / prevEligible) * 100).toFixed(1)) : 0;
+  } catch {}
+  try {
+    const prevRepeat = await db.query(
+      `
+      WITH first_seen AS (
+        SELECT customer_id, MIN(${startCol}) AS first_booking_at
+        FROM bookings b
+        WHERE b.tenant_id=$1
+          AND b.customer_id IS NOT NULL
+        GROUP BY customer_id
+      )
+      SELECT
+        COUNT(DISTINCT b.customer_id)::int AS active_customers,
+        COUNT(DISTINCT b.customer_id) FILTER (WHERE fs.first_booking_at < $2)::int AS returning_customers
+      FROM bookings b
+      JOIN first_seen fs ON fs.customer_id=b.customer_id
+      WHERE b.tenant_id=$1
+        AND ${startCol} >= $2
+        AND ${startCol} < $3
+        AND b.customer_id IS NOT NULL
+      `,
+      [tenantId, compareStart.toISOString(), compareEnd.toISOString()]
+    );
+    const prevActiveCustomers = Number(prevRepeat.rows?.[0]?.active_customers || 0);
+    const prevReturningCustomers = Number(prevRepeat.rows?.[0]?.returning_customers || 0);
+    previousRepeatPct = prevActiveCustomers > 0 ? Math.round((prevReturningCustomers / prevActiveCustomers) * 100) : 0;
+  } catch {}
+
   // Active memberships (best-effort; table might not exist in older envs)
   let activeMemberships = 0;
   const memReg = await db.query(`SELECT to_regclass('public.customer_memberships') AS reg`);
@@ -442,6 +510,28 @@ async function getDashboardSummary({ tenantId, tenantSlug, mode, dateStr }) {
       status: status === "pending" ? "pending" : status === "cancelled" ? "cancelled" : "confirmed",
     };
   });
+
+  const eligibleNoShowStatuses = ['confirmed', 'checked_in', 'completed', 'no_show', 'noshow', 'completed_absent'];
+  const noShowStatuses = ['no_show', 'noshow', 'completed_absent'];
+  let noShowCount = 0;
+  let noShowEligibleCount = 0;
+  try {
+    const noShowAgg = await db.query(
+      `
+      SELECT
+        COUNT(*) FILTER (WHERE LOWER(COALESCE(status, '')) = ANY($4::text[]))::int AS no_show_count,
+        COUNT(*) FILTER (WHERE LOWER(COALESCE(status, '')) = ANY($5::text[]))::int AS eligible_count
+      FROM bookings b
+      WHERE b.tenant_id=$1
+        AND ${startCol} >= $2
+        AND ${startCol} < $3
+      `,
+      [tenantId, rangeStart.toISOString(), rangeEnd.toISOString(), noShowStatuses, eligibleNoShowStatuses]
+    );
+    noShowCount = Number(noShowAgg.rows?.[0]?.no_show_count || 0);
+    noShowEligibleCount = Number(noShowAgg.rows?.[0]?.eligible_count || 0);
+  } catch {}
+  const noShowRate = noShowEligibleCount > 0 ? Number(((noShowCount / noShowEligibleCount) * 100).toFixed(1)) : 0;
 
   const attention = [];
   if (pendingCount >= (thresholds.pending_warn_count || 1)) {
@@ -1076,6 +1166,66 @@ async function getDashboardSummary({ tenantId, tenantSlug, mode, dateStr }) {
     .slice(0, 3)
     .map((row) => row.label);
 
+  const revenueDeltaPct = previousRevenueAmount > 0 ? Number((((Number(revenueAmount || 0) - previousRevenueAmount) / previousRevenueAmount) * 100).toFixed(1)) : 0;
+  const bookingsDeltaPct = previousConfirmedCount > 0 ? Number((((confirmedCount - previousConfirmedCount) / previousConfirmedCount) * 100).toFixed(1)) : 0;
+  const repeatDeltaPct = Number((repeatPct - previousRepeatPct).toFixed(1));
+
+  const dashboardDrilldowns = {
+    bookings: {
+      href: `/${encodeURIComponent(tenantSlug)}?tab=bookings&from=${encodeURIComponent(rangeStart.toISOString())}&to=${encodeURIComponent(rangeEnd.toISOString())}`,
+    },
+    revenue: {
+      href: `/${encodeURIComponent(tenantSlug)}?tab=bookings&from=${encodeURIComponent(rangeStart.toISOString())}&to=${encodeURIComponent(rangeEnd.toISOString())}`,
+    },
+    utilization: {
+      href: `/${encodeURIComponent(tenantSlug)}?tab=dayview&date=${encodeURIComponent(safeDate)}&focus=utilization`,
+    },
+    repeatCustomers: {
+      href: `/${encodeURIComponent(tenantSlug)}?tab=customers&segment=returning`,
+    },
+    customerPulse: {
+      href: `/${encodeURIComponent(tenantSlug)}?tab=customers`,
+    },
+    alerts: {
+      href: `/${encodeURIComponent(tenantSlug)}?tab=bookings&from=${encodeURIComponent(rangeStart.toISOString())}&to=${encodeURIComponent(rangeEnd.toISOString())}`,
+    },
+    noShow: {
+      href: `/${encodeURIComponent(tenantSlug)}?tab=bookings&status=no_show&from=${encodeURIComponent(rangeStart.toISOString())}&to=${encodeURIComponent(rangeEnd.toISOString())}`,
+    },
+  };
+
+  const dashboardAlerts = buildDashboardAlerts(
+    {
+      utilization: { value: utilizationPct },
+      revenue: { deltaPercent: revenueDeltaPct },
+      bookings: { deltaPercent: bookingsDeltaPct },
+      repeat: { deltaPercent: repeatDeltaPct },
+      noShow: { value: noShowRate, compareValue: previousNoShowRate },
+      pending: { value: pendingCount },
+      cancelled: { value: cancelledCount },
+      atRisk: { value: Array.isArray(atRisk) ? atRisk.length : 0 },
+    },
+    {
+      lowUtilizationPct: thresholds.utilization_low_pct,
+      veryLowUtilizationPct: thresholds.utilization_critical_low_pct,
+      revenueDropPct: -Math.abs(Number(thresholds.revenue_drop_warn_pct || 15)),
+      revenueCriticalDropPct: -Math.abs(Number(thresholds.revenue_drop_critical_pct || 30)),
+      bookingDropPct: -Math.abs(Number(thresholds.booking_drop_warn_pct || 15)),
+      repeatDropPct: -Math.abs(Number(thresholds.repeat_drop_warn_pct || 10)),
+      noShowWarnPct: thresholds.no_show_warn_pct,
+      noShowCriticalPct: thresholds.no_show_critical_pct,
+      pendingWarnCount: thresholds.pending_warn_count,
+      pendingCriticalCount: thresholds.pending_critical_count,
+      cancelledWarnCount: thresholds.cancel_warn_count,
+      atRiskWarnCount: thresholds.at_risk_warn_count,
+      cooldownHours: thresholds.alert_cooldown_hours,
+    },
+    {
+      drilldowns: dashboardDrilldowns,
+      setupRules: (rules || []).filter((rule) => String(rule?.id || '').startsWith('cfg_')),
+    }
+  );
+
   return {
     ok: true,
     tenantId,
@@ -1095,11 +1245,13 @@ async function getDashboardSummary({ tenantId, tenantSlug, mode, dateStr }) {
       utilizationPct,
       repeatPct,
       activeMemberships,
+      noShowRate,
     },
     panels: {
       nextBookings,
       attention,
       rules,
+      alerts: dashboardAlerts,
       insights,
       thresholds,
       customerPulse: {
@@ -1154,7 +1306,7 @@ async function getDashboardSummary({ tenantId, tenantSlug, mode, dateStr }) {
         revenueByService: true,
         utilization: true,
         customerPulse: true,
-        alerts: Array.isArray(rules) && rules.length > 0,
+        alerts: Array.isArray(dashboardAlerts) && dashboardAlerts.length > 0,
         insights: Array.isArray(insights) && insights.length > 0,
       },
       widgetVisibilityDefaults: {
@@ -1168,29 +1320,7 @@ async function getDashboardSummary({ tenantId, tenantSlug, mode, dateStr }) {
         insights: true,
       },
     },
-    drilldowns: {
-      bookings: {
-        href: `/${encodeURIComponent(tenantSlug)}?tab=bookings&from=${encodeURIComponent(rangeStart.toISOString())}&to=${encodeURIComponent(rangeEnd.toISOString())}`,
-      },
-      revenue: {
-        href: `/${encodeURIComponent(tenantSlug)}?tab=bookings&from=${encodeURIComponent(rangeStart.toISOString())}&to=${encodeURIComponent(rangeEnd.toISOString())}`,
-      },
-      utilization: {
-        href: `/${encodeURIComponent(tenantSlug)}?tab=dayview&date=${encodeURIComponent(safeDate)}&focus=utilization`,
-      },
-      repeatCustomers: {
-        href: `/${encodeURIComponent(tenantSlug)}?tab=customers&segment=returning`,
-      },
-      customerPulse: {
-        href: `/${encodeURIComponent(tenantSlug)}?tab=customers`,
-      },
-      alerts: {
-        href: `/${encodeURIComponent(tenantSlug)}?tab=bookings&from=${encodeURIComponent(rangeStart.toISOString())}&to=${encodeURIComponent(rangeEnd.toISOString())}`,
-      },
-      noShow: {
-        href: `/${encodeURIComponent(tenantSlug)}?tab=bookings&status=no_show&from=${encodeURIComponent(rangeStart.toISOString())}&to=${encodeURIComponent(rangeEnd.toISOString())}`,
-      },
-    },
+    drilldowns: dashboardDrilldowns,
   };
 }
 
