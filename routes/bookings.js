@@ -180,6 +180,85 @@ async function bumpTenantBookingChange(tenantId) {
 
 
 // ---------------------------------------------------------------------------
+// Prepaid helpers
+// ---------------------------------------------------------------------------
+
+async function prepaidTablesExist(client) {
+  try {
+    const r = await client.query(`
+      SELECT
+        to_regclass('public.prepaid_products') AS prepaid_products,
+        to_regclass('public.customer_prepaid_entitlements') AS customer_prepaid_entitlements,
+        to_regclass('public.prepaid_transactions') AS prepaid_transactions,
+        to_regclass('public.prepaid_redemptions') AS prepaid_redemptions
+    `);
+    const row = r.rows?.[0] || {};
+    return !!row.prepaid_products && !!row.customer_prepaid_entitlements && !!row.prepaid_transactions && !!row.prepaid_redemptions;
+  } catch {
+    return false;
+  }
+}
+
+async function resolvePrepaidSelection(client, { tenantId, customerId, entitlementId, serviceId }) {
+  if (!customerId) return null;
+  const params = [tenantId, customerId];
+  const where = [
+    'e.tenant_id = $1',
+    'e.customer_id = $2',
+    "COALESCE(e.status, 'active') = 'active'",
+    'COALESCE(e.remaining_quantity, 0) > 0',
+    '(e.expires_at IS NULL OR e.expires_at > NOW())',
+    'COALESCE(p.is_active, true) = true',
+  ];
+  if (entitlementId) {
+    params.push(Number(entitlementId));
+    where.push(`e.id = $${params.length}`);
+  }
+  if (serviceId) {
+    params.push(Number(serviceId));
+    where.push(`(p.eligible_service_ids IS NULL OR jsonb_array_length(p.eligible_service_ids) = 0 OR p.eligible_service_ids ? $${params.length}::text)`);
+  }
+  const q = await client.query(
+    `SELECT
+       e.*,
+       p.name AS prepaid_product_name,
+       p.product_type,
+       p.credit_amount,
+       p.session_count,
+       p.minutes_total,
+       p.currency,
+       p.eligible_service_ids,
+       p.rules
+     FROM customer_prepaid_entitlements e
+     JOIN prepaid_products p
+       ON p.id = e.prepaid_product_id
+      AND p.tenant_id = e.tenant_id
+     WHERE ${where.join(' AND ')}
+     ORDER BY e.updated_at DESC, e.id DESC
+     LIMIT 1
+     FOR UPDATE`,
+    params
+  );
+  return q.rows?.[0] || null;
+}
+
+function computePrepaidRedemptionSelection(entitlement, durationMinutes) {
+  const minutesTotal = Number(entitlement?.minutes_total || 0);
+  const creditAmount = Number(entitlement?.credit_amount || 0);
+  const sessionCount = Number(entitlement?.session_count || 0);
+  if (minutesTotal > 0) {
+    return { redeemedQuantity: Math.max(1, Number(durationMinutes || 0)), redemptionMode: 'minute' };
+  }
+  if (creditAmount > 0) {
+    return { redeemedQuantity: 1, redemptionMode: 'credit' };
+  }
+  if (sessionCount > 0) {
+    return { redeemedQuantity: 1, redemptionMode: 'package_use' };
+  }
+  return { redeemedQuantity: 1, redemptionMode: 'manual' };
+}
+
+// ---------------------------------------------------------------------------
 // Membership checkout policy (tenant-controlled, JSONB-driven)
 // Stored in tenants.branding.membershipCheckout (and/or legacy paths)
 // ---------------------------------------------------------------------------
@@ -898,6 +977,9 @@ router.post("/", requireGoogleAuth, requireTenant, async (req, res) => {
       customerMembershipId,
       autoConsumeMembership,
       requireMembership,
+      prepaidEntitlementId,
+      autoConsumePrepaid,
+      requirePrepaid,
     } = req.body || {};
 
     const slug = (req.tenantSlug || tenantSlug || "").toString().trim();
@@ -1154,6 +1236,7 @@ router.post("/", requireGoogleAuth, requireTenant, async (req, res) => {
       let finalCustomerMembershipId = null;
       let debitMinutes = 0;
       let debitUses = 0;
+      let prepaidApplied = null;
 
       // Snapshot of selected membership balance BEFORE debit (for resolution UI)
       let membershipBefore = null;
@@ -1320,6 +1403,52 @@ router.post("/", requireGoogleAuth, requireTenant, async (req, res) => {
         finalCustomerMembershipId = cm.id;
       }
 
+      const prepaidRequested =
+        autoConsumePrepaid === true || String(autoConsumePrepaid).toLowerCase() === "true" ||
+        requirePrepaid === true || String(requirePrepaid).toLowerCase() === "true" ||
+        (prepaidEntitlementId != null && String(prepaidEntitlementId).trim() !== "");
+
+      if (prepaidRequested) {
+        if (!finalCustomerId) {
+          await client.query("ROLLBACK");
+          return res.status(400).json({ error: "Prepaid redemption requires a signed-in customer." });
+        }
+        const prepaidReady = await prepaidTablesExist(client);
+        if (!prepaidReady) {
+          await client.query("ROLLBACK");
+          return res.status(503).json({ error: "Prepaid accounting schema is not installed." });
+        }
+
+        const selectedEntitlement = await resolvePrepaidSelection(client, {
+          tenantId: resolvedTenantId,
+          customerId: finalCustomerId,
+          entitlementId: prepaidEntitlementId ? Number(prepaidEntitlementId) : null,
+          serviceId: resolvedServiceId,
+        });
+
+        if (!selectedEntitlement) {
+          if (requirePrepaid === true || String(requirePrepaid).toLowerCase() === "true") {
+            await client.query("ROLLBACK");
+            return res.status(409).json({ error: "No eligible prepaid balance found for this booking." });
+          }
+        } else {
+          const prepaidSelection = computePrepaidRedemptionSelection(selectedEntitlement, Number(duration));
+          const remaining = Number(selectedEntitlement.remaining_quantity || 0);
+          if (remaining < prepaidSelection.redeemedQuantity) {
+            await client.query("ROLLBACK");
+            return res.status(409).json({ error: "Insufficient prepaid balance for this booking." });
+          }
+          prepaidApplied = {
+            entitlementId: Number(selectedEntitlement.id),
+            prepaidProductId: Number(selectedEntitlement.prepaid_product_id),
+            prepaidProductName: selectedEntitlement.prepaid_product_name || null,
+            redeemedQuantity: prepaidSelection.redeemedQuantity,
+            redemptionMode: prepaidSelection.redemptionMode,
+            notes: `Applied to booking`,
+          };
+        }
+      }
+
       // Insert booking (idempotent)
       const initialStatus = requiresConfirmation ? "pending" : "confirmed";
 
@@ -1364,7 +1493,7 @@ router.post("/", requireGoogleAuth, requireTenant, async (req, res) => {
         console.warn("ratesEngine non-fatal error (booking create):", e?.message || e);
       }
 
-const charge_amount = finalCustomerMembershipId ? 0 : price_amount;
+const charge_amount = (finalCustomerMembershipId || prepaidApplied) ? 0 : price_amount;
 
       const hasMoneyCols = await ensureBookingMoneyColumns();
       const hasRateCols = await ensureBookingRateColumns();
@@ -1606,12 +1735,96 @@ const charge_amount = finalCustomerMembershipId ? 0 : price_amount;
         }
       }
 
+      if (prepaidApplied) {
+        const redemptionRes = await client.query(
+          `
+          INSERT INTO prepaid_redemptions (
+            tenant_id,
+            booking_id,
+            customer_id,
+            entitlement_id,
+            prepaid_product_id,
+            redeemed_quantity,
+            redemption_mode,
+            notes,
+            metadata
+          )
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb)
+          RETURNING *
+          `,
+          [
+            resolvedTenantId,
+            bookingId,
+            finalCustomerId,
+            prepaidApplied.entitlementId,
+            prepaidApplied.prepaidProductId,
+            prepaidApplied.redeemedQuantity,
+            prepaidApplied.redemptionMode,
+            prepaidApplied.notes,
+            JSON.stringify({ source: 'booking_create' }),
+          ]
+        );
+        prepaidApplied.redemptionId = redemptionRes.rows?.[0]?.id || null;
+
+        const entUpdate = await client.query(
+          `
+          UPDATE customer_prepaid_entitlements
+          SET
+            remaining_quantity = GREATEST(0, COALESCE(remaining_quantity,0) - $3),
+            status = CASE WHEN GREATEST(0, COALESCE(remaining_quantity,0) - $3) = 0 THEN 'consumed' ELSE status END,
+            updated_at = NOW()
+          WHERE tenant_id = $1 AND id = $2
+          RETURNING remaining_quantity
+          `,
+          [resolvedTenantId, prepaidApplied.entitlementId, prepaidApplied.redeemedQuantity]
+        );
+        prepaidApplied.remainingQuantity = entUpdate.rows?.[0]?.remaining_quantity ?? null;
+
+        await client.query(
+          `
+          INSERT INTO prepaid_transactions (
+            tenant_id,
+            customer_id,
+            entitlement_id,
+            prepaid_product_id,
+            transaction_type,
+            quantity_delta,
+            money_amount,
+            currency,
+            notes,
+            metadata,
+            actor_user_id
+          )
+          VALUES ($1,$2,$3,$4,'redemption',$5,NULL,NULL,$6,$7::jsonb,NULL)
+          `,
+          [
+            resolvedTenantId,
+            finalCustomerId,
+            prepaidApplied.entitlementId,
+            prepaidApplied.prepaidProductId,
+            -prepaidApplied.redeemedQuantity,
+            `Applied to booking ${bookingId}`,
+            JSON.stringify({ bookingId }),
+          ]
+        );
+      }
+
       await client.query("COMMIT");
 
       // 🔥 This is the critical bump used by heartbeat + UI refresh
       await bumpTenantBookingChange(resolvedTenantId);
 
       const joined = await loadJoinedBookingById(bookingId, resolvedTenantId);
+      if (joined && prepaidApplied) {
+        joined.prepaid_applied = true;
+        joined.prepaid_entitlement_id = prepaidApplied.entitlementId;
+        joined.prepaid_product_id = prepaidApplied.prepaidProductId;
+        joined.prepaid_product_name = prepaidApplied.prepaidProductName;
+        joined.prepaid_redemption_id = prepaidApplied.redemptionId || null;
+        joined.prepaid_redemption_mode = prepaidApplied.redemptionMode;
+        joined.prepaid_quantity_used = prepaidApplied.redeemedQuantity;
+        joined.prepaid_quantity_remaining = prepaidApplied.remainingQuantity ?? null;
+      }
       return res.status(created ? 201 : 200).json({
         booking: joined,
         replay: !created,
