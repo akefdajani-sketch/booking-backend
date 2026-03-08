@@ -66,6 +66,9 @@ async function requireTenant(req, res, next) {
     return next();
   } catch (err) {
     console.error("requireTenant error:", err);
+    if (err?.code === "TENANT_NOT_FOUND") {
+      return res.status(400).json({ error: "Unknown tenant." });
+    }
     return res.status(500).json({ error: "Failed to resolve tenant." });
   }
 }
