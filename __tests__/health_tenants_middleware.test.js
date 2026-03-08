@@ -40,7 +40,7 @@ jest.mock('../middleware/ensureUser', () => (req, res, next) => {
   req.user = { id: 1, email: 'owner@test.com' };
   next();
 });
-jest.mock('../middleware/requireAdminOrTenantRole', () => (req, res, next) => next());
+jest.mock('../middleware/requireAdminOrTenantRole', () => () => (req, res, next) => next());
 jest.mock('../middleware/maybeEnsureUser', () => (req, res, next) => next());
 jest.mock('../middleware/requireTenant', () => ({
   requireTenant: (req, res, next) => { req.tenantId = 1; next(); },
@@ -76,11 +76,12 @@ describe('GET /health', () => {
     expect(res.body).toHaveProperty('status');
   });
 
-  test('returns db:ok field', async () => {
+  test('returns status:healthy field', async () => {
     pool.query.mockResolvedValueOnce({ rows: [{ ping: 1 }] });
     const res = await request(makeHealthApp()).get('/health');
     if (res.status === 200) {
-      expect(res.body.db).toBe('ok');
+      expect(res.body.status).toBe('healthy');
+      expect(res.body.ok).toBe(true);
     }
   });
 
@@ -197,9 +198,7 @@ describe('requireAdmin middleware', () => {
 
 describe('correlationId middleware', () => {
   test('attaches X-Request-ID header to response', async () => {
-    const { default: correlationId } = await Promise.resolve().then(() =>
-      require('../middleware/correlationId')
-    );
+    const correlationId = require('../middleware/correlationId');
     const app = express();
     app.use(correlationId);
     app.get('/test', (req, res) => res.json({ id: req.requestId }));

@@ -11,7 +11,7 @@ module.exports = {
     "!utils/algolia/**",
     "!**/*.test.js",
   ],
-  coverageThresholds: {
+  coverageThreshold: {
     global: {
       lines:     70,
       functions: 65,

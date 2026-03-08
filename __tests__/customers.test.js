@@ -30,7 +30,7 @@ jest.mock('../middleware/ensureUser', () => (req, res, next) => {
   req.user = { id: 1, email: 'owner@test.com' };
   next();
 });
-jest.mock('../middleware/requireAdminOrTenantRole', () => (req, res, next) => next());
+jest.mock('../middleware/requireAdminOrTenantRole', () => () => (req, res, next) => next());
 jest.mock('../middleware/requireTenant', () => ({
   requireTenant: (req, res, next) => { req.tenantId = 1; next(); },
 }));
