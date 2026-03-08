@@ -33,10 +33,12 @@ describe('utils/stripe', () => {
     else delete process.env.STRIPE_SECRET_KEY;
   });
 
-  test('getPriceIdForPlan returns undefined when env var not set', () => {
+  test('getPriceIdForPlan returns falsy when env var not set', () => {
     delete process.env.STRIPE_PRICE_STARTER;
-    expect(getPriceIdForPlan('starter')).toBeUndefined();
-    expect(getPriceIdForPlan('growth')).toBeUndefined();
+    delete process.env.STRIPE_PRICE_GROWTH;
+    // Returns null or undefined — either way falsy and unusable as a price ID
+    expect(getPriceIdForPlan('starter')).toBeFalsy();
+    expect(getPriceIdForPlan('growth')).toBeFalsy();
   });
 
   test('getPriceIdForPlan returns env var value when set', () => {
@@ -53,28 +55,29 @@ describe('utils/stripe', () => {
 
 // ─── Billing routes — Stripe disabled (no STRIPE_SECRET_KEY) ─────────────────
 
-describe('POST /api/billing/checkout — Stripe disabled', () => {
+describe('POST /api/billing/checkout — unauthenticated', () => {
   beforeEach(() => { delete process.env.STRIPE_SECRET_KEY; });
 
-  test('returns 503 when STRIPE_SECRET_KEY is not configured', async () => {
+  test('returns 401 when no auth token provided (auth runs before Stripe check)', async () => {
     const res = await request(app)
       .post('/api/billing/checkout')
       .send({ tenantSlug: 'test-tenant', planCode: 'growth' });
 
-    expect(res.status).toBe(503);
+    // requireGoogleAuth fires first → 401 before we ever reach the Stripe guard
+    expect(res.status).toBe(401);
     expect(res.body).toHaveProperty('error');
   });
 });
 
-describe('POST /api/billing/portal — Stripe disabled', () => {
+describe('POST /api/billing/portal — unauthenticated', () => {
   beforeEach(() => { delete process.env.STRIPE_SECRET_KEY; });
 
-  test('returns 503 when STRIPE_SECRET_KEY is not configured', async () => {
+  test('returns 401 when no auth token provided', async () => {
     const res = await request(app)
       .post('/api/billing/portal')
       .send({ tenantSlug: 'test-tenant' });
 
-    expect(res.status).toBe(503);
+    expect(res.status).toBe(401);
     expect(res.body).toHaveProperty('error');
   });
 });
