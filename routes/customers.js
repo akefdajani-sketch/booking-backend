@@ -104,9 +104,11 @@ router.get("/", requireTenant, requireAdminOrTenantRole("staff"), async (req, re
     const tenantId = req.tenantId;
     const q = req.query.q ? String(req.query.q).trim() : "";
 
-    // Optional limit (cap at 200)
-    const limitRaw = req.query.limit ? Number(req.query.limit) : 200;
-    const limit = Math.max(1, Math.min(200, Number.isFinite(limitRaw) ? limitRaw : 200));
+    // PR-3: pagination — limit + offset + total meta
+    const limitRaw  = req.query.limit  ? Number(req.query.limit)  : 50;
+    const offsetRaw = req.query.offset ? Number(req.query.offset) : 0;
+    const limit  = Math.max(1, Math.min(200, Number.isFinite(limitRaw)  ? limitRaw  : 50));
+    const offset = Math.max(0,              Number.isFinite(offsetRaw) ? offsetRaw : 0);
 
     const params = [tenantId];
     let where = `WHERE c.tenant_id = $1`;
@@ -119,7 +121,14 @@ router.get("/", requireTenant, requireAdminOrTenantRole("staff"), async (req, re
     // For autocomplete/search UX: order by name when q is provided, otherwise newest first
     const orderBy = q ? `ORDER BY c.name ASC` : `ORDER BY c.created_at DESC`;
 
-    const query = `
+    // Count query for meta
+    const countResult = await db.query(
+      `SELECT COUNT(*)::int AS total FROM customers c ${where}`,
+      params
+    );
+    const total = countResult.rows[0]?.total ?? 0;
+
+    const dataQuery = `
       SELECT
         c.id,
         c.tenant_id,
@@ -135,10 +144,20 @@ router.get("/", requireTenant, requireAdminOrTenantRole("staff"), async (req, re
       ${where}
       ${orderBy}
       LIMIT $${params.length + 1}
+      OFFSET $${params.length + 2}
     `;
 
-    const result = await db.query(query, [...params, limit]);
-    return res.json({ customers: result.rows });
+    const result = await db.query(dataQuery, [...params, limit, offset]);
+
+    return res.json({
+      customers: result.rows,
+      meta: {
+        total,
+        limit,
+        offset,
+        hasMore: offset + result.rows.length < total,
+      },
+    });
   } catch (err) {
     console.error("Error loading customers:", err);
     return res.status(500).json({ error: "Failed to load customers" });

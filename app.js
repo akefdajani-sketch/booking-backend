@@ -12,12 +12,14 @@ const requestLogger = require("./middleware/requestLogger");
 const errorHandler = require("./middleware/errorHandler");
 
 // PR-2: Rate limiters for public-facing routes
+// PR-3: API version header
 const {
   publicApiLimiter,
   availabilityLimiter,
   bookingCreateLimiter,
   tenantLookupLimiter,
 } = require("./middleware/rateLimiter");
+const apiVersion = require("./middleware/apiVersion");
 
 // existing routers
 const tenantsRouter = require("./routes/tenants");
@@ -67,6 +69,7 @@ const ENABLE_DEBUG_ROUTES =
 // ─── Observability (must be first) ───────────────────────────────────────────
 app.use(correlationId);   // attaches req.requestId + X-Request-ID header
 app.use(requestLogger);   // structured pino-http logging for every request
+app.use(apiVersion);      // PR-3: adds X-API-Version header to every response
 
 // ─── CORS ────────────────────────────────────────────────────────────────────
 app.use(corsMiddleware);

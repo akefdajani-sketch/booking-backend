@@ -82,6 +82,12 @@ router.get("/", async (req, res) => {
   try {
     const { tenantSlug, tenantId, includeInactive } = req.query;
 
+    // PR-3: pagination
+    const limitRaw  = req.query.limit  ? Number(req.query.limit)  : 100;
+    const offsetRaw = req.query.offset ? Number(req.query.offset) : 0;
+    const limit  = Math.max(1, Math.min(500, Number.isFinite(limitRaw)  ? limitRaw  : 100));
+    const offset = Math.max(0,              Number.isFinite(offsetRaw) ? offsetRaw : 0);
+
     const where = [];
     const params = [];
 
@@ -180,8 +186,24 @@ router.get("/", async (req, res) => {
       ORDER BY s.id DESC
     `;
 
-    const { rows } = await db.query(q, params);
-    return res.json(rows);
+    // Count for meta (uses same WHERE, no LIMIT)
+    const countSql = `SELECT COUNT(*)::int AS total FROM services s JOIN tenants t ON t.id = s.tenant_id ${whereSql}`;
+    const countResult = await db.query(countSql, params);
+    const total = countResult.rows[0]?.total ?? 0;
+
+    // Paginated data query
+    const paginatedQ = q + `\n      LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
+    const { rows } = await db.query(paginatedQ, [...params, limit, offset]);
+
+    return res.json({
+      services: rows,
+      meta: {
+        total,
+        limit,
+        offset,
+        hasMore: offset + rows.length < total,
+      },
+    });
   } catch (err) {
     console.error("Error loading services:", err);
     return res.status(500).json({ error: "Failed to load services" });
