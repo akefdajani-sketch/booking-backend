@@ -43,6 +43,15 @@ function normalizeDomain(raw) {
   if (!d) return "";
   d = d.replace(/^https?:\/\//i, "");
   d = d.split("/")[0].split("?")[0].split("#")[0];
+  // Strip an explicit port (e.g. example.com:443) if present.
+  // Keep IPv6 literals intact (they come like [::1]:3000).
+  if (d.startsWith("[")) {
+    const m = d.match(/^\[[^\]]+\](?::\d+)?$/);
+    if (m) d = d.replace(/:\d+$/, "");
+  } else {
+    const m = d.match(/^([^:]+):(\d+)$/);
+    if (m) d = m[1];
+  }
   d = d.replace(/\.$/, "");
   return d;
 }
@@ -193,7 +202,9 @@ router.get("/_public/resolve", async (req, res) => {
       return res.status(404).json({ error: "Domains not configured." });
     }
 
-    const domain = normalizeDomain(req.query.domain);
+    const domain = normalizeDomain(
+      req.query.domain || req.headers["x-forwarded-host"] || req.headers.host
+    );
     if (!domain) return res.status(400).json({ error: "Missing domain." });
 
     const candidates = [domain];

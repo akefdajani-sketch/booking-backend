@@ -144,16 +144,33 @@ async function loadJoinedBookingById(bookingId, tenantId) {
       b.created_at,
       b.booking_code,
 
+      -- Money + applied Rates snapshot (optional columns; present in v1 hardened schema)
+      b.price_amount,
+      b.charge_amount,
+      b.currency_code,
+      b.applied_rate_rule_id,
+      b.applied_rate_snapshot,
+      rr.name AS applied_rate_rule_name,
+
       mp.name AS membership_plan_name,
       cm.minutes_remaining AS membership_minutes_remaining,
       cm.uses_remaining AS membership_uses_remaining,
       mu.minutes_used AS membership_minutes_used_for_booking,
-      mu.uses_used AS membership_uses_used_for_booking
+      mu.uses_used AS membership_uses_used_for_booking,
+      COALESCE(pr.prepaid_applied, false) AS prepaid_applied,
+      pr.prepaid_redemption_id,
+      pr.prepaid_entitlement_id,
+      pr.prepaid_product_id,
+      pr.prepaid_product_name,
+      pr.prepaid_redemption_mode,
+      pr.prepaid_quantity_used,
+      pr.prepaid_quantity_remaining
     FROM bookings b
     JOIN tenants t ON t.id = b.tenant_id
     LEFT JOIN services s ON s.tenant_id = b.tenant_id AND s.id = b.service_id
     LEFT JOIN staff st ON st.tenant_id = b.tenant_id AND st.id = b.staff_id
     LEFT JOIN resources r ON r.tenant_id = b.tenant_id AND r.id = b.resource_id
+    LEFT JOIN rate_rules rr ON rr.tenant_id = b.tenant_id AND rr.id = b.applied_rate_rule_id
     LEFT JOIN customer_memberships cm ON cm.id = b.customer_membership_id
     LEFT JOIN membership_plans mp ON mp.id = cm.plan_id
     LEFT JOIN LATERAL (
@@ -164,6 +181,27 @@ async function loadJoinedBookingById(bookingId, tenantId) {
       WHERE ml.booking_id = b.id
         AND (b.customer_membership_id IS NULL OR ml.customer_membership_id = b.customer_membership_id)
     ) mu ON true
+    LEFT JOIN LATERAL (
+      SELECT
+        true AS prepaid_applied,
+        pr.id AS prepaid_redemption_id,
+        pr.entitlement_id AS prepaid_entitlement_id,
+        pr.prepaid_product_id,
+        pp.name AS prepaid_product_name,
+        pr.redemption_mode AS prepaid_redemption_mode,
+        pr.redeemed_quantity AS prepaid_quantity_used,
+        e.remaining_quantity AS prepaid_quantity_remaining
+      FROM prepaid_redemptions pr
+      LEFT JOIN customer_prepaid_entitlements e
+        ON e.id = pr.entitlement_id
+       AND e.tenant_id = pr.tenant_id
+      LEFT JOIN prepaid_products pp
+        ON pp.id = pr.prepaid_product_id
+       AND pp.tenant_id = pr.tenant_id
+      WHERE pr.booking_id = b.id
+      ORDER BY pr.id DESC
+      LIMIT 1
+    ) pr ON true
     WHERE b.id = $1
       AND ($2::int IS NULL OR b.tenant_id = $2::int)
     LIMIT 1
