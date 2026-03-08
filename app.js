@@ -27,6 +27,7 @@ const tenantBrandingRouter = require("./routes/tenantBranding");
 const tenantMembershipCheckoutRouter = require("./routes/tenantMembershipCheckout");
 const tenantRatesRouter = require("./routes/tenantRates");
 const tenantBookingsRouter = require("./routes/tenantBookings");
+const tenantPrepaidCatalogRouter = require("./routes/tenantPrepaidCatalog");
 
 // Public endpoints (no auth): pricing quote, etc.
 const publicPricingRouter = require("./routes/publicPricing");
@@ -79,6 +80,7 @@ app.use("/api/tenant", tenantBrandingRouter);
 app.use("/api/tenant", tenantMembershipCheckoutRouter);
 app.use("/api/tenant", tenantRatesRouter);
 app.use("/api/tenant", tenantBookingsRouter);
+app.use("/api/tenant", tenantPrepaidCatalogRouter);
 app.use("/api/invites", invitesRouter);
 
 // Public APIs (tenant slug in path)
