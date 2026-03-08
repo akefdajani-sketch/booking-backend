@@ -838,7 +838,7 @@ router.get("/heartbeat/bump", requireAdmin, requireTenant, async (req, res) => {
 // GET /api/tenants
 // Public: returns list of tenants (safe fields only)
 // -----------------------------------------------------------------------------
-router.get("/", async (req, res) => {
+router.get("/", requireAdmin, async (req, res) => {
   try {
     const cols = await getTenantColumnSet();
 
