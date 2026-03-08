@@ -2,6 +2,30 @@ const express = require("express");
 const router = express.Router();
 const db = require("../db");
 
+// Schema-compat: public endpoints must not crash if a newer optional column
+// doesn't exist yet in an environment.
+let __tenantColCache = null;
+async function hasTenantColumn(col) {
+  if (!__tenantColCache) {
+    try {
+      const r = await db.query(
+        `
+        SELECT column_name
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'tenants'
+          AND column_name = ANY($1::text[])
+        `,
+        [["default_phone_country_code"]]
+      );
+      __tenantColCache = new Set(r.rows.map((x) => x.column_name));
+    } catch {
+      __tenantColCache = new Set();
+    }
+  }
+  return __tenantColCache.has(col);
+}
+
 // Public, cacheable tenant appearance payload for /book/[slug]
 //
 // IMPORTANT:
@@ -10,13 +34,18 @@ const db = require("../db");
 router.get("/:slug", async (req, res) => {
   const { slug } = req.params;
 
+  const defaultPhoneSel = (await hasTenantColumn("default_phone_country_code"))
+    ? "default_phone_country_code"
+    : "NULL::text AS default_phone_country_code";
+
   const t = await db.query(
     `SELECT id, slug, theme_key, brand_overrides_json,
             branding,
             branding_published,
             publish_status,
             theme_schema_published_json,
-            banner_home_url, banner_book_url, banner_account_url, banner_reservations_url,
+            ${defaultPhoneSel},
+            banner_home_url, banner_book_url, banner_account_url, banner_reservations_url, banner_memberships_url,
             logo_url
      FROM tenants
      WHERE slug = $1`,
@@ -58,8 +87,10 @@ router.get("/:slug", async (req, res) => {
     theme = th.rows[0] || { key: "default_v1", tokens_json: {}, layout_key: "classic" };
   }
 
-  // Cache theme payload briefly (themes change rarely, but reduce flicker + load).
-  res.set("Cache-Control", "public, max-age=60, stale-while-revalidate=300");
+  // IMPORTANT:
+  // Banner images are updated frequently during setup and should reflect immediately
+  // on the public booking pages. Avoid caching this payload.
+  res.set("Cache-Control", "no-store");
 
   // Phase 1.5: Lock down public contract (published-only)
   // Public endpoints must NEVER leak draft/working snapshots.
@@ -70,6 +101,30 @@ router.get("/:slug", async (req, res) => {
   const hasPublished = publishedObj && Object.keys(publishedObj).length > 0;
   const isPublished = String(tenant.publish_status || "") === "published";
   const effectiveBranding = (isPublished && hasPublished) ? publishedObj : null;
+
+  // Always overlay the latest banner URLs onto the effective branding.
+  // Tenants can keep a published branding snapshot for tokens, but still expect
+  // banner uploads (stored on the tenant row) to show right away.
+  const tenantBanners = {
+    home: tenant.banner_home_url,
+    book: tenant.banner_book_url,
+    account: tenant.banner_account_url,
+    reservations: tenant.banner_reservations_url,
+    memberships: tenant.banner_memberships_url,
+  };
+
+  const effectiveBrandingWithBanners = effectiveBranding
+    ? {
+        ...effectiveBranding,
+        assets: {
+          ...(effectiveBranding.assets || {}),
+          banners: {
+            ...((effectiveBranding.assets && effectiveBranding.assets.banners) || {}),
+            ...tenantBanners,
+          },
+        },
+      }
+    : null;
 
   // Theme schema is served as the *published* snapshot only.
   // If tenant isn't published yet, this must be null.
@@ -95,15 +150,16 @@ router.get("/:slug", async (req, res) => {
           }
           return true;
         })(),
+
+        // Optional. Used for prefilling customer phone fields.
+        default_phone_country_code: (() => {
+          const s = String(tenant.default_phone_country_code || "").trim();
+          return s || null;
+        })(),
       },
-      banners: {
-        home: tenant.banner_home_url,
-        book: tenant.banner_book_url,
-        account: tenant.banner_account_url,
-        reservations: tenant.banner_reservations_url,
-      },
+      banners: tenantBanners,
       brand_overrides: tenant.brand_overrides_json || {},
-      branding: effectiveBranding,
+      branding: effectiveBrandingWithBanners,
       theme_schema: effectiveThemeSchema,
     },
     theme: {

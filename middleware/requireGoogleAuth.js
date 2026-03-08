@@ -7,6 +7,7 @@
 // but does not reliably provide a fresh id_token after refresh.
 // Accepting access tokens prevents "Google auth failed" after ~1 hour.
 const { OAuth2Client } = require("google-auth-library");
+const crypto = require("crypto");
 
 // Allow one or many client ids (comma separated) for multi-env deploys
 const CLIENT_IDS = String(
@@ -56,17 +57,27 @@ async function fetchGoogleUserInfo(accessToken) {
 
 
 
+function timingSafeEqualStr(a, b) {
+  const aa = Buffer.from(String(a || ""), "utf8");
+  const bb = Buffer.from(String(b || ""), "utf8");
+  if (aa.length !== bb.length) return false;
+  return crypto.timingSafeEqual(aa, bb);
+}
+
 function isValidAdminKey(req) {
-  const rawAuth = String(req.headers.authorization || req.headers.Authorization || '');
-  const bearer = rawAuth.toLowerCase().startsWith('bearer ')
+  const rawAuth = String(req.headers.authorization || req.headers.Authorization || "");
+  const bearer = rawAuth.toLowerCase().startsWith("bearer ")
     ? rawAuth.slice(7).trim()
     : null;
 
-  const key = bearer || String(req.headers['x-admin-key'] || '').trim() || String(req.headers['x-api-key'] || '').trim();
-  const expected = String(process.env.ADMIN_API_KEY || '').trim();
+  const key =
+    bearer ||
+    String(req.headers["x-admin-key"] || "").trim() ||
+    String(req.headers["x-api-key"] || "").trim();
+  const expected = String(process.env.ADMIN_API_KEY || "").trim();
   if (!expected) return false;
   if (!key) return false;
-  return key == expected;
+  return timingSafeEqualStr(key, expected);
 }
 
 module.exports = async function requireGoogleAuth(req, res, next) {
@@ -99,24 +110,30 @@ module.exports = async function requireGoogleAuth(req, res, next) {
       // even though it's the same user and still a valid Google-signed token.
       // So we:
       // 1) verify with configured audience(s) when provided
-      // 2) if that fails with an audience-related error, retry verification WITHOUT audience
-      //    (still verifies signature + expiry).
-      const audience = CLIENT_IDS.length ? CLIENT_IDS : process.env.GOOGLE_CLIENT_ID;
+      // (Strictly enforce audience; configure GOOGLE_CLIENT_IDS for multi-frontend setups).
+      const audience = CLIENT_IDS.length
+        ? CLIENT_IDS
+        : [String(process.env.GOOGLE_CLIENT_ID || "").trim()].filter(Boolean);
+
+      if (!audience.length) {
+        return res.status(500).json({
+          error: "Server misconfigured: missing GOOGLE_CLIENT_ID(S).",
+          code: "GOOGLE_CLIENT_ID_MISSING",
+        });
+      }
 
       let ticket;
       try {
         ticket = await client.verifyIdToken({
           idToken: token,
-          audience,
+          audience, // enforce aud strictly
         });
       } catch (e) {
-        const m = String(e?.message || e);
-        const audienceError = /aud|audience|wrong recipient|wrong_audience|wrong recipient/i.test(m);
-        if (!audienceError) throw e;
-
-        // Retry without audience enforcement (still verifies Google signature).
-        ticket = await client.verifyIdToken({
-          idToken: token,
+        const msg = String(e?.message || e);
+        return res.status(401).json({
+          error: "Google token audience mismatch. Please sign in again.",
+          code: "GOOGLE_TOKEN_AUDIENCE_MISMATCH",
+          details: msg,
         });
       }
 
