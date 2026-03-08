@@ -104,9 +104,11 @@ router.get("/", requireTenant, requireAdminOrTenantRole("staff"), async (req, re
     const tenantId = req.tenantId;
     const q = req.query.q ? String(req.query.q).trim() : "";
 
-    // Optional limit (cap at 200)
-    const limitRaw = req.query.limit ? Number(req.query.limit) : 200;
-    const limit = Math.max(1, Math.min(200, Number.isFinite(limitRaw) ? limitRaw : 200));
+    // PR-3: pagination — limit + offset + total meta
+    const limitRaw  = req.query.limit  ? Number(req.query.limit)  : 50;
+    const offsetRaw = req.query.offset ? Number(req.query.offset) : 0;
+    const limit  = Math.max(1, Math.min(200, Number.isFinite(limitRaw)  ? limitRaw  : 50));
+    const offset = Math.max(0,              Number.isFinite(offsetRaw) ? offsetRaw : 0);
 
     const params = [tenantId];
     let where = `WHERE c.tenant_id = $1`;
@@ -119,7 +121,14 @@ router.get("/", requireTenant, requireAdminOrTenantRole("staff"), async (req, re
     // For autocomplete/search UX: order by name when q is provided, otherwise newest first
     const orderBy = q ? `ORDER BY c.name ASC` : `ORDER BY c.created_at DESC`;
 
-    const query = `
+    // Count query for meta
+    const countResult = await db.query(
+      `SELECT COUNT(*)::int AS total FROM customers c ${where}`,
+      params
+    );
+    const total = countResult.rows[0]?.total ?? 0;
+
+    const dataQuery = `
       SELECT
         c.id,
         c.tenant_id,
@@ -135,10 +144,20 @@ router.get("/", requireTenant, requireAdminOrTenantRole("staff"), async (req, re
       ${where}
       ${orderBy}
       LIMIT $${params.length + 1}
+      OFFSET $${params.length + 2}
     `;
 
-    const result = await db.query(query, [...params, limit]);
-    return res.json({ customers: result.rows });
+    const result = await db.query(dataQuery, [...params, limit, offset]);
+
+    return res.json({
+      customers: result.rows,
+      meta: {
+        total,
+        limit,
+        offset,
+        hasMore: offset + result.rows.length < total,
+      },
+    });
   } catch (err) {
     console.error("Error loading customers:", err);
     return res.status(500).json({ error: "Failed to load customers" });
@@ -327,6 +346,111 @@ router.get("/me/versions", requireGoogleAuth, requireTenant, async (req, res) =>
   }
 });
 
+router.get("/me/prepaid-entitlements", requireGoogleAuth, requireTenant, async (req, res) => {
+  try {
+    const tenantId = req.tenantId || req.tenant?.id;
+    const email = (req.googleUser?.email || "").toLowerCase();
+    if (!tenantId) return res.status(400).json({ error: "Missing tenant" });
+    if (!email) return res.status(401).json({ error: "Unauthorized" });
+
+    const cust = await pool.query(
+      `SELECT id FROM customers WHERE tenant_id=$1 AND LOWER(email)=LOWER($2) LIMIT 1`,
+      [tenantId, email]
+    );
+    if (cust.rows.length === 0) return res.json({ entitlements: [] });
+
+    const customerId = cust.rows[0].id;
+    const schemaCheck = await pool.query(
+      `SELECT
+         to_regclass('public.customer_prepaid_entitlements') AS ent,
+         to_regclass('public.prepaid_products') AS prod`
+    );
+    const ready = !!schemaCheck.rows?.[0]?.ent && !!schemaCheck.rows?.[0]?.prod;
+    if (!ready) return res.json({ entitlements: [] });
+
+    const q = await pool.query(
+      `SELECT
+         e.id,
+         e.prepaid_product_id,
+         e.status,
+         e.original_quantity,
+         e.remaining_quantity,
+         e.starts_at,
+         e.expires_at,
+         e.notes,
+         p.name AS prepaid_product_name,
+         p.product_type,
+         p.eligible_service_ids,
+         p.rules AS product_rules,
+         p.credit_amount,
+         p.session_count,
+         p.minutes_total,
+         CASE
+           WHEN COALESCE(p.minutes_total, 0) > 0 THEN 'minute'
+           WHEN COALESCE(p.credit_amount, 0) > 0 THEN 'credit'
+           ELSE 'package_use'
+         END AS redemption_mode_hint
+       FROM customer_prepaid_entitlements e
+       JOIN prepaid_products p
+         ON p.id = e.prepaid_product_id
+        AND p.tenant_id = e.tenant_id
+       WHERE e.tenant_id = $1
+         AND e.customer_id = $2
+         AND COALESCE(e.status, 'active') = 'active'
+         AND COALESCE(e.remaining_quantity, 0) > 0
+         AND (e.expires_at IS NULL OR e.expires_at > NOW())
+         AND COALESCE(p.is_active, true) = true
+       ORDER BY e.updated_at DESC, e.id DESC`,
+      [tenantId, customerId]
+    );
+
+    return res.json({ entitlements: q.rows });
+  } catch (e) {
+    console.error("GET /customers/me/prepaid-entitlements error:", e);
+    return res.status(500).json({ error: "Server error" });
+  }
+});
+
+router.get("/me/prepaid-summary", requireGoogleAuth, requireTenant, async (req, res) => {
+  try {
+    const tenantId = req.tenantId || req.tenant?.id;
+    const email = (req.googleUser?.email || "").toLowerCase();
+    if (!tenantId) return res.status(400).json({ error: "Missing tenant" });
+    if (!email) return res.status(401).json({ error: "Unauthorized" });
+
+    const cust = await pool.query(
+      `SELECT id FROM customers WHERE tenant_id=$1 AND LOWER(email)=LOWER($2) LIMIT 1`,
+      [tenantId, email]
+    );
+    if (cust.rows.length === 0) return res.json({ summary: { active_entitlements: 0, remaining_quantity: 0 } });
+
+    const customerId = cust.rows[0].id;
+    const schemaCheck = await pool.query(
+      `SELECT to_regclass('public.customer_prepaid_entitlements') AS ent`
+    );
+    if (!schemaCheck.rows?.[0]?.ent) {
+      return res.json({ summary: { active_entitlements: 0, remaining_quantity: 0 } });
+    }
+
+    const q = await pool.query(
+      `SELECT
+         COUNT(*)::int AS active_entitlements,
+         COALESCE(SUM(remaining_quantity), 0)::int AS remaining_quantity
+       FROM customer_prepaid_entitlements
+       WHERE tenant_id = $1
+         AND customer_id = $2
+         AND COALESCE(status, 'active') = 'active'
+         AND COALESCE(remaining_quantity, 0) > 0
+         AND (expires_at IS NULL OR expires_at > NOW())`,
+      [tenantId, customerId]
+    );
+    return res.json({ summary: q.rows?.[0] || { active_entitlements: 0, remaining_quantity: 0 } });
+  } catch (e) {
+    console.error("GET /customers/me/prepaid-summary error:", e);
+    return res.status(500).json({ error: "Server error" });
+  }
+});
+
 // Get my booking history for a tenant
 router.get("/me/bookings", requireGoogleAuth, requireTenant, async (req, res) => {
   try {
@@ -397,6 +521,14 @@ router.get("/me/bookings", requireGoogleAuth, requireTenant, async (req, res) =>
         cmem.uses_remaining AS membership_uses_remaining,
         mu.minutes_used AS membership_minutes_used_for_booking,
         mu.uses_used AS membership_uses_used_for_booking,
+        COALESCE(pr.prepaid_applied, false) AS prepaid_applied,
+        pr.prepaid_entitlement_id,
+        pr.prepaid_product_id,
+        pr.prepaid_product_name,
+        pr.prepaid_redemption_id,
+        pr.prepaid_redemption_mode,
+        pr.prepaid_quantity_used,
+        pr.prepaid_quantity_remaining,
         COALESCE(${customerName}, c.name) AS customer_name,
         COALESCE(${customerEmail}, c.email) AS customer_email,
         COALESCE(${customerPhone}, c.phone) AS customer_phone,
@@ -418,6 +550,27 @@ router.get("/me/bookings", requireGoogleAuth, requireTenant, async (req, res) =>
         WHERE ml.booking_id = b.id
           AND (b.customer_membership_id IS NULL OR ml.customer_membership_id = b.customer_membership_id)
       ) mu ON true
+      LEFT JOIN LATERAL (
+        SELECT
+          true AS prepaid_applied,
+          pr.id AS prepaid_redemption_id,
+          pr.entitlement_id AS prepaid_entitlement_id,
+          pr.prepaid_product_id,
+          pp.name AS prepaid_product_name,
+          pr.redemption_mode AS prepaid_redemption_mode,
+          pr.redeemed_quantity AS prepaid_quantity_used,
+          e.remaining_quantity AS prepaid_quantity_remaining
+        FROM prepaid_redemptions pr
+        LEFT JOIN customer_prepaid_entitlements e
+          ON e.id = pr.entitlement_id
+         AND e.tenant_id = pr.tenant_id
+        LEFT JOIN prepaid_products pp
+          ON pp.id = pr.prepaid_product_id
+         AND pp.tenant_id = pr.tenant_id
+        WHERE pr.booking_id = b.id
+        ORDER BY pr.id DESC
+        LIMIT 1
+      ) pr ON true
       WHERE b.tenant_id = $1
         AND b.customer_id = $2
       ORDER BY ${startTime} DESC
