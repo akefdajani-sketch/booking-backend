@@ -1,8 +1,15 @@
+'use strict';
+
 const express = require("express");
 const cors = require("cors");
 
 const { corsMiddleware, corsOptions } = require("./middleware/cors");
 const { uploadDir } = require("./middleware/upload");
+
+// PR-1: Observability middleware (loaded first so all requests are covered)
+const correlationId = require("./middleware/correlationId");
+const requestLogger = require("./middleware/requestLogger");
+const errorHandler = require("./middleware/errorHandler");
 
 // existing routers
 const tenantsRouter = require("./routes/tenants");
@@ -30,35 +37,44 @@ const tenantBookingsRouter = require("./routes/tenantBookings");
 const tenantPrepaidCatalogRouter = require("./routes/tenantPrepaidCatalog");
 const tenantPrepaidAccountingRouter = require("./routes/tenantPrepaidAccounting");
 
-// Public endpoints (no auth): pricing quote, etc.
 const publicPricingRouter = require("./routes/publicPricing");
-
 const uploadsRouter = require("./routes/uploads");
 
-// NEW theme routers
+// theme routers
 const adminThemesRouter = require("./routes/adminThemes");
 const adminTenantsThemeRouter = require("./routes/adminTenantsTheme");
 const publicTenantThemeRouter = require("./routes/publicTenantTheme");
 
-// Phase 3 links (staff/resources <-> services)
 const linksRouter = require("./routes/links");
-
-// Tenant custom domains (domain -> tenant slug)
 const tenantDomainsRouter = require("./routes/tenantDomains");
 const debugGoogleAuthRouter = require("./routes/debugGoogleAuth");
+
+// PR-1: health router (replaces inline /health + old /health/db route)
+const healthRouter = require("./routes/health");
 
 const app = express();
 const ENABLE_DEBUG_ROUTES =
   String(process.env.ENABLE_DEBUG_ROUTES || "").toLowerCase() === "true";
 
+// ─── Observability (must be first) ───────────────────────────────────────────
+app.use(correlationId);   // attaches req.requestId + X-Request-ID header
+app.use(requestLogger);   // structured pino-http logging for every request
+
+// ─── CORS ────────────────────────────────────────────────────────────────────
 app.use(corsMiddleware);
 app.options("*", cors(corsOptions));
+
+// ─── Body parsers ────────────────────────────────────────────────────────────
 app.use(express.json({ limit: "2mb" }));
 app.use(express.urlencoded({ extended: true }));
 
+// ─── Static uploads ──────────────────────────────────────────────────────────
 app.use("/uploads", express.static(uploadDir));
 
-// core APIs
+// ─── Health (before API routes — no auth required) ───────────────────────────
+app.use("/health", healthRouter);
+
+// ─── Core APIs ───────────────────────────────────────────────────────────────
 app.use("/api/tenants", tenantsRouter);
 app.use("/api/tenant-hours", tenantHoursRouter);
 app.use("/api/tenant-blackouts", tenantBlackoutsRouter);
@@ -71,7 +87,7 @@ app.use("/api/availability", availabilityRouter);
 app.use("/api/membership-plans", membershipPlansRouter);
 app.use("/api/customer-memberships", customerMembershipsRouter);
 
-// users/roles + invites
+// ─── Tenant-scoped APIs ───────────────────────────────────────────────────────
 app.use("/api/tenant", tenantUsersRouter);
 app.use("/api/tenant", tenantPlanRouter);
 app.use("/api/tenant", tenantDashboardRouter);
@@ -85,35 +101,30 @@ app.use("/api/tenant", tenantPrepaidCatalogRouter);
 app.use("/api/tenant", tenantPrepaidAccountingRouter);
 app.use("/api/invites", invitesRouter);
 
-// Public APIs (tenant slug in path)
+// ─── Public APIs ─────────────────────────────────────────────────────────────
 app.use("/api/public", publicPricingRouter);
 
-// uploads
+// ─── Uploads ─────────────────────────────────────────────────────────────────
 app.use("/api/uploads", uploadsRouter);
 
-// THEME SYSTEM
+// ─── Theme system ─────────────────────────────────────────────────────────────
 app.use("/api/admin/themes", adminThemesRouter);
 app.use("/api/admin/tenants", adminTenantsThemeRouter);
 app.use("/api/public/tenant-theme", publicTenantThemeRouter);
 
-// Relationship links
+// ─── Misc ─────────────────────────────────────────────────────────────────────
 app.use("/api/links", linksRouter);
-
-// Tenant custom domains
 app.use("/api/tenant-domains", tenantDomainsRouter);
 
-app.get("/health", (req, res) => res.json({ ok: true }));
-// TEMP: auth debug endpoint (remove after fix)
 if (ENABLE_DEBUG_ROUTES && process.env.NODE_ENV !== "production") {
   app.use("/api/debug", debugGoogleAuthRouter);
 }
 
+// ─── 404 catch-all for /api/* ─────────────────────────────────────────────────
 app.use("/api", (req, res) => res.status(404).json({ error: "Not found" }));
 
-app.use((err, req, res, next) => {
-  console.error("Unhandled error:", err);
-  res.status(500).json({ error: "Internal server error" });
-});
+// ─── Central error handler (must be last) ────────────────────────────────────
+// Replaces the old inline (err, req, res, next) block.
+app.use(errorHandler);
 
 module.exports = app;
-
