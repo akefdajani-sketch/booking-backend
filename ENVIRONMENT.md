@@ -25,6 +25,40 @@
   - Optional. Used as the Sentry release tag.
   - On Render, `RENDER_GIT_COMMIT` is set automatically and used instead.
 
+### PR-4: Stripe Billing
+- `STRIPE_SECRET_KEY`
+  - Stripe secret API key (`sk_live_...` or `sk_test_...`)
+  - Get from: dashboard.stripe.com → Developers → API Keys
+  - **Omit to disable billing features** — server boots and all non-billing routes work normally
+  - Never expose in client code
+- `STRIPE_WEBHOOK_SECRET`
+  - Signing secret for webhook signature verification (`whsec_...`)
+  - Get from: dashboard.stripe.com → Developers → Webhooks → your endpoint → Signing secret
+  - **Required in production** to prevent webhook spoofing
+  - Omit in local dev only (signature check is skipped, not recommended in prod)
+- `STRIPE_PRICE_STARTER`
+  - Stripe Price ID for the Starter plan (`price_...`)
+  - Get from: dashboard.stripe.com → Products → your Starter product → Price ID
+  - Example: `price_1ABC123defGHI456`
+- `STRIPE_PRICE_GROWTH`
+  - Stripe Price ID for the Growth plan
+- `STRIPE_PRICE_PRO`
+  - Stripe Price ID for the Pro plan
+- `FRONTEND_URL`
+  - Base URL of the frontend app, used for Stripe redirect URLs
+  - Example: `https://app.flexrz.com`
+  - Default fallback: `https://flexrz.com`
+
+#### Stripe Setup Checklist
+1. Create products + recurring prices in Stripe dashboard (one per plan)
+2. Copy Price IDs into `STRIPE_PRICE_STARTER`, `STRIPE_PRICE_GROWTH`, `STRIPE_PRICE_PRO`
+3. Set `STRIPE_SECRET_KEY` (use test key first)
+4. Register webhook endpoint: `https://your-backend.onrender.com/api/billing/webhook`
+   - Events to enable: `checkout.session.completed`, `customer.subscription.updated`,
+     `customer.subscription.deleted`, `invoice.payment_failed`
+5. Copy webhook signing secret into `STRIPE_WEBHOOK_SECRET`
+6. Run migration: `psql $DATABASE_URL -f migrations/004_stripe_customer_id.sql`
+
 ### Recommended
 - `CORS_ORIGINS`
   - Comma-separated allowed origins (frontend URLs)

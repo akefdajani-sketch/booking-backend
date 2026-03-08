@@ -62,6 +62,10 @@ const debugGoogleAuthRouter = require("./routes/debugGoogleAuth");
 // PR-1: health router (replaces inline /health + old /health/db route)
 const healthRouter = require("./routes/health");
 
+// PR-4: Billing — webhook MUST be mounted before express.json() (needs raw body)
+const stripeWebhookRouter = require("./routes/stripeWebhook");
+const billingRouter = require("./routes/billing");
+
 const app = express();
 const ENABLE_DEBUG_ROUTES =
   String(process.env.ENABLE_DEBUG_ROUTES || "").toLowerCase() === "true";
@@ -74,6 +78,10 @@ app.use(apiVersion);      // PR-3: adds X-API-Version header to every response
 // ─── CORS ────────────────────────────────────────────────────────────────────
 app.use(corsMiddleware);
 app.options("*", cors(corsOptions));
+
+// ─── PR-4: Stripe webhook (raw body — MUST be before express.json()) ─────────
+// Stripe requires the raw Buffer for signature verification.
+app.use("/api/billing", stripeWebhookRouter);
 
 // ─── Body parsers ────────────────────────────────────────────────────────────
 app.use(express.json({ limit: "2mb" }));
@@ -120,6 +128,9 @@ app.use("/api/tenant", tenantBookingsRouter);
 app.use("/api/tenant", tenantPrepaidCatalogRouter);
 app.use("/api/tenant", tenantPrepaidAccountingRouter);
 app.use("/api/invites", invitesRouter);
+
+// ─── PR-4: Billing REST endpoints (checkout, portal, status) ─────────────────
+app.use("/api/billing", billingRouter);
 
 // ─── Public APIs ─────────────────────────────────────────────────────────────
 // PR-2: rate-limit public pricing/theme browsing
