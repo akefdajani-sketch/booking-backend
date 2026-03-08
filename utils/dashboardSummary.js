@@ -9,6 +9,7 @@
 
 const db = require("../db");
 const { ensureBookingMoneyColumns, bookingMoneyColsAvailable } = require("./ensureBookingMoneyColumns");
+const { buildDashboardAlerts } = require("./buildDashboardAlerts");
 
 // -----------------------------------------------------------------------------
 // Schema compatibility helpers
@@ -98,11 +99,21 @@ async function resolveDashboardThresholds(tenantId) {
   // This keeps TD5 "SaaS-safe" without requiring a schema migration.
   const defaults = {
     utilization_low_pct: 20,
+    utilization_critical_low_pct: 10,
     utilization_good_pct: 60,
     repeat_good_pct: 50,
+    repeat_drop_warn_pct: 10,
     dropoff_warn_pct: 30,
-    pending_warn_count: 1,
-    cancel_warn_count: 1,
+    revenue_drop_warn_pct: 15,
+    revenue_drop_critical_pct: 30,
+    booking_drop_warn_pct: 15,
+    no_show_warn_pct: 10,
+    no_show_critical_pct: 18,
+    pending_warn_count: 2,
+    pending_critical_count: 6,
+    cancel_warn_count: 2,
+    at_risk_warn_count: 3,
+    alert_cooldown_hours: 24,
   };
 
   try {
@@ -123,6 +134,7 @@ async function resolveDashboardThresholds(tenantId) {
 
     const raw =
       (branding && branding.dashboard && branding.dashboard.thresholds) ||
+      (branding && branding.dashboard_widgets && branding.dashboard_widgets.alerts_thresholds) ||
       (branding && branding.dashboard_thresholds) ||
       (branding && branding.thresholds && branding.thresholds.dashboard) ||
       null;
@@ -140,6 +152,113 @@ async function resolveDashboardThresholds(tenantId) {
   } catch {
     return defaults;
   }
+}
+
+
+async function resolveDashboardTargets(tenantId, mode) {
+  const defaults = {
+    day: { bookings: null, revenue_amount: null, utilizationPct: null, repeatPct: null, noShowRateMax: null },
+    week: { bookings: null, revenue_amount: null, utilizationPct: null, repeatPct: null, noShowRateMax: null },
+    month: { bookings: null, revenue_amount: null, utilizationPct: null, repeatPct: null, noShowRateMax: null },
+  };
+  try {
+    const hasBranding = await db.query(
+      `SELECT 1 FROM information_schema.columns
+       WHERE table_schema='public' AND table_name='tenants' AND column_name='branding' LIMIT 1`
+    );
+    if (hasBranding.rowCount <= 0) return defaults[mode] || defaults.day;
+    const r = await db.query(`SELECT branding FROM tenants WHERE id=$1 LIMIT 1`, [tenantId]);
+    let branding = r.rows?.[0]?.branding;
+    if (!branding) return defaults[mode] || defaults.day;
+    if (typeof branding === 'string') {
+      try { branding = JSON.parse(branding); } catch { return defaults[mode] || defaults.day; }
+    }
+    const rawTargets =
+      (branding && branding.dashboard_widgets && branding.dashboard_widgets.targets) ||
+      (branding && branding.dashboard && branding.dashboard.targets) ||
+      null;
+    if (!rawTargets || typeof rawTargets !== 'object') return defaults[mode] || defaults.day;
+    const raw = rawTargets?.[mode] && typeof rawTargets[mode] === 'object' ? rawTargets[mode] : {};
+    const cleaned = {};
+    for (const key of ['bookings', 'revenue_amount', 'utilizationPct', 'repeatPct', 'noShowRateMax']) {
+      const value = raw[key];
+      if (value == null || value === '') {
+        cleaned[key] = null;
+        continue;
+      }
+      const n = Number(value);
+      cleaned[key] = Number.isFinite(n) ? n : null;
+    }
+    return { ...defaults[mode], ...cleaned };
+  } catch {
+    return defaults[mode] || defaults.day;
+  }
+}
+
+function computePeriodElapsedFraction(rangeStart, rangeEnd, now = new Date()) {
+  const start = rangeStart instanceof Date ? rangeStart.getTime() : new Date(rangeStart).getTime();
+  const end = rangeEnd instanceof Date ? rangeEnd.getTime() : new Date(rangeEnd).getTime();
+  const current = now instanceof Date ? now.getTime() : new Date(now).getTime();
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return 1;
+  if (current <= start) return 0;
+  if (current >= end) return 1;
+  return Number(((current - start) / (end - start)).toFixed(4));
+}
+
+function buildTargetBenchmark({ actual, target, elapsedFraction = 1, direction = 'at_least' }) {
+  const safeActual = Number(actual);
+  const safeTarget = Number(target);
+  if (!Number.isFinite(safeActual) || !Number.isFinite(safeTarget) || safeTarget <= 0) {
+    return {
+      target: Number.isFinite(safeTarget) ? safeTarget : null,
+      actual: Number.isFinite(safeActual) ? safeActual : null,
+      progressPct: null,
+      pacePct: null,
+      paceTarget: null,
+      status: 'no_target',
+      remaining: null,
+      aheadBehind: null,
+      direction,
+    };
+  }
+  const fraction = Math.max(0, Math.min(1, Number.isFinite(elapsedFraction) ? elapsedFraction : 1));
+  const paceTarget = safeTarget * fraction;
+  if (direction === 'at_most') {
+    const progressPct = Math.max(0, Math.min(100, Math.round((safeTarget / Math.max(safeActual || 0.0001, 0.0001)) * 100)));
+    return {
+      target: safeTarget,
+      actual: safeActual,
+      progressPct,
+      pacePct: null,
+      paceTarget,
+      status: safeActual <= safeTarget ? 'on_track' : safeActual <= safeTarget * 1.15 ? 'behind' : 'critical',
+      remaining: Math.max(0, safeTarget - safeActual),
+      aheadBehind: safeTarget - safeActual,
+      direction,
+    };
+  }
+  const progressPct = Math.max(0, Math.round((safeActual / safeTarget) * 100));
+  const pacePct = paceTarget > 0 ? Math.round((safeActual / paceTarget) * 100) : null;
+  let status = 'on_track';
+  if (fraction >= 1) {
+    status = safeActual >= safeTarget ? 'ahead' : 'behind';
+  } else if (pacePct != null) {
+    if (pacePct >= 102) status = 'ahead';
+    else if (pacePct >= 95) status = 'on_track';
+    else if (pacePct >= 80) status = 'behind';
+    else status = 'critical';
+  }
+  return {
+    target: safeTarget,
+    actual: safeActual,
+    progressPct,
+    pacePct,
+    paceTarget,
+    status,
+    remaining: Math.max(0, safeTarget - safeActual),
+    aheadBehind: safeActual - safeTarget,
+    direction,
+  };
 }
 
 
@@ -199,6 +318,67 @@ function computeRange(mode, dateStr) {
   return { rangeStart, rangeEnd };
 }
 
+function parseMinutesFromTime(value) {
+  const s = String(value || "").slice(0, 5);
+  if (!/^\d{2}:\d{2}$/.test(s)) return null;
+  const [hh, mm] = s.split(":").map(Number);
+  if (!Number.isFinite(hh) || !Number.isFinite(mm)) return null;
+  return hh * 60 + mm;
+}
+
+function overlapMinutes(aStart, aEnd, bStart, bEnd) {
+  const start = Math.max(aStart, bStart);
+  const end = Math.min(aEnd, bEnd);
+  return Math.max(0, end - start);
+}
+
+function getDayOpenSegments(hourRows, dow) {
+  return (hourRows || [])
+    .filter((r) => Number(r.day_of_week) === dow && r.is_closed !== true)
+    .map((r) => {
+      const startMin = parseMinutesFromTime(r.open_time);
+      let endMin = parseMinutesFromTime(r.close_time);
+      if (startMin == null || endMin == null) return null;
+      if (endMin <= startMin) endMin += 24 * 60;
+      return { startMin, endMin };
+    })
+    .filter(Boolean);
+}
+
+function buildBucketStarts(mode, rangeStart, rangeEnd) {
+  const buckets = [];
+  const cursor = new Date(rangeStart.getTime());
+  while (cursor.getTime() < rangeEnd.getTime()) {
+    buckets.push(new Date(cursor.getTime()));
+    if (mode === "day") cursor.setUTCHours(cursor.getUTCHours() + 1, 0, 0, 0);
+    else cursor.setUTCDate(cursor.getUTCDate() + 1);
+  }
+  return buckets;
+}
+
+function bucketLabel(mode, bucketDate) {
+  if (mode === "day") return `${String(bucketDate.getUTCHours()).padStart(2, "0")}:00`;
+  return bucketDate.toISOString().slice(0, 10);
+}
+
+function computeOpenMinutesForBucket(hourRows, mode, bucketDate) {
+  const dow = bucketDate.getUTCDay();
+  const segments = getDayOpenSegments(hourRows, dow);
+  if (!segments.length) return 0;
+  if (mode === "day") {
+    const bucketStart = bucketDate.getUTCHours() * 60;
+    const bucketEnd = bucketStart + 60;
+    return segments.reduce((sum, seg) => sum + overlapMinutes(bucketStart, bucketEnd, seg.startMin, seg.endMin), 0);
+  }
+  return segments.reduce((sum, seg) => sum + Math.max(0, seg.endMin - seg.startMin), 0);
+}
+
+function roundPct(numerator, denominator) {
+  if (!Number.isFinite(numerator) || !Number.isFinite(denominator) || denominator <= 0) return null;
+  return Math.round((numerator / denominator) * 100);
+}
+
+
 async function getDashboardSummary({ tenantId, tenantSlug, mode, dateStr }) {
   const hasMoneyCols = await ensureBookingMoneyColumns();
 
@@ -247,6 +427,7 @@ async function getDashboardSummary({ tenantId, tenantSlug, mode, dateStr }) {
 
   const currencyCode = await resolveTenantCurrencyCode(tenantId);
   const thresholds = await resolveDashboardThresholds(tenantId);
+  const targetGoals = await resolveDashboardTargets(tenantId, safeMode);
 
 
   const next = await db.query(
@@ -269,33 +450,94 @@ async function getDashboardSummary({ tenantId, tenantSlug, mode, dateStr }) {
 
   const pulse = await db.query(
     `
-    WITH in_range AS (
-      SELECT DISTINCT customer_id
+    WITH first_seen AS (
+      SELECT customer_id, MIN(${startCol}) AS first_booking_at, COUNT(*)::int AS lifetime_bookings
       FROM bookings b
-      WHERE b.tenant_id=$1 AND ${startCol} >= $2 AND ${startCol} < $3 AND customer_id IS NOT NULL
-    ), totals AS (
-      SELECT customer_id, COUNT(*)::int AS total_bookings
-      FROM bookings b
-      WHERE b.tenant_id=$1 AND customer_id IS NOT NULL
+      WHERE b.tenant_id=$1
+        AND b.customer_id IS NOT NULL
       GROUP BY customer_id
+    ), in_range AS (
+      SELECT DISTINCT b.customer_id
+      FROM bookings b
+      WHERE b.tenant_id=$1
+        AND ${startCol} >= $2
+        AND ${startCol} < $3
+        AND b.customer_id IS NOT NULL
     )
     SELECT
-      COALESCE(SUM(CASE WHEN t.total_bookings = 1 THEN 1 ELSE 0 END),0)::int AS new_customers,
-      COALESCE(SUM(CASE WHEN t.total_bookings >= 2 THEN 1 ELSE 0 END),0)::int AS returning_customers,
-      COALESCE(COUNT(*),0)::int AS active_customers
+      COALESCE(COUNT(*),0)::int AS active_customers,
+      COALESCE(COUNT(*) FILTER (WHERE fs.first_booking_at >= $2 AND fs.first_booking_at < $3),0)::int AS new_customers,
+      COALESCE(COUNT(*) FILTER (WHERE fs.first_booking_at < $2),0)::int AS returning_customers
     FROM in_range r
-    JOIN totals t ON t.customer_id = r.customer_id
+    JOIN first_seen fs ON fs.customer_id = r.customer_id
     `,
     [tenantId, rangeStart.toISOString(), rangeEnd.toISOString()]
   );
 
   const activeCustomers = pulse.rows?.[0]?.active_customers || 0;
+  const newCustomers = pulse.rows?.[0]?.new_customers || 0;
   const returningCustomers = pulse.rows?.[0]?.returning_customers || 0;
   const repeatPct = activeCustomers > 0 ? Math.round((returningCustomers / activeCustomers) * 100) : 0;
 
   const totalRequests = confirmedCount + pendingCount + cancelledCount;
   const conversionPct = totalRequests > 0 ? Math.round((confirmedCount / totalRequests) * 100) : null;
   const dropoffPct = totalRequests > 0 ? Math.max(0, 100 - conversionPct) : null;
+
+  // Previous-period comparison snapshot for DSH-5 alerts.
+  const rangeSpanDays = Math.max(1, Math.round((rangeEnd.getTime() - rangeStart.getTime()) / 86400000));
+  const compareStart = addDays(rangeStart, -rangeSpanDays);
+  const compareEnd = rangeStart;
+  let previousConfirmedCount = 0;
+  let previousRevenueAmount = 0;
+  let previousNoShowRate = 0;
+  let previousRepeatPct = 0;
+  try {
+    const prevAgg = await db.query(
+      `
+      SELECT
+        COUNT(*) FILTER (WHERE status='confirmed')::int AS confirmed_count,
+        COALESCE(SUM(charge_amount) FILTER (WHERE status='confirmed'), 0)::numeric AS revenue_amount,
+        COUNT(*) FILTER (WHERE LOWER(COALESCE(status, '')) IN ('confirmed','checked_in','completed','no_show','noshow','completed_absent'))::int AS eligible_count,
+        COUNT(*) FILTER (WHERE LOWER(COALESCE(status, '')) IN ('no_show','noshow','completed_absent'))::int AS no_show_count
+      FROM bookings b
+      WHERE b.tenant_id=$1
+        AND ${startCol} >= $2
+        AND ${startCol} < $3
+      `,
+      [tenantId, compareStart.toISOString(), compareEnd.toISOString()]
+    );
+    previousConfirmedCount = Number(prevAgg.rows?.[0]?.confirmed_count || 0);
+    previousRevenueAmount = Number(prevAgg.rows?.[0]?.revenue_amount || 0);
+    const prevEligible = Number(prevAgg.rows?.[0]?.eligible_count || 0);
+    const prevNoShows = Number(prevAgg.rows?.[0]?.no_show_count || 0);
+    previousNoShowRate = prevEligible > 0 ? Number(((prevNoShows / prevEligible) * 100).toFixed(1)) : 0;
+  } catch {}
+  try {
+    const prevRepeat = await db.query(
+      `
+      WITH first_seen AS (
+        SELECT customer_id, MIN(${startCol}) AS first_booking_at
+        FROM bookings b
+        WHERE b.tenant_id=$1
+          AND b.customer_id IS NOT NULL
+        GROUP BY customer_id
+      )
+      SELECT
+        COUNT(DISTINCT b.customer_id)::int AS active_customers,
+        COUNT(DISTINCT b.customer_id) FILTER (WHERE fs.first_booking_at < $2)::int AS returning_customers
+      FROM bookings b
+      JOIN first_seen fs ON fs.customer_id=b.customer_id
+      WHERE b.tenant_id=$1
+        AND ${startCol} >= $2
+        AND ${startCol} < $3
+        AND b.customer_id IS NOT NULL
+      `,
+      [tenantId, compareStart.toISOString(), compareEnd.toISOString()]
+    );
+    const prevActiveCustomers = Number(prevRepeat.rows?.[0]?.active_customers || 0);
+    const prevReturningCustomers = Number(prevRepeat.rows?.[0]?.returning_customers || 0);
+    previousRepeatPct = prevActiveCustomers > 0 ? Math.round((prevReturningCustomers / prevActiveCustomers) * 100) : 0;
+  } catch {}
 
   // Active memberships (best-effort; table might not exist in older envs)
   let activeMemberships = 0;
@@ -320,6 +562,7 @@ async function getDashboardSummary({ tenantId, tenantSlug, mode, dateStr }) {
   const capacityUnits = resourceCount > 0 ? resourceCount : staffCount;
 
   let utilizationPct = null;
+  let openMinutesTotal = 0;
   const hoursReg = await db.query(`SELECT to_regclass('public.tenant_hours') AS reg`);
   if (hoursReg.rows?.[0]?.reg && capacityUnits > 0) {
     // tenant_hours schema in this codebase uses open_time/close_time/is_closed
@@ -346,12 +589,21 @@ async function getDashboardSummary({ tenantId, tenantSlug, mode, dateStr }) {
         if (!/^\d{2}:\d{2}$/.test(st) || !/^\d{2}:\d{2}$/.test(et)) continue;
         const [sh, sm] = st.split(":").map(Number);
         const [eh, em] = et.split(":").map(Number);
-        const mins = (eh * 60 + em) - (sh * 60 + sm);
+        const startMin = sh * 60 + sm;
+        let endMin = eh * 60 + em;
+
+        // Support "overnight" schedules and the common pattern where close_time is stored as 00:00
+        // to represent "midnight at end of day" (e.g. 10:00 → 00:00 should mean 14 hours, not 0).
+        // If end <= start, treat close as next-day.
+        if (endMin <= startMin) endMin += 24 * 60;
+
+        const mins = endMin - startMin;
         if (mins > 0) openMinutes += mins;
       }
       cursor.setUTCDate(cursor.getUTCDate() + 1);
     }
 
+    openMinutesTotal = openMinutes;
     const capacityMinutes = openMinutes * capacityUnits;
     if (capacityMinutes > 0) utilizationPct = Math.round((bookedMinutes / capacityMinutes) * 100);
   }
@@ -366,6 +618,28 @@ async function getDashboardSummary({ tenantId, tenantSlug, mode, dateStr }) {
       status: status === "pending" ? "pending" : status === "cancelled" ? "cancelled" : "confirmed",
     };
   });
+
+  const eligibleNoShowStatuses = ['confirmed', 'checked_in', 'completed', 'no_show', 'noshow', 'completed_absent'];
+  const noShowStatuses = ['no_show', 'noshow', 'completed_absent'];
+  let noShowCount = 0;
+  let noShowEligibleCount = 0;
+  try {
+    const noShowAgg = await db.query(
+      `
+      SELECT
+        COUNT(*) FILTER (WHERE LOWER(COALESCE(status, '')) = ANY($4::text[]))::int AS no_show_count,
+        COUNT(*) FILTER (WHERE LOWER(COALESCE(status, '')) = ANY($5::text[]))::int AS eligible_count
+      FROM bookings b
+      WHERE b.tenant_id=$1
+        AND ${startCol} >= $2
+        AND ${startCol} < $3
+      `,
+      [tenantId, rangeStart.toISOString(), rangeEnd.toISOString(), noShowStatuses, eligibleNoShowStatuses]
+    );
+    noShowCount = Number(noShowAgg.rows?.[0]?.no_show_count || 0);
+    noShowEligibleCount = Number(noShowAgg.rows?.[0]?.eligible_count || 0);
+  } catch {}
+  const noShowRate = noShowEligibleCount > 0 ? Number(((noShowCount / noShowEligibleCount) * 100).toFixed(1)) : 0;
 
   const attention = [];
   if (pendingCount >= (thresholds.pending_warn_count || 1)) {
@@ -634,6 +908,442 @@ async function getDashboardSummary({ tenantId, tenantSlug, mode, dateStr }) {
     }
   } catch {}
 
+  // Top returning customers in the selected range.
+  let topReturning = [];
+  let topReturningDetailed = [];
+  try {
+    const topRet = await db.query(
+      `
+      WITH first_seen AS (
+        SELECT customer_id, MIN(${startCol}) AS first_booking_at, COUNT(*)::int AS lifetime_bookings
+        FROM bookings b
+        WHERE b.tenant_id=$1
+          AND b.customer_id IS NOT NULL
+        GROUP BY customer_id
+      )
+      SELECT
+        b.customer_id,
+        COALESCE(NULLIF(TRIM(COALESCE(c.name, MAX(b.customer_name))), ''), 'Customer') AS customer_name,
+        COUNT(*)::int AS range_bookings,
+        MAX(${startCol}) AS last_booking_at,
+        COALESCE(SUM(b.charge_amount) FILTER (WHERE b.status='confirmed'), 0)::numeric AS spend_total,
+        MAX(fs.lifetime_bookings)::int AS lifetime_bookings
+      FROM bookings b
+      LEFT JOIN customers c ON c.tenant_id=b.tenant_id AND c.id=b.customer_id
+      JOIN first_seen fs ON fs.customer_id=b.customer_id
+      WHERE b.tenant_id=$1
+        AND ${startCol} >= $2
+        AND ${startCol} < $3
+        AND b.customer_id IS NOT NULL
+        AND fs.first_booking_at < $2
+      GROUP BY b.customer_id
+      ORDER BY range_bookings DESC, last_booking_at DESC, spend_total DESC, lifetime_bookings DESC, customer_name ASC
+      LIMIT 8
+      `,
+      [tenantId, rangeStart.toISOString(), rangeEnd.toISOString()]
+    );
+    topReturningDetailed = (topRet.rows || []).map((r) => ({
+      customerId: Number(r.customer_id),
+      name: String(r.customer_name || 'Customer'),
+      bookingsCount: Number(r.range_bookings || 0),
+      count: Number(r.range_bookings || 0),
+      lastBookingAt: r.last_booking_at,
+      spendTotal: Number(r.spend_total || 0),
+      lifetimeBookings: Number(r.lifetime_bookings || 0),
+    }));
+    topReturning = topReturningDetailed.map((r) => ({ name: r.name, count: r.bookingsCount }));
+  } catch {}
+
+  // Customer mix over time: distinct active customers by bucket, split into new vs returning.
+  let customerMixOverTime = [];
+  try {
+    const cm = await db.query(
+      `
+      WITH first_seen AS (
+        SELECT customer_id, MIN(${startCol}) AS first_booking_at
+        FROM bookings b
+        WHERE b.tenant_id=$1 AND b.customer_id IS NOT NULL
+        GROUP BY customer_id
+      ), bucketed AS (
+        SELECT
+          date_trunc('${truncUnit}', ${startCol}) AS bucket,
+          b.customer_id,
+          MIN(fs.first_booking_at) AS first_booking_at
+        FROM bookings b
+        JOIN first_seen fs ON fs.customer_id=b.customer_id
+        WHERE b.tenant_id=$1
+          AND ${startCol} >= $2
+          AND ${startCol} < $3
+          AND b.customer_id IS NOT NULL
+        GROUP BY 1, 2
+      )
+      SELECT
+        bucket,
+        COUNT(*) FILTER (WHERE first_booking_at >= bucket AND first_booking_at < bucket + interval '1 ${truncUnit}')::int AS new_customers,
+        COUNT(*) FILTER (WHERE first_booking_at < bucket)::int AS returning_customers
+      FROM bucketed
+      GROUP BY 1
+      ORDER BY 1 ASC
+      `,
+      [tenantId, rangeStart.toISOString(), rangeEnd.toISOString()]
+    );
+    customerMixOverTime = (cm.rows || []).map((r) => ({
+      bucket: r.bucket,
+      new_customers: Number(r.new_customers || 0),
+      returning_customers: Number(r.returning_customers || 0),
+    }));
+  } catch {}
+
+  // Staff utilization / load in the selected range.
+  let staffUtilization = [];
+  try {
+    if (staffCount > 0) {
+      const staffHoursReg = await db.query(`SELECT to_regclass('public.staff_weekly_schedule') AS reg`);
+      let openMinutesPerStaff = 0;
+      if (staffHoursReg.rows?.[0]?.reg) {
+        const staffHours = await db.query(
+          `SELECT day_of_week, start_time, end_time, is_off FROM staff_weekly_schedule WHERE tenant_id=$1`,
+          [tenantId]
+        );
+        const rows = staffHours.rows || [];
+        const cursor = new Date(rangeStart.getTime());
+        while (cursor.getTime() < rangeEnd.getTime()) {
+          const dow = cursor.getUTCDay();
+          const todays = rows.filter((r) => Number(r.day_of_week) === dow);
+          for (const r of todays) {
+            if (r.is_off === true) continue;
+            const st = String(r.start_time || '').slice(0, 5);
+            const et = String(r.end_time || '').slice(0, 5);
+            if (!/^\d{2}:\d{2}$/.test(st) || !/^\d{2}:\d{2}$/.test(et)) continue;
+            const [sh, sm] = st.split(':').map(Number);
+            const [eh, em] = et.split(':').map(Number);
+            const startMin = sh * 60 + sm;
+            let endMin = eh * 60 + em;
+            if (endMin <= startMin) endMin += 24 * 60;
+            const mins = endMin - startMin;
+            if (mins > 0) openMinutesPerStaff += mins;
+          }
+          cursor.setUTCDate(cursor.getUTCDate() + 1);
+        }
+      }
+
+      if (!openMinutesPerStaff) {
+        const hoursReg2 = await db.query(`SELECT to_regclass('public.tenant_hours') AS reg`);
+        if (hoursReg2.rows?.[0]?.reg) {
+          const hours = await db.query(`SELECT day_of_week, open_time, close_time, is_closed FROM tenant_hours WHERE tenant_id=$1`, [tenantId]);
+          const rows = hours.rows || [];
+          const cursor = new Date(rangeStart.getTime());
+          while (cursor.getTime() < rangeEnd.getTime()) {
+            const dow = cursor.getUTCDay();
+            const todays = rows.filter((r) => Number(r.day_of_week) === dow);
+            for (const r of todays) {
+              if (r.is_closed === true) continue;
+              const st = String(r.open_time || '').slice(0, 5);
+              const et = String(r.close_time || '').slice(0, 5);
+              if (!/^\d{2}:\d{2}$/.test(st) || !/^\d{2}:\d{2}$/.test(et)) continue;
+              const [sh, sm] = st.split(':').map(Number);
+              const [eh, em] = et.split(':').map(Number);
+              const startMin = sh * 60 + sm;
+              let endMin = eh * 60 + em;
+              if (endMin <= startMin) endMin += 24 * 60;
+              const mins = endMin - startMin;
+              if (mins > 0) openMinutesPerStaff += mins;
+            }
+            cursor.setUTCDate(cursor.getUTCDate() + 1);
+          }
+        }
+      }
+
+      const staffLoad = await db.query(
+        `
+        SELECT
+          st.id AS staff_id,
+          COALESCE(NULLIF(TRIM(st.name), ''), 'Staff') AS staff_name,
+          COALESCE(SUM(b.duration_minutes) FILTER (WHERE b.status='confirmed' AND ${startCol} >= $2 AND ${startCol} < $3), 0)::int AS booked_minutes
+        FROM staff st
+        LEFT JOIN bookings b
+          ON b.tenant_id=st.tenant_id
+         AND b.staff_id=st.id
+        WHERE st.tenant_id=$1
+        GROUP BY st.id, st.name
+        ORDER BY booked_minutes DESC, staff_name ASC
+        LIMIT 6
+        `,
+        [tenantId, rangeStart.toISOString(), rangeEnd.toISOString()]
+      );
+      staffUtilization = (staffLoad.rows || []).map((r) => {
+        const booked = Number(r.booked_minutes || 0);
+        return {
+          staff_id: Number(r.staff_id),
+          staff_name: String(r.staff_name || 'Staff'),
+          booked_minutes: booked,
+          utilization_pct: openMinutesPerStaff > 0 ? Math.round((booked / openMinutesPerStaff) * 100) : null,
+        };
+      });
+    }
+  } catch {}
+
+  let byResource = [];
+  let byService = [];
+  let hourlyHeatmap = [];
+  let atRisk = [];
+  const hourRowsReg = await db.query(`SELECT to_regclass('public.tenant_hours') AS reg`);
+  let tenantHourRows = [];
+  if (hourRowsReg.rows?.[0]?.reg) {
+    try {
+      const hours = await db.query(`SELECT day_of_week, open_time, close_time, is_closed FROM tenant_hours WHERE tenant_id=$1`, [tenantId]);
+      tenantHourRows = hours.rows || [];
+    } catch {}
+  }
+
+  try {
+    const resourceReg = await db.query(`SELECT to_regclass('public.resources') AS reg`);
+    if (resourceReg.rows?.[0]?.reg && resourceCount > 0) {
+      const qr = await db.query(
+        `
+        SELECT
+          r.id AS resource_id,
+          COALESCE(NULLIF(TRIM(r.name), ''), 'Resource') AS resource_name,
+          COALESCE(SUM(b.duration_minutes) FILTER (WHERE b.status='confirmed' AND ${startCol} >= $2 AND ${startCol} < $3), 0)::int AS booked_minutes
+        FROM resources r
+        LEFT JOIN bookings b
+          ON b.tenant_id=r.tenant_id
+         AND b.resource_id=r.id
+        WHERE r.tenant_id=$1
+        GROUP BY r.id, r.name
+        ORDER BY booked_minutes DESC, resource_name ASC
+        LIMIT 8
+        `,
+        [tenantId, rangeStart.toISOString(), rangeEnd.toISOString()]
+      );
+      byResource = (qr.rows || []).map((r) => {
+        const booked = Number(r.booked_minutes || 0);
+        return {
+          resource_id: Number(r.resource_id),
+          resource_name: String(r.resource_name || 'Resource'),
+          booked_minutes: booked,
+          available_minutes: openMinutesTotal,
+          utilization_pct: roundPct(booked, openMinutesTotal),
+        };
+      });
+    }
+  } catch {}
+
+  try {
+    const qSvc = await db.query(
+      `
+      SELECT
+        COALESCE(s.id, 0) AS service_id,
+        COALESCE(s.name, 'Service') AS service_name,
+        COALESCE(SUM(b.duration_minutes) FILTER (WHERE b.status='confirmed'), 0)::int AS booked_minutes,
+        COUNT(*) FILTER (WHERE b.status='confirmed')::int AS bookings_count
+      FROM bookings b
+      LEFT JOIN services s ON s.id=b.service_id
+      WHERE b.tenant_id=$1
+        AND ${startCol} >= $2
+        AND ${startCol} < $3
+      GROUP BY 1, 2
+      ORDER BY booked_minutes DESC, bookings_count DESC, service_name ASC
+      LIMIT 8
+      `,
+      [tenantId, rangeStart.toISOString(), rangeEnd.toISOString()]
+    );
+    const totalServiceMinutes = (qSvc.rows || []).reduce((sum, r) => sum + Number(r.booked_minutes || 0), 0);
+    byService = (qSvc.rows || []).map((r) => ({
+      service_id: Number(r.service_id || 0),
+      service_name: String(r.service_name || 'Service'),
+      booked_minutes: Number(r.booked_minutes || 0),
+      bookings_count: Number(r.bookings_count || 0),
+      share_pct: roundPct(Number(r.booked_minutes || 0), totalServiceMinutes),
+    }));
+  } catch {}
+
+  try {
+    const bucketStarts = buildBucketStarts(safeMode, rangeStart, rangeEnd);
+    const bucketAgg = await db.query(
+      `
+      SELECT
+        date_trunc('${truncUnit}', ${startCol}) AS bucket,
+        COALESCE(SUM(duration_minutes) FILTER (WHERE status='confirmed'), 0)::int AS booked_minutes
+      FROM bookings b
+      WHERE b.tenant_id=$1
+        AND ${startCol} >= $2
+        AND ${startCol} < $3
+      GROUP BY 1
+      ORDER BY 1 ASC
+      `,
+      [tenantId, rangeStart.toISOString(), rangeEnd.toISOString()]
+    );
+    const bookedByBucket = new Map((bucketAgg.rows || []).map((r) => [new Date(r.bucket).toISOString(), Number(r.booked_minutes || 0)]));
+    hourlyHeatmap = bucketStarts.map((bucketDate) => {
+      const key = bucketDate.toISOString();
+      const booked = Number(bookedByBucket.get(key) || 0);
+      const openMinutesForBucket = computeOpenMinutesForBucket(tenantHourRows, safeMode, bucketDate);
+      const capacityMinutes = Math.max(0, openMinutesForBucket * Math.max(1, capacityUnits || 1));
+      return {
+        bucket: key,
+        label: bucketLabel(safeMode, bucketDate),
+        booked_minutes: booked,
+        capacity_minutes: capacityMinutes,
+        utilization_pct: roundPct(booked, capacityMinutes) ?? 0,
+      };
+    });
+    series.utilization_over_time = hourlyHeatmap;
+  } catch {
+    series.utilization_over_time = [];
+  }
+
+  try {
+    const windowDays = Math.max(1, Math.round((rangeEnd.getTime() - rangeStart.getTime()) / 86400000));
+    const previousStart = addDays(rangeStart, -windowDays);
+    const currentStartIso = rangeStart.toISOString();
+    const currentEndIso = rangeEnd.toISOString();
+    const previousStartIso = previousStart.toISOString();
+    const previousEndIso = rangeStart.toISOString();
+    const atRiskRows = await db.query(
+      `
+      WITH lifetime AS (
+        SELECT customer_id, COUNT(*)::int AS lifetime_bookings, MAX(${startCol}) AS last_booking_at
+        FROM bookings b
+        WHERE b.tenant_id=$1
+          AND b.customer_id IS NOT NULL
+          AND ${startCol} < $3
+        GROUP BY customer_id
+      ), current_window AS (
+        SELECT DISTINCT customer_id
+        FROM bookings b
+        WHERE b.tenant_id=$1
+          AND ${startCol} >= $2
+          AND ${startCol} < $3
+          AND b.customer_id IS NOT NULL
+      ), previous_window AS (
+        SELECT customer_id, COUNT(*)::int AS previous_window_bookings
+        FROM bookings b
+        WHERE b.tenant_id=$1
+          AND ${startCol} >= $4
+          AND ${startCol} < $5
+          AND b.customer_id IS NOT NULL
+        GROUP BY customer_id
+      )
+      SELECT
+        l.customer_id,
+        COALESCE(NULLIF(TRIM(c.name), ''), 'Customer') AS customer_name,
+        l.lifetime_bookings,
+        l.last_booking_at,
+        COALESCE(p.previous_window_bookings, 0)::int AS previous_window_bookings,
+        GREATEST(0, FLOOR(EXTRACT(EPOCH FROM (NOW() - l.last_booking_at)) / 86400))::int AS days_since_last_booking
+      FROM lifetime l
+      LEFT JOIN customers c ON c.tenant_id=$1 AND c.id=l.customer_id
+      LEFT JOIN previous_window p ON p.customer_id=l.customer_id
+      LEFT JOIN current_window cw ON cw.customer_id=l.customer_id
+      WHERE l.lifetime_bookings >= 2
+        AND COALESCE(p.previous_window_bookings, 0) > 0
+        AND cw.customer_id IS NULL
+      ORDER BY previous_window_bookings DESC, days_since_last_booking DESC, customer_name ASC
+      LIMIT 8
+      `,
+      [tenantId, currentStartIso, currentEndIso, previousStartIso, previousEndIso]
+    );
+    atRisk = (atRiskRows.rows || []).map((r) => ({
+      customerId: Number(r.customer_id),
+      name: String(r.customer_name || 'Customer'),
+      previousBookings: Number(r.lifetime_bookings || 0),
+      previousWindowBookings: Number(r.previous_window_bookings || 0),
+      daysSinceLastBooking: Number(r.days_since_last_booking || 0),
+      lastBookingAt: r.last_booking_at,
+    }));
+  } catch {}
+
+  const repeatRate = {
+    value: repeatPct,
+    returningCustomers,
+    activeCustomers,
+    newCustomers,
+  };
+
+  const peakHours = (hourlyHeatmap || [])
+    .filter((row) => Number(row.capacity_minutes || 0) > 0)
+    .slice()
+    .sort((a, b) => Number(b.utilization_pct || 0) - Number(a.utilization_pct || 0) || Number(b.booked_minutes || 0) - Number(a.booked_minutes || 0))
+    .slice(0, 3)
+    .map((row) => row.label);
+  const deadZones = (hourlyHeatmap || [])
+    .filter((row) => Number(row.capacity_minutes || 0) > 0)
+    .slice()
+    .sort((a, b) => Number(a.utilization_pct || 0) - Number(b.utilization_pct || 0) || Number(a.booked_minutes || 0) - Number(b.booked_minutes || 0))
+    .slice(0, 3)
+    .map((row) => row.label);
+
+  const revenueDeltaPct = previousRevenueAmount > 0 ? Number((((Number(revenueAmount || 0) - previousRevenueAmount) / previousRevenueAmount) * 100).toFixed(1)) : 0;
+  const bookingsDeltaPct = previousConfirmedCount > 0 ? Number((((confirmedCount - previousConfirmedCount) / previousConfirmedCount) * 100).toFixed(1)) : 0;
+  const repeatDeltaPct = Number((repeatPct - previousRepeatPct).toFixed(1));
+
+  const elapsedFraction = computePeriodElapsedFraction(rangeStart, rangeEnd, new Date());
+  const targetBenchmarks = {
+    bookings: buildTargetBenchmark({ actual: confirmedCount, target: targetGoals.bookings, elapsedFraction, direction: 'at_least' }),
+    revenue: buildTargetBenchmark({ actual: Number(revenueAmount || 0), target: targetGoals.revenue_amount, elapsedFraction, direction: 'at_least' }),
+    utilization: buildTargetBenchmark({ actual: Number(utilizationPct || 0), target: targetGoals.utilizationPct, elapsedFraction, direction: 'at_least' }),
+    repeat: buildTargetBenchmark({ actual: Number(repeatPct || 0), target: targetGoals.repeatPct, elapsedFraction, direction: 'at_least' }),
+    noShow: buildTargetBenchmark({ actual: Number(noShowRate || 0), target: targetGoals.noShowRateMax, elapsedFraction, direction: 'at_most' }),
+  };
+
+  const dashboardDrilldowns = {
+    bookings: {
+      href: `/${encodeURIComponent(tenantSlug)}?tab=bookings&from=${encodeURIComponent(rangeStart.toISOString())}&to=${encodeURIComponent(rangeEnd.toISOString())}`,
+    },
+    revenue: {
+      href: `/${encodeURIComponent(tenantSlug)}?tab=bookings&from=${encodeURIComponent(rangeStart.toISOString())}&to=${encodeURIComponent(rangeEnd.toISOString())}`,
+    },
+    utilization: {
+      href: `/${encodeURIComponent(tenantSlug)}?tab=dayview&date=${encodeURIComponent(safeDate)}&focus=utilization`,
+    },
+    repeatCustomers: {
+      href: `/${encodeURIComponent(tenantSlug)}?tab=customers&segment=returning`,
+    },
+    customerPulse: {
+      href: `/${encodeURIComponent(tenantSlug)}?tab=customers`,
+    },
+    alerts: {
+      href: `/${encodeURIComponent(tenantSlug)}?tab=bookings&from=${encodeURIComponent(rangeStart.toISOString())}&to=${encodeURIComponent(rangeEnd.toISOString())}`,
+    },
+    noShow: {
+      href: `/${encodeURIComponent(tenantSlug)}?tab=bookings&status=no_show&from=${encodeURIComponent(rangeStart.toISOString())}&to=${encodeURIComponent(rangeEnd.toISOString())}`,
+    },
+  };
+
+  const dashboardAlerts = buildDashboardAlerts(
+    {
+      utilization: { value: utilizationPct },
+      revenue: { deltaPercent: revenueDeltaPct },
+      bookings: { deltaPercent: bookingsDeltaPct },
+      repeat: { deltaPercent: repeatDeltaPct },
+      noShow: { value: noShowRate, compareValue: previousNoShowRate },
+      pending: { value: pendingCount },
+      cancelled: { value: cancelledCount },
+      atRisk: { value: Array.isArray(atRisk) ? atRisk.length : 0 },
+      targets: targetBenchmarks,
+    },
+    {
+      lowUtilizationPct: thresholds.utilization_low_pct,
+      veryLowUtilizationPct: thresholds.utilization_critical_low_pct,
+      revenueDropPct: -Math.abs(Number(thresholds.revenue_drop_warn_pct || 15)),
+      revenueCriticalDropPct: -Math.abs(Number(thresholds.revenue_drop_critical_pct || 30)),
+      bookingDropPct: -Math.abs(Number(thresholds.booking_drop_warn_pct || 15)),
+      repeatDropPct: -Math.abs(Number(thresholds.repeat_drop_warn_pct || 10)),
+      noShowWarnPct: thresholds.no_show_warn_pct,
+      noShowCriticalPct: thresholds.no_show_critical_pct,
+      pendingWarnCount: thresholds.pending_warn_count,
+      pendingCriticalCount: thresholds.pending_critical_count,
+      cancelledWarnCount: thresholds.cancel_warn_count,
+      atRiskWarnCount: thresholds.at_risk_warn_count,
+      cooldownHours: thresholds.alert_cooldown_hours,
+    },
+    {
+      drilldowns: dashboardDrilldowns,
+      setupRules: (rules || []).filter((rule) => String(rule?.id || '').startsWith('cfg_')),
+    }
+  );
+
   return {
     ok: true,
     tenantId,
@@ -653,17 +1363,90 @@ async function getDashboardSummary({ tenantId, tenantSlug, mode, dateStr }) {
       utilizationPct,
       repeatPct,
       activeMemberships,
+      noShowRate,
+    },
+    targets: {
+      mode: safeMode,
+      elapsedFraction,
+      goals: targetGoals,
+      benchmarks: targetBenchmarks,
     },
     panels: {
       nextBookings,
       attention,
       rules,
+      alerts: dashboardAlerts,
       insights,
       thresholds,
-      customerPulse: { activeCustomers, returningCustomers },
+      customerPulse: {
+        activeCustomers,
+        returningCustomers,
+        newCustomers,
+        repeatRate,
+        summary: {
+          totalCustomers: activeCustomers,
+          activeCustomers,
+          newCustomers,
+          returningCustomers,
+        },
+        topReturning: topReturningDetailed,
+        atRisk,
+      },
+      topReturning,
+      atRisk,
     },
-    series,
+    utilization: {
+      overall: {
+        value: utilizationPct,
+        booked_minutes: bookedMinutes,
+        available_minutes: openMinutesTotal * Math.max(1, capacityUnits || 1),
+      },
+      byResource,
+      byStaff: staffUtilization,
+      byService,
+      hourlyHeatmap,
+      peaks: {
+        peakHours,
+        deadZones,
+      },
+      resourceSupported: resourceCount > 0,
+      staffSupported: staffCount > 0,
+    },
+    series: {
+      ...series,
+      customer_mix_over_time: customerMixOverTime,
+      staff_utilization: staffUtilization,
+      resource_utilization: byResource,
+      utilization_by_service: byService,
+    },
+    meta: {
+      compareEnabled: true,
+      compareLabel: 'vs previous period',
+      customerPulseSupported: true,
+      staffUtilizationSupported: staffCount > 0,
+      resourceUtilizationSupported: resourceCount > 0,
+      widgetSupport: {
+        bookingsOverTime: true,
+        revenueByService: true,
+        utilization: true,
+        customerPulse: true,
+        alerts: Array.isArray(dashboardAlerts) && dashboardAlerts.length > 0,
+        insights: Array.isArray(insights) && insights.length > 0,
+      },
+      targetSupport: true,
+      widgetVisibilityDefaults: {
+        bookings_over_time: true,
+        revenue_by_service: true,
+        utilization: true,
+        customer_pulse: true,
+        next_up: true,
+        customer_pulse_panel: true,
+        rules_alerts: true,
+        insights: true,
+      },
+    },
+    drilldowns: dashboardDrilldowns,
   };
 }
 
-module.exports = { getDashboardSummary, parseISODateOnly };
+module.exports = { getDashboardSummary, parseISODateOnly, computeRange };

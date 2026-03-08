@@ -49,13 +49,25 @@ async function getTenantColumnSet() {
     "banner_reservations_url",
     "banner_account_url",
     "banner_home_url",
+    "banner_memberships_url",
     "banner_book_url1",
     "banner_reservations_url1",
     "banner_account_url1",
     "banner_home_url1",
+    "banner_memberships_url1",
     "theme_key",
     "layout_key",
     "currency_code",
+    // General settings (optional columns; schema-compat)
+    "default_phone_country_code",
+    "address_line1",
+    "address_line2",
+    "city",
+    "region",
+    "postal_code",
+    "country_code",
+    "admin_name",
+    "admin_email",
   ];
   const r = await db.query(
     `
@@ -254,6 +266,99 @@ async function setBrandingAsset(tenantId, jsonPathArray, value) {
 }
 
 
+
+function normalizePrepaidCatalog(payload) {
+  const products = Array.isArray(payload?.products)
+    ? payload.products
+    : Array.isArray(payload)
+      ? payload
+      : [];
+
+  return {
+    products: products
+      .filter((item) => item && typeof item === "object")
+      .map((item, index) => ({
+        id: String(item.id || `pp_${index + 1}`),
+        name: String(item.name || ""),
+        type: item.type === "credit_bundle" || item.type === "time_pass" ? item.type : "service_package",
+        description: item.description ? String(item.description) : "",
+        isActive: item.isActive !== false,
+        price: Number(item.price || 0),
+        currency: item.currency ? String(item.currency) : null,
+        validityDays: Number(item.validityDays || 0),
+        creditAmount: item.creditAmount == null ? null : Number(item.creditAmount || 0),
+        sessionCount: item.sessionCount == null ? null : Number(item.sessionCount || 0),
+        minutesTotal: item.minutesTotal == null ? null : Number(item.minutesTotal || 0),
+        eligibleServiceIds: Array.isArray(item.eligibleServiceIds)
+          ? item.eligibleServiceIds.map((x) => Number(x)).filter(Boolean)
+          : [],
+        allowMembershipBundle: !!item.allowMembershipBundle,
+        stackable: !!item.stackable,
+        createdAt: item.createdAt ? String(item.createdAt) : null,
+        updatedAt: item.updatedAt ? String(item.updatedAt) : null,
+      })),
+  };
+}
+
+// -----------------------------------------------------------------------------
+// Standalone prepaid catalog (tenant settings)
+// Stored at tenants.branding.prepaidCatalog (JSONB)
+// Admin-only (owner dashboard).
+// -----------------------------------------------------------------------------
+// GET /api/tenants/prepaid-catalog?tenantSlug=...
+router.get("/prepaid-catalog", requireAdmin, requireTenant, async (req, res) => {
+  try {
+    const tenantId = req.tenantId;
+    const r = await db.query(
+      `
+      SELECT
+        COALESCE(branding, '{}'::jsonb) #> '{prepaidCatalog}' AS prepaid_catalog,
+        currency_code
+      FROM tenants
+      WHERE id = $1
+      LIMIT 1
+      `,
+      [Number(tenantId)]
+    );
+
+    const row = r.rows?.[0] || {};
+    return res.json({
+      prepaidCatalog: normalizePrepaidCatalog(row.prepaid_catalog || { products: [] }),
+      currency_code: row.currency_code || null,
+    });
+  } catch (err) {
+    console.error("GET prepaid-catalog error", err);
+    return res.status(500).json({ error: "Failed to load prepaid catalog." });
+  }
+});
+
+// PUT /api/tenants/prepaid-catalog?tenantSlug=...
+router.put("/prepaid-catalog", requireAdmin, requireTenant, async (req, res) => {
+  try {
+    const tenantId = req.tenantId;
+    const payload = normalizePrepaidCatalog(req.body?.prepaidCatalog);
+
+    const r = await db.query(
+      `
+      UPDATE tenants
+      SET branding = jsonb_set(
+        COALESCE(branding, '{}'::jsonb),
+        '{prepaidCatalog}',
+        $2::jsonb,
+        true
+      )
+      WHERE id = $1
+      RETURNING COALESCE(branding, '{}'::jsonb) #> '{prepaidCatalog}' AS prepaid_catalog
+      `,
+      [Number(tenantId), JSON.stringify(payload)]
+    );
+
+    return res.json({ prepaidCatalog: normalizePrepaidCatalog(r.rows?.[0]?.prepaid_catalog || payload) });
+  } catch (err) {
+    console.error("PUT prepaid-catalog error", err);
+    return res.status(500).json({ error: "Failed to save prepaid catalog." });
+  }
+});
 
 // -----------------------------------------------------------------------------
 // Membership checkout policy (tenant settings)
@@ -768,9 +873,23 @@ router.get("/", async (req, res) => {
         : cols.has("banner_home_url1")
           ? "banner_home_url1 AS banner_home_url"
           : "NULL::text AS banner_home_url",
+      cols.has("banner_memberships_url")
+        ? "banner_memberships_url"
+        : cols.has("banner_memberships_url1")
+          ? "banner_memberships_url1 AS banner_memberships_url"
+          : "NULL::text AS banner_memberships_url",
       cols.has("theme_key") ? "theme_key" : "NULL::text AS theme_key",
       cols.has("layout_key") ? "layout_key" : "NULL::text AS layout_key",
       cols.has("currency_code") ? "currency_code" : "NULL::text AS currency_code",
+      cols.has("default_phone_country_code") ? "default_phone_country_code" : "NULL::text AS default_phone_country_code",
+      cols.has("address_line1") ? "address_line1" : "NULL::text AS address_line1",
+      cols.has("address_line2") ? "address_line2" : "NULL::text AS address_line2",
+      cols.has("city") ? "city" : "NULL::text AS city",
+      cols.has("region") ? "region" : "NULL::text AS region",
+      cols.has("postal_code") ? "postal_code" : "NULL::text AS postal_code",
+      cols.has("country_code") ? "country_code" : "NULL::text AS country_code",
+      cols.has("admin_name") ? "admin_name" : "NULL::text AS admin_name",
+      cols.has("admin_email") ? "admin_email" : "NULL::text AS admin_email",
       "created_at",
     ].join(",\n        ");
 
@@ -910,9 +1029,26 @@ router.get("/by-slug/:slug", async (req, res) => {
         : cols.has("banner_home_url1")
           ? "banner_home_url1 AS banner_home_url"
           : "NULL::text AS banner_home_url",
+      cols.has("banner_memberships_url")
+        ? "banner_memberships_url"
+        : cols.has("banner_memberships_url1")
+          ? "banner_memberships_url1 AS banner_memberships_url"
+          : "NULL::text AS banner_memberships_url",
       cols.has("theme_key") ? "theme_key" : "NULL::text AS theme_key",
       cols.has("layout_key") ? "layout_key" : "NULL::text AS layout_key",
       cols.has("currency_code") ? "currency_code" : "NULL::text AS currency_code",
+      // General settings (optional columns; schema-compat)
+      cols.has("default_phone_country_code")
+        ? "default_phone_country_code"
+        : "NULL::text AS default_phone_country_code",
+      cols.has("address_line1") ? "address_line1" : "NULL::text AS address_line1",
+      cols.has("address_line2") ? "address_line2" : "NULL::text AS address_line2",
+      cols.has("city") ? "city" : "NULL::text AS city",
+      cols.has("region") ? "region" : "NULL::text AS region",
+      cols.has("postal_code") ? "postal_code" : "NULL::text AS postal_code",
+      cols.has("country_code") ? "country_code" : "NULL::text AS country_code",
+      cols.has("admin_name") ? "admin_name" : "NULL::text AS admin_name",
+      cols.has("admin_email") ? "admin_email" : "NULL::text AS admin_email",
       "created_at",
     ].join(",\n        ");
 
@@ -1012,6 +1148,15 @@ router.get("/:id", requireAdmin, async (req, res) => {
 	    cols.has("theme_key") ? "theme_key" : "NULL::text AS theme_key",
 	    cols.has("layout_key") ? "layout_key" : "NULL::text AS layout_key",
 	    cols.has("currency_code") ? "currency_code" : "NULL::text AS currency_code",
+	    cols.has("default_phone_country_code") ? "default_phone_country_code" : "NULL::text AS default_phone_country_code",
+	    cols.has("address_line1") ? "address_line1" : "NULL::text AS address_line1",
+	    cols.has("address_line2") ? "address_line2" : "NULL::text AS address_line2",
+	    cols.has("city") ? "city" : "NULL::text AS city",
+	    cols.has("region") ? "region" : "NULL::text AS region",
+	    cols.has("postal_code") ? "postal_code" : "NULL::text AS postal_code",
+	    cols.has("country_code") ? "country_code" : "NULL::text AS country_code",
+	    cols.has("admin_name") ? "admin_name" : "NULL::text AS admin_name",
+	    cols.has("admin_email") ? "admin_email" : "NULL::text AS admin_email",
 	    "created_at",
 	  ].join(",\n        ");
 
@@ -1035,6 +1180,93 @@ router.get("/:id", requireAdmin, async (req, res) => {
     return res.status(500).json({ error: "Failed to load tenant" });
   }
 });
+
+// -----------------------------------------------------------------------------
+// PATCH /api/tenants/:id/general
+// Tenant owner (or ADMIN_API_KEY) can update general tenant settings.
+// Schema-compat: only updates optional columns if they exist.
+// -----------------------------------------------------------------------------
+router.patch(
+  "/:id/general",
+  setTenantIdFromParamForRole,
+  requireAdminOrTenantRole("owner"),
+  async (req, res) => {
+    try {
+      const id = Number(req.params.id);
+      if (!Number.isFinite(id) || id <= 0) {
+        return res.status(400).json({ error: "Invalid tenant id" });
+      }
+
+      const body = req.body && typeof req.body === "object" ? req.body : {};
+
+      // Canonical tenant columns (always exist)
+      const name = String(body.name ?? "").trim();
+      const slug = String(body.slug ?? "").trim();
+      const kind = String(body.kind ?? "").trim();
+      const timezone = String(body.timezone ?? "").trim();
+
+      if (!name) return res.status(400).json({ error: "name is required" });
+      if (!slug) return res.status(400).json({ error: "slug is required" });
+      if (!timezone) return res.status(400).json({ error: "timezone is required" });
+
+      const cols = await getTenantColumnSet();
+
+      // Optional general settings fields
+      const optional = {
+        default_phone_country_code: String(body.default_phone_country_code ?? "").trim() || null,
+        address_line1: String(body.address_line1 ?? "").trim() || null,
+        address_line2: String(body.address_line2 ?? "").trim() || null,
+        city: String(body.city ?? "").trim() || null,
+        region: String(body.region ?? "").trim() || null,
+        postal_code: String(body.postal_code ?? "").trim() || null,
+        country_code: String(body.country_code ?? "").trim() || null,
+        admin_name: String(body.admin_name ?? "").trim() || null,
+        admin_email: String(body.admin_email ?? "").trim() || null,
+      };
+
+      const sets = ["name = $1", "slug = $2", "kind = $3", "timezone = $4"]; // stable order
+      const vals = [name, slug, kind || null, timezone];
+
+      // Append optional columns safely
+      const appendOptional = (colName, value) => {
+        if (!cols.has(colName)) return;
+        vals.push(value);
+        sets.push(`${colName} = $${vals.length}`);
+      };
+
+      appendOptional("default_phone_country_code", optional.default_phone_country_code);
+      appendOptional("address_line1", optional.address_line1);
+      appendOptional("address_line2", optional.address_line2);
+      appendOptional("city", optional.city);
+      appendOptional("region", optional.region);
+      appendOptional("postal_code", optional.postal_code);
+      appendOptional("country_code", optional.country_code);
+      appendOptional("admin_name", optional.admin_name);
+      appendOptional("admin_email", optional.admin_email);
+
+      vals.push(id);
+
+      const q = `
+        UPDATE tenants
+        SET ${sets.join(", ")}
+        WHERE id = $${vals.length}
+        RETURNING *
+      `;
+
+      const r = await db.query(q, vals);
+      const t = r.rows?.[0] || null;
+      if (!t) return res.status(404).json({ error: "Tenant not found" });
+      return res.json({ ok: true, tenant: t });
+    } catch (err) {
+      console.error("PATCH /api/tenants/:id/general error:", err);
+      // Handle common unique violations (slug)
+      if (String(err?.code || "") === "23505") {
+        return res.status(409).json({ error: "Slug already exists." });
+      }
+      return res.status(500).json({ error: "Failed to save general settings" });
+    }
+  }
+);
 
 // -----------------------------------------------------------------------------
 // GET /api/tenants/by-slug/:slug/branding
@@ -1414,10 +1646,11 @@ router.post(
         return res.status(400).json({ error: "Invalid tenant id" });
       }
 
-      const allowed = new Set(["book", "reservations", "account", "home"]);
+      const allowed = new Set(["book", "reservations", "account", "home", "memberships"]);
       if (!allowed.has(slot)) {
         return res.status(400).json({
-          error: "Invalid slot. Must be one of: book, reservations, account, home",
+          error:
+            "Invalid slot. Must be one of: home, book, reservations, memberships, account",
         });
       }
 
@@ -1490,10 +1723,11 @@ router.delete("/:id/banner/:slot", requireAdmin, async (req, res) => {
       return res.status(400).json({ error: "Invalid tenant id" });
     }
 
-    const allowed = new Set(["book", "reservations", "account", "home"]);
+    const allowed = new Set(["book", "reservations", "account", "home", "memberships"]);
     if (!allowed.has(slot)) {
       return res.status(400).json({
-        error: "Invalid slot. Must be one of: book, reservations, account, home",
+        error:
+          "Invalid slot. Must be one of: home, book, reservations, memberships, account",
       });
     }
 
