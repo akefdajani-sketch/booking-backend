@@ -11,6 +11,10 @@ const correlationId = require("./middleware/correlationId");
 const requestLogger = require("./middleware/requestLogger");
 const errorHandler = require("./middleware/errorHandler");
 
+// PR-8: Security headers + GDPR DSR
+const securityHeaders = require("./middleware/securityHeaders");
+const dsrRouter = require("./routes/dsr");
+
 // PR-2: Rate limiters for public-facing routes
 // PR-3: API version header
 const {
@@ -72,6 +76,7 @@ const ENABLE_DEBUG_ROUTES =
 
 // ─── Observability (must be first) ───────────────────────────────────────────
 app.use(correlationId);   // attaches req.requestId + X-Request-ID header
+app.use(securityHeaders); // PR-8: X-Content-Type-Options, X-Frame-Options, HSTS etc.
 app.use(requestLogger);   // structured pino-http logging for every request
 app.use(apiVersion);      // PR-3: adds X-API-Version header to every response
 
@@ -131,6 +136,7 @@ app.use("/api/invites", invitesRouter);
 
 // ─── PR-4: Billing REST endpoints (checkout, portal, status) ─────────────────
 app.use("/api/billing", billingRouter);
+app.use("/api/dsr", dsrRouter);        // PR-8: GDPR Data Subject Requests
 
 // ─── Public APIs ─────────────────────────────────────────────────────────────
 // PR-2: rate-limit public pricing/theme browsing
