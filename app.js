@@ -11,7 +11,6 @@ const correlationId = require("./middleware/correlationId");
 const requestLogger = require("./middleware/requestLogger");
 const errorHandler = require("./middleware/errorHandler");
 
-<<<<<<< HEAD
 // PR-2: Rate limiters for public-facing routes
 const {
   publicApiLimiter,
@@ -20,8 +19,6 @@ const {
   tenantLookupLimiter,
 } = require("./middleware/rateLimiter");
 
-=======
->>>>>>> origin/main
 // existing routers
 const tenantsRouter = require("./routes/tenants");
 const tenantHoursRouter = require("./routes/tenantHours");
@@ -82,7 +79,6 @@ app.use(express.urlencoded({ extended: true }));
 // ─── Static uploads ──────────────────────────────────────────────────────────
 app.use("/uploads", express.static(uploadDir));
 
-<<<<<<< HEAD
 // ─── Health (before API routes — no auth required, no rate limit) ────────────
 app.use("/health", healthRouter);
 
@@ -91,13 +87,6 @@ app.use("/health", healthRouter);
 //       by-slug endpoints remain public but are rate-limited.
 app.use("/api/tenants", tenantLookupLimiter, tenantsRouter);
 
-=======
-// ─── Health (before API routes — no auth required) ───────────────────────────
-app.use("/health", healthRouter);
-
-// ─── Core APIs ───────────────────────────────────────────────────────────────
-app.use("/api/tenants", tenantsRouter);
->>>>>>> origin/main
 app.use("/api/tenant-hours", tenantHoursRouter);
 app.use("/api/tenant-blackouts", tenantBlackoutsRouter);
 app.use("/api/services", servicesRouter);
@@ -130,12 +119,8 @@ app.use("/api/tenant", tenantPrepaidAccountingRouter);
 app.use("/api/invites", invitesRouter);
 
 // ─── Public APIs ─────────────────────────────────────────────────────────────
-<<<<<<< HEAD
 // PR-2: rate-limit public pricing/theme browsing
 app.use("/api/public", publicApiLimiter, publicPricingRouter);
-=======
-app.use("/api/public", publicPricingRouter);
->>>>>>> origin/main
 
 // ─── Uploads ─────────────────────────────────────────────────────────────────
 app.use("/api/uploads", uploadsRouter);
