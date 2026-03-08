@@ -142,23 +142,6 @@ function normalizePgConflict(err) {
   return null;
 }
 
-function isAdminRequest(req) {
-  const expected = String(process.env.ADMIN_API_KEY || "").trim();
-  if (!expected) return false;
-
-  const rawAuth = String(req.headers.authorization || "");
-  const bearer = rawAuth.toLowerCase().startsWith("bearer ")
-    ? rawAuth.slice(7).trim()
-    : "";
-
-  const key =
-    String(bearer || "").trim() ||
-    String(req.headers["x-admin-key"] || "").trim() ||
-    String(req.headers["x-api-key"] || "").trim();
-
-  return !!key && key === expected;
-}
-
 // Auth wrappers: allow either Google (tenant staff) OR ADMIN_API_KEY (owner proxy-admin).
 function requireStaffScheduleAuth(req, res, next) {
   if (isAdminRequest(req)) return requireAdmin(req, res, next);
