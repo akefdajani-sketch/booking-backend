@@ -267,6 +267,99 @@ async function setBrandingAsset(tenantId, jsonPathArray, value) {
 
 
 
+function normalizePrepaidCatalog(payload) {
+  const products = Array.isArray(payload?.products)
+    ? payload.products
+    : Array.isArray(payload)
+      ? payload
+      : [];
+
+  return {
+    products: products
+      .filter((item) => item && typeof item === "object")
+      .map((item, index) => ({
+        id: String(item.id || `pp_${index + 1}`),
+        name: String(item.name || ""),
+        type: item.type === "credit_bundle" || item.type === "time_pass" ? item.type : "service_package",
+        description: item.description ? String(item.description) : "",
+        isActive: item.isActive !== false,
+        price: Number(item.price || 0),
+        currency: item.currency ? String(item.currency) : null,
+        validityDays: Number(item.validityDays || 0),
+        creditAmount: item.creditAmount == null ? null : Number(item.creditAmount || 0),
+        sessionCount: item.sessionCount == null ? null : Number(item.sessionCount || 0),
+        minutesTotal: item.minutesTotal == null ? null : Number(item.minutesTotal || 0),
+        eligibleServiceIds: Array.isArray(item.eligibleServiceIds)
+          ? item.eligibleServiceIds.map((x) => Number(x)).filter(Boolean)
+          : [],
+        allowMembershipBundle: !!item.allowMembershipBundle,
+        stackable: !!item.stackable,
+        createdAt: item.createdAt ? String(item.createdAt) : null,
+        updatedAt: item.updatedAt ? String(item.updatedAt) : null,
+      })),
+  };
+}
+
+// -----------------------------------------------------------------------------
+// Standalone prepaid catalog (tenant settings)
+// Stored at tenants.branding.prepaidCatalog (JSONB)
+// Admin-only (owner dashboard).
+// -----------------------------------------------------------------------------
+// GET /api/tenants/prepaid-catalog?tenantSlug=...
+router.get("/prepaid-catalog", requireAdmin, requireTenant, async (req, res) => {
+  try {
+    const tenantId = req.tenantId;
+    const r = await db.query(
+      `
+      SELECT
+        COALESCE(branding, '{}'::jsonb) #> '{prepaidCatalog}' AS prepaid_catalog,
+        currency_code
+      FROM tenants
+      WHERE id = $1
+      LIMIT 1
+      `,
+      [Number(tenantId)]
+    );
+
+    const row = r.rows?.[0] || {};
+    return res.json({
+      prepaidCatalog: normalizePrepaidCatalog(row.prepaid_catalog || { products: [] }),
+      currency_code: row.currency_code || null,
+    });
+  } catch (err) {
+    console.error("GET prepaid-catalog error", err);
+    return res.status(500).json({ error: "Failed to load prepaid catalog." });
+  }
+});
+
+// PUT /api/tenants/prepaid-catalog?tenantSlug=...
+router.put("/prepaid-catalog", requireAdmin, requireTenant, async (req, res) => {
+  try {
+    const tenantId = req.tenantId;
+    const payload = normalizePrepaidCatalog(req.body?.prepaidCatalog);
+
+    const r = await db.query(
+      `
+      UPDATE tenants
+      SET branding = jsonb_set(
+        COALESCE(branding, '{}'::jsonb),
+        '{prepaidCatalog}',
+        $2::jsonb,
+        true
+      )
+      WHERE id = $1
+      RETURNING COALESCE(branding, '{}'::jsonb) #> '{prepaidCatalog}' AS prepaid_catalog
+      `,
+      [Number(tenantId), JSON.stringify(payload)]
+    );
+
+    return res.json({ prepaidCatalog: normalizePrepaidCatalog(r.rows?.[0]?.prepaid_catalog || payload) });
+  } catch (err) {
+    console.error("PUT prepaid-catalog error", err);
+    return res.status(500).json({ error: "Failed to save prepaid catalog." });
+  }
+});
+
 // -----------------------------------------------------------------------------
 // Membership checkout policy (tenant settings)
 // Stored at tenants.branding.membershipCheckout (JSONB)
