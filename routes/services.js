@@ -109,6 +109,13 @@ router.get("/", async (req, res) => {
     const svcCols = await getServicesColumns();
     const tenantCols = await getTenantsColumns();
 
+    // PR-10: build soft-delete filter using already-loaded svcCols (no extra DB call)
+    const softDeleteWhere = svcCols.has("deleted_at")
+      ? whereSql
+        ? whereSql + " AND s.deleted_at IS NULL"
+        : "WHERE s.deleted_at IS NULL"
+      : whereSql;
+
     // Pricing:
     // Your current DB uses services.price_amount (numeric).
     // Keep backward compatibility with older schemas that used services.price.
@@ -182,12 +189,12 @@ router.get("/", async (req, res) => {
         ${currencyExpr}
       FROM services s
       JOIN tenants t ON t.id = s.tenant_id
-      ${whereSql}
+      ${softDeleteWhere}
       ORDER BY s.id DESC
     `;
 
     // Count for meta (uses same WHERE, no LIMIT)
-    const countSql = `SELECT COUNT(*)::int AS total FROM services s JOIN tenants t ON t.id = s.tenant_id ${whereSql}`;
+    const countSql = `SELECT COUNT(*)::int AS total FROM services s JOIN tenants t ON t.id = s.tenant_id ${softDeleteWhere}`;
     const countResult = await db.query(countSql, params);
     const total = countResult.rows[0]?.total ?? 0;
 

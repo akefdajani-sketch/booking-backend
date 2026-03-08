@@ -48,6 +48,14 @@ async function pickCol(tableName, alias, candidates, fallbackSql = "NULL") {
   return col ? `${alias}.${col}` : fallbackSql;
 }
 
+// PR-10: Soft-delete filter — only active (non-deleted) rows.
+// Returns empty string if the deleted_at column doesn't exist yet (safe for
+// environments that haven't run migration 005).
+async function softDeleteClause(tableName, alias) {
+  const cols = await getExistingColumns(tableName);
+  return cols.has("deleted_at") ? `AND ${alias}.deleted_at IS NULL` : "";
+}
+
 function safeIntExpr(sql) {
   // Ensure numeric-ish expressions don't break JSON consumers
   return `COALESCE((${sql})::int, 0)`;
@@ -72,11 +80,15 @@ router.get("/search", requireTenant, requireAdminOrTenantRole("staff"), async (r
 
     const like = `%${q}%`;
 
+    // PR-10: exclude soft-deleted customers
+    const sdSearch = await softDeleteClause("customers", "customers");
+
     const result = await db.query(
       `
       SELECT id, tenant_id, name, phone, email
       FROM customers
       WHERE tenant_id = $1
+        ${sdSearch}
         AND (
           name ILIKE $2 OR
           phone ILIKE $2 OR
@@ -111,7 +123,9 @@ router.get("/", requireTenant, requireAdminOrTenantRole("staff"), async (req, re
     const offset = Math.max(0,              Number.isFinite(offsetRaw) ? offsetRaw : 0);
 
     const params = [tenantId];
-    let where = `WHERE c.tenant_id = $1`;
+    // PR-10: always exclude soft-deleted customers
+    const sdList = await softDeleteClause("customers", "c");
+    let where = `WHERE c.tenant_id = $1 ${sdList}`;
 
     if (q) {
       params.push(`%${q}%`);
@@ -1065,6 +1079,7 @@ router.post("/", requireTenant, requireAdminOrTenantRole("staff"), async (req, r
 
 
 // Delete a customer (tenant staff/admin)
+// PR-10: soft-delete (sets deleted_at) instead of hard DELETE
 router.delete("/:customerId", requireTenant, requireAdminOrTenantRole("staff"), async (req, res) => {
   try {
     const tenantId = req.tenantId;
@@ -1073,27 +1088,39 @@ router.delete("/:customerId", requireTenant, requireAdminOrTenantRole("staff"), 
       return res.status(400).json({ error: "Invalid customerId" });
     }
 
-    try {
-      const del = await db.query(
-        `DELETE FROM customers WHERE id = $1 AND tenant_id = $2`,
-        [customerId, tenantId]
-      );
-      if (!del.rowCount) {
-        return res.status(404).json({ error: "Customer not found." });
-      }
-      return res.json({ ok: true });
-    } catch (dbErr) {
-      // Postgres FK violation
-      if (getErrorCode(dbErr) === "23503") {
-        return res.status(409).json({
-          error: "Customer has related records (e.g., bookings). Remove those first.",
-          code: "FK_VIOLATION",
-        });
-      }
-      throw dbErr;
+    const result = await db.query(
+      `UPDATE customers SET deleted_at = NOW() WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL`,
+      [customerId, tenantId]
+    );
+    if (!result.rowCount) {
+      return res.status(404).json({ error: "Customer not found." });
     }
+    return res.json({ ok: true, deleted: true });
   } catch (err) {
     console.error("Error deleting customer:", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// PR-10: restore a soft-deleted customer
+router.patch("/:customerId/restore", requireTenant, requireAdminOrTenantRole("staff"), async (req, res) => {
+  try {
+    const tenantId = req.tenantId;
+    const customerId = Number(req.params.customerId);
+    if (!Number.isFinite(customerId)) {
+      return res.status(400).json({ error: "Invalid customerId" });
+    }
+
+    const result = await db.query(
+      `UPDATE customers SET deleted_at = NULL WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NOT NULL RETURNING *`,
+      [customerId, tenantId]
+    );
+    if (!result.rowCount) {
+      return res.status(404).json({ error: "Customer not deleted or not found." });
+    }
+    return res.json({ ok: true, customer: result.rows[0] });
+  } catch (err) {
+    console.error("Error restoring customer:", err);
     return res.status(500).json({ error: "Internal server error" });
   }
 });
