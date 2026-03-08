@@ -6,6 +6,7 @@
     "start": "node index.js",
     "dev": "node index.js",
     "test": "cross-env NODE_ENV=test jest --runInBand --config jest.config.js",
+    "test:coverage": "cross-env NODE_ENV=test jest --runInBand --config jest.config.js --coverage",
     "test:watch": "NODE_ENV=test jest --watchAll",
     "migrate": "node scripts/migrate.js",
     "migrate:list": "node scripts/migrate.js --list",
