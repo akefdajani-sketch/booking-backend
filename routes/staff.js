@@ -117,6 +117,51 @@ router.post("/", requireTenant, requireAdminOrTenantRole("manager"), async (req,
 });
 
 // ---------------------------------------------------------------------------
+// PATCH /api/staff/:id (admin-only update)
+// Accepts any subset of: { name, role, title, is_active }
+// ---------------------------------------------------------------------------
+router.patch("/:id", resolveTenantFromStaffId, requireAdminOrTenantRole("manager"), async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+
+    // Build a dynamic SET clause from whitelisted fields only
+    const allowed = ["name", "role", "title", "is_active"];
+    const updates = [];
+    const values = [];
+
+    for (const field of allowed) {
+      if (field in req.body && field !== "title") {
+        values.push(req.body[field]);
+        updates.push(`${field} = $${values.length}`);
+      }
+    }
+
+    // Legacy: treat `title` as `role`
+    if ("title" in req.body && !("role" in req.body)) {
+      values.push(req.body.title);
+      updates.push(`role = $${values.length}`);
+    }
+
+    if (updates.length === 0) {
+      return res.status(400).json({ error: "No valid fields provided for update" });
+    }
+
+    values.push(id);
+    const q = `UPDATE staff SET ${updates.join(", ")} WHERE id = $${values.length} RETURNING *`;
+
+    const result = await db.query(q, values);
+    if (!result.rows.length) {
+      return res.status(404).json({ error: "Staff not found" });
+    }
+
+    return res.json(result.rows[0]);
+  } catch (err) {
+    console.error("PATCH /api/staff/:id error:", err);
+    return res.status(500).json({ error: "Failed to update staff" });
+  }
+});
+
+// ---------------------------------------------------------------------------
 // DELETE /api/staff/:id (admin-only delete)
 // If blocked by FK (e.g. existing bookings), we soft-disable instead of hard delete.
 // ---------------------------------------------------------------------------
