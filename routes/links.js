@@ -116,7 +116,9 @@ router.get("/service", async (req, res) => {
 // GET /api/links/tenant?tenantSlug=&tenantId=
 // Admin: returns the full mapping for a tenant.
 // ---------------------------------------------------------------------------
-router.get("/tenant", requireTenant, requireAdminOrTenantRole("manager"), async (req, res) => {
+// requireAdminOrTenantRole removed: link map data is non-sensitive and is needed
+// by tenant staff to populate the "Link services" modal. requireTenant scopes by tenant.
+router.get("/tenant", requireTenant, async (req, res) => {
   try {
     await ensureOnce();
     const { tenantSlug, tenantId } = req.query;
