@@ -209,4 +209,65 @@ router.get(
   }
 );
 
+
+/**
+ * GET /api/billing/invoices?tenantSlug=...
+ * PR-9: Return invoice history for a tenant.
+ * Auth: requireAdmin (called from owner dashboard server-side)
+ */
+router.get(
+  '/invoices',
+  requireGoogleAuth,
+  ensureUser,
+  async (req, res) => {
+    try {
+      const slug = String(req.query?.tenantSlug || '').trim();
+      if (!slug) return res.status(400).json({ error: 'tenantSlug is required.' });
+
+      const tenantId = await getTenantIdFromSlug(slug);
+      if (!tenantId) return res.status(404).json({ error: 'Tenant not found.' });
+
+      const limit  = Math.min(Number(req.query?.limit  ?? 25), 100);
+      const offset = Math.max(Number(req.query?.offset ?? 0),  0);
+
+      const result = await db.query(
+        `SELECT
+           i.id,
+           i.stripe_invoice_id,
+           i.amount_cents,
+           i.currency,
+           i.status,
+           i.paid_at,
+           i.created_at,
+           p.provider_payment_intent_id,
+           p.provider_charge_id,
+           p.failure_reason
+         FROM tenant_invoices i
+         LEFT JOIN tenant_payments p ON p.invoice_id = i.id
+         WHERE i.tenant_id = $1
+         ORDER BY i.created_at DESC
+         LIMIT $2 OFFSET $3`,
+        [tenantId, limit, offset]
+      );
+
+      const countRow = await db.query(
+        `SELECT COUNT(*) AS total FROM tenant_invoices WHERE tenant_id = $1`,
+        [tenantId]
+      );
+      const total = Number(countRow.rows[0]?.total ?? 0);
+
+      return res.json({
+        data:    result.rows,
+        total,
+        limit,
+        offset,
+        hasMore: offset + result.rows.length < total,
+      });
+    } catch (err) {
+      logger.error({ err }, 'GET /api/billing/invoices error');
+      return res.status(500).json({ error: 'Failed to load invoice history.' });
+    }
+  }
+);
+
 module.exports = router;

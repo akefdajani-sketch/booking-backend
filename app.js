@@ -24,6 +24,17 @@ const {
   tenantLookupLimiter,
 } = require("./middleware/rateLimiter");
 const apiVersion = require("./middleware/apiVersion");
+// PR-14: OpenAPI
+// PR-14: OpenAPI / Swagger docs — served at /api/docs
+const swaggerUi  = require('swagger-ui-express');
+const YAML        = require('js-yaml');
+const fs          = require('fs');
+const path        = require('path');
+
+// PR-16: CSRF — cookie-parser needed to read the double-submit cookie
+const cookieParser = require('cookie-parser');
+const { getCsrfToken, csrfProtection } = require('./middleware/csrf');
+
 
 // existing routers
 const tenantsRouter = require("./routes/tenants");
@@ -91,12 +102,32 @@ app.use("/api/billing", stripeWebhookRouter);
 // ─── Body parsers ────────────────────────────────────────────────────────────
 app.use(express.json({ limit: "2mb" }));
 app.use(express.urlencoded({ extended: true }));
+app.use(cookieParser()); // PR-16: needed for CSRF double-submit cookie
 
 // ─── Static uploads ──────────────────────────────────────────────────────────
 app.use("/uploads", express.static(uploadDir));
 
 // ─── Health (before API routes — no auth required, no rate limit) ────────────
 app.use("/health", healthRouter);
+
+
+// PR-14: Swagger UI — /api/docs (disabled in test env)
+if (process.env.NODE_ENV !== 'test') {
+  try {
+    const openapiPath = path.join(__dirname, 'openapi.yaml');
+    const openapiDoc  = YAML.load(fs.readFileSync(openapiPath, 'utf8'));
+    app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(openapiDoc, {
+      customSiteTitle: 'Flexrz API Docs',
+      swaggerOptions: { persistAuthorization: true },
+    }));
+    app.get('/api/openapi.json', (req, res) => res.json(openapiDoc));
+  } catch (e) {
+    console.warn('OpenAPI spec not loaded:', e.message);
+  }
+}
+
+// PR-16: CSRF token endpoint — frontend calls this once per session
+app.get('/api/csrf-token', getCsrfToken);
 
 // ─── Core APIs ───────────────────────────────────────────────────────────────
 // PR-2: tenants router — GET / is now admin-protected (see routes/tenants.js).
@@ -112,7 +143,7 @@ app.use("/api/customers", customersRouter);
 
 // PR-2: bookings — rate limit POST (public booking creation) only.
 // GET paths already require admin/tenant role auth so no limiter needed there.
-app.use("/api/bookings", bookingCreateLimiter, bookingsRouter);
+app.use("/api/bookings", bookingCreateLimiter, csrfProtection, bookingsRouter); // PR-16
 
 // PR-2: availability is fully public — rate-limit it.
 app.use("/api/availability", availabilityLimiter, availabilityRouter);
@@ -136,7 +167,7 @@ app.use("/api/invites", invitesRouter);
 
 // ─── PR-4: Billing REST endpoints (checkout, portal, status) ─────────────────
 app.use("/api/billing", billingRouter);
-app.use("/api/dsr", dsrRouter);        // PR-8: GDPR Data Subject Requests
+app.use("/api/dsr", csrfProtection, dsrRouter); // PR-16        // PR-8: GDPR Data Subject Requests
 
 // ─── Public APIs ─────────────────────────────────────────────────────────────
 // PR-2: rate-limit public pricing/theme browsing

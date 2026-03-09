@@ -549,7 +549,7 @@ router.get("/", requireTenant, requireAdminOrTenantRole("staff"), async (req, re
 
     // ---- build WHERE ----
     const params = [tenantId];
-    const where = ["b.tenant_id = $1"];
+    const where = ["b.tenant_id = $1", "b.deleted_at IS NULL"]; // PR-19: exclude soft-deleted
 
     // scope defaults
     if (scope === "upcoming") {
@@ -736,7 +736,7 @@ router.get("/count", requireTenant, requireAdminOrTenantRole("staff"), async (re
     if (toTs && Number.isNaN(toTs.getTime())) return res.status(400).json({ error: "Invalid to." });
 
     const params = [tenantId];
-    const where = ["b.tenant_id = $1"];
+    const where = ["b.tenant_id = $1", "b.deleted_at IS NULL"]; // PR-19: exclude soft-deleted
 
     if (scope === "upcoming") where.push("b.start_time >= NOW()");
     else if (scope === "past") where.push("b.start_time < NOW()");
@@ -823,7 +823,7 @@ router.get("/:id", requireTenant, requireAdminOrTenantRole("staff"), async (req,
     }
 
     const result = await db.query(
-      `SELECT id FROM bookings WHERE id=$1 AND tenant_id=$2 LIMIT 1`,
+      `SELECT id FROM bookings WHERE id=$1 AND tenant_id=$2 AND deleted_at IS NULL LIMIT 1`, // PR-19
       [bookingId, tenantId]
     );
     if (!result.rows.length) {
@@ -860,7 +860,7 @@ router.patch("/:id/status", requireTenant, requireAdminOrTenantRole("staff"), as
     }
 
     const curRes = await db.query(
-      `SELECT status FROM bookings WHERE id=$1 AND tenant_id=$2 LIMIT 1`,
+      `SELECT status FROM bookings WHERE id=$1 AND tenant_id=$2 AND deleted_at IS NULL LIMIT 1`, // PR-19
       [bookingId, tenantId]
     );
     if (!curRes.rows.length) {
@@ -915,7 +915,7 @@ router.delete("/:id", requireTenant, requireAdminOrTenantRole("staff"), async (r
     }
 
     const curRes = await db.query(
-      `SELECT status FROM bookings WHERE id=$1 AND tenant_id=$2 LIMIT 1`,
+      `SELECT status FROM bookings WHERE id=$1 AND tenant_id=$2 AND deleted_at IS NULL LIMIT 1`, // PR-19
       [bookingId, tenantId]
     );
     if (!curRes.rows.length) {
