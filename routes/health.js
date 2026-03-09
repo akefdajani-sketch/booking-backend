@@ -51,14 +51,18 @@ router.get('/', async (req, res) => {
   const heapUsedMb  = Math.round(mem.heapUsed  / 1024 / 1024);
   const heapTotalMb = Math.round(mem.heapTotal / 1024 / 1024);
   const heapPct     = Math.round((mem.heapUsed / mem.heapTotal) * 100);
-  const memOk       = heapPct < 90;
+  const MEMORY_WARN_PCT     = 90;
+  const MEMORY_CRITICAL_PCT = 98;
+  const memOk       = heapPct < MEMORY_CRITICAL_PCT;
   if (!memOk) allOk = false;
 
   checks.memory = {
     ok: memOk,
     heapUsedMb,
     heapTotalMb,
-    heapPct: `${heapPct}%`,
+    heapPct:     `${heapPct}%`,
+    warnAt:     `${MEMORY_WARN_PCT}%`,
+    criticalAt: `${MEMORY_CRITICAL_PCT}%`,
   };
 
   // --- Uptime ---
