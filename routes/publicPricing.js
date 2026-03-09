@@ -60,13 +60,36 @@ router.post("/:slug/pricing/quote", injectTenantSlug, requireTenant, async (req,
       return res.status(400).json({ error: "Invalid start_time." });
     }
 
-    // Load service base price + duration for proportional scaling (match booking create behavior)
+    // Load service base price + duration for proportional scaling (match booking create behavior).
+    // Dynamically detect which price column exists to support both schema versions:
+    //   - Newer schemas: price_amount (NUMERIC)
+    //   - Older schemas: price (NUMERIC)
+    // This mirrors the same pattern used in routes/services.js and routes/bookings.js.
+    const priceCols = await db.query(
+      `SELECT column_name
+       FROM information_schema.columns
+       WHERE table_schema = 'public'
+         AND table_name   = 'services'
+         AND column_name  IN ('price_amount','price')`,
+      []
+    );
+    const hasPriceAmount = priceCols.rows.some((r) => r.column_name === "price_amount");
+    const hasPriceLegacy = priceCols.rows.some((r) => r.column_name === "price");
+    const priceExpr =
+      hasPriceAmount && hasPriceLegacy
+        ? "COALESCE(s.price_amount, s.price) AS price_amount"
+        : hasPriceAmount
+        ? "s.price_amount AS price_amount"
+        : hasPriceLegacy
+        ? "s.price AS price_amount"
+        : "NULL::numeric AS price_amount";
+
     const svc = await db.query(
       `
       SELECT
         s.id,
         s.duration_minutes,
-        COALESCE(s.price_amount, s.price, NULL) AS price_amount
+        ${priceExpr}
       FROM services s
       WHERE s.tenant_id = $1 AND s.id = $2
       LIMIT 1
