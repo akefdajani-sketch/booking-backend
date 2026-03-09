@@ -2,6 +2,7 @@
 
 // routes/stripeWebhook.js
 // PR-4: Stripe Billing Wiring — Webhook handler
+// PR-9: Invoice + Payment Record Creation
 //
 // Endpoint:
 //   POST /api/billing/webhook
@@ -13,7 +14,8 @@
 //   checkout.session.completed     — activate subscription after payment
 //   customer.subscription.updated  — sync status changes (upgrade/downgrade)
 //   customer.subscription.deleted  — mark subscription as canceled
-//   invoice.payment_failed         — mark as past_due
+//   invoice.paid                   — record invoice + payment in DB (PR-9)
+//   invoice.payment_failed         — record failed invoice + mark past_due (PR-9)
 //
 // Env vars:
 //   STRIPE_WEBHOOK_SECRET — from Stripe dashboard → Webhooks → Signing secret
@@ -54,7 +56,6 @@ async function syncSubscriptionStatus(tenantId, status) {
 async function activateSubscription(tenantId, planCode, stripeSubscriptionId) {
   if (!tenantId) return;
 
-  // Resolve plan id from plan_code
   const planRow = await db.query(
     `SELECT id FROM saas_plans WHERE code = $1 LIMIT 1`,
     [planCode]
@@ -65,7 +66,6 @@ async function activateSubscription(tenantId, planCode, stripeSubscriptionId) {
     return;
   }
 
-  // Upsert subscription: update existing trialing row or insert new active row
   await db.query(
     `INSERT INTO tenant_subscriptions (tenant_id, plan_id, status, started_at)
      VALUES ($1, $2, 'active', NOW())
@@ -73,7 +73,6 @@ async function activateSubscription(tenantId, planCode, stripeSubscriptionId) {
     [tenantId, planId]
   );
 
-  // Ensure the most recent row for this tenant is now active
   await db.query(
     `UPDATE tenant_subscriptions
         SET status = 'active', plan_id = $2
@@ -90,9 +89,75 @@ async function activateSubscription(tenantId, planCode, stripeSubscriptionId) {
   logger.info({ tenantId, planCode, stripeSubscriptionId }, 'Subscription activated');
 }
 
+// ─── PR-9: Invoice + Payment helpers ─────────────────────────────────────────
+
+/**
+ * Upsert a tenant_invoices row from a Stripe invoice object.
+ * Uses stripe_invoice_id as the idempotency key so replaying a webhook
+ * never creates duplicate rows.
+ *
+ * Returns the tenant_invoices.id for the row.
+ */
+async function upsertInvoice(tenantId, stripeInvoice, status) {
+  const stripeInvoiceId  = stripeInvoice.id;
+  const amountCents      = stripeInvoice.amount_paid ?? stripeInvoice.amount_due ?? 0;
+  const currency         = (stripeInvoice.currency || 'usd').toLowerCase();
+  const paidAt           = status === 'paid'
+    ? new Date(stripeInvoice.status_transitions?.paid_at * 1000 || Date.now())
+    : null;
+
+  // Resolve subscription FK — may be null for one-off invoices
+  let subscriptionId = null;
+  if (stripeInvoice.subscription) {
+    const subRow = await db.query(
+      `SELECT id FROM tenant_subscriptions
+        WHERE tenant_id = $1
+        ORDER BY COALESCE(started_at, NOW()) DESC
+        LIMIT 1`,
+      [tenantId]
+    );
+    subscriptionId = subRow.rows[0]?.id ?? null;
+  }
+
+  const result = await db.query(
+    `INSERT INTO tenant_invoices
+       (tenant_id, subscription_id, stripe_invoice_id, amount_cents, currency, status, paid_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)
+     ON CONFLICT (stripe_invoice_id)
+       DO UPDATE SET
+         status  = EXCLUDED.status,
+         paid_at = COALESCE(EXCLUDED.paid_at, tenant_invoices.paid_at)
+     RETURNING id`,
+    [tenantId, subscriptionId, stripeInvoiceId, amountCents, currency, status, paidAt]
+  );
+
+  return result.rows[0]?.id;
+}
+
+/**
+ * Insert a tenant_payments row for a successfully paid invoice.
+ * Idempotent: skips if a payment row for this provider_payment_intent_id
+ * already exists.
+ */
+async function recordPayment(tenantId, invoiceId, stripeInvoice) {
+  const paymentIntentId = stripeInvoice.payment_intent || null;
+  const chargeId        = stripeInvoice.charge || null;
+  const amountCents     = stripeInvoice.amount_paid ?? 0;
+  const currency        = (stripeInvoice.currency || 'usd').toLowerCase();
+
+  await db.query(
+    `INSERT INTO tenant_payments
+       (tenant_id, invoice_id, status, amount_cents, currency,
+        provider_payment_intent_id, provider_charge_id)
+     VALUES ($1, $2, 'succeeded', $3, $4, $5, $6)
+     ON CONFLICT (provider_payment_intent_id)
+       DO NOTHING`,
+    [tenantId, invoiceId, amountCents, currency, paymentIntentId, chargeId]
+  );
+}
+
 // ─── Route ───────────────────────────────────────────────────────────────────
 
-// express.raw() to keep body as Buffer for Stripe signature verification
 router.post(
   '/webhook',
   express.raw({ type: 'application/json' }),
@@ -114,7 +179,6 @@ router.post(
         const sig = req.headers['stripe-signature'];
         event = stripe.webhooks.constructEvent(req.body, sig, secret);
       } else {
-        // Dev/test: parse raw body manually
         event = JSON.parse(req.body.toString());
       }
     } catch (err) {
@@ -128,7 +192,7 @@ router.post(
       switch (event.type) {
 
         case 'checkout.session.completed': {
-          const session = event.data.object;
+          const session    = event.data.object;
           if (session.mode !== 'subscription') break;
 
           const customerId = session.customer;
@@ -148,7 +212,7 @@ router.post(
         case 'customer.subscription.updated': {
           const sub        = event.data.object;
           const customerId = sub.customer;
-          const status     = sub.status; // active | past_due | canceled | trialing | paused
+          const status     = sub.status;
           const tenantId   = await getTenantIdByCustomer(customerId);
           await syncSubscriptionStatus(tenantId, status);
           logger.info({ tenantId, status }, 'Subscription status synced');
@@ -164,10 +228,71 @@ router.post(
           break;
         }
 
+        // ── PR-9: Invoice paid ───────────────────────────────────────────────
+        case 'invoice.paid': {
+          const stripeInvoice = event.data.object;
+          const customerId    = stripeInvoice.customer;
+          const tenantId      = await getTenantIdByCustomer(customerId);
+
+          if (!tenantId) {
+            logger.warn({ customerId }, 'invoice.paid: tenant not found for customer');
+            break;
+          }
+
+          // 1. Upsert the invoice record
+          const invoiceId = await upsertInvoice(tenantId, stripeInvoice, 'paid');
+
+          // 2. Record the payment
+          if (invoiceId) {
+            await recordPayment(tenantId, invoiceId, stripeInvoice);
+          }
+
+          logger.info(
+            { tenantId, stripeInvoiceId: stripeInvoice.id, invoiceId },
+            'Invoice paid — record created'
+          );
+          break;
+        }
+
+        // ── PR-9: Invoice payment failed ─────────────────────────────────────
         case 'invoice.payment_failed': {
-          const invoice    = event.data.object;
-          const customerId = invoice.customer;
-          const tenantId   = await getTenantIdByCustomer(customerId);
+          const stripeInvoice = event.data.object;
+          const customerId    = stripeInvoice.customer;
+          const tenantId      = await getTenantIdByCustomer(customerId);
+
+          if (!tenantId) {
+            logger.warn({ customerId }, 'invoice.payment_failed: tenant not found for customer');
+            break;
+          }
+
+          // Record the failed invoice
+          const invoiceId = await upsertInvoice(tenantId, stripeInvoice, 'failed');
+
+          // Record the failed payment attempt
+          if (invoiceId) {
+            const paymentIntentId = stripeInvoice.payment_intent || null;
+            const failureReason   = stripeInvoice.last_finalization_error?.message
+              || 'Payment failed';
+
+            await db.query(
+              `INSERT INTO tenant_payments
+                 (tenant_id, invoice_id, status, amount_cents, currency,
+                  provider_payment_intent_id, failure_reason)
+               VALUES ($1, $2, 'failed', $3, $4, $5, $6)
+               ON CONFLICT (provider_payment_intent_id)
+                 DO NOTHING`,
+              [
+                tenantId,
+                invoiceId,
+                stripeInvoice.amount_due ?? 0,
+                (stripeInvoice.currency || 'usd').toLowerCase(),
+                paymentIntentId,
+                failureReason,
+              ]
+            );
+          }
+
+          // Mark subscription as past_due
           await syncSubscriptionStatus(tenantId, 'past_due');
           logger.warn({ tenantId }, 'Subscription payment failed — marked past_due');
           break;
