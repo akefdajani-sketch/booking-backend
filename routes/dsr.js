@@ -226,6 +226,33 @@ router.patch(
 
       const dsr = rows[0];
 
+      // PR-20: When an erasure request is completed, anonymise the customer's PII.
+      // We null out name/email/phone so personally identifying data is gone.
+      // The booking/membership records remain for financial audit purposes.
+      if (status === 'completed' && dsr.request_type === 'erasure') {
+        try {
+          await pool.query(
+            `UPDATE customers
+                SET name       = '[deleted]',
+                    email      = NULL,
+                    phone      = NULL,
+                    deleted_at = COALESCE(deleted_at, NOW()),
+                    updated_at = NOW()
+              WHERE tenant_id = $1
+                AND (
+                  lower(email) = lower($2)
+                  OR lower(email) = lower($2)
+                )
+                AND deleted_at IS NULL`,
+            [tenantId, dsr.requester_email]
+          );
+          logger.info({ dsrId: dsr.id, tenantId }, 'PR-20: customer PII anonymised for erasure DSR');
+        } catch (anonErr) {
+          // Log but don't fail — DSR status is already updated
+          logger.error({ err: anonErr, dsrId: dsr.id }, 'PR-20: PII anonymisation failed');
+        }
+      }
+
       await writeAuditEvent(req, {
         tenantId,
         actorEmail:   req.googleUser?.email || 'unknown',
@@ -233,7 +260,7 @@ router.patch(
         eventType:    status === 'completed' ? EVENT_TYPES.DSR_COMPLETED : EVENT_TYPES.DSR_REJECTED,
         resourceType: 'dsr_request',
         resourceId:   String(dsr.id),
-        meta:         { status, request_type: dsr.request_type },
+        meta:         { status, request_type: dsr.request_type, pii_anonymised: status === 'completed' && dsr.request_type === 'erasure' },
       });
 
       return res.json({ ok: true, dsr });

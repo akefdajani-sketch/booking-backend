@@ -1,0 +1,357 @@
+openapi: 3.0.3
+info:
+  title: Flexrz / BookFlow API
+  version: 1.0.0
+  description: |
+    Multi-tenant booking and operations SaaS API.
+    All tenant-scoped endpoints require `tenantSlug` query param.
+    Authenticated endpoints require `Authorization: Bearer <google_id_token>`.
+  contact:
+    name: Flexrz Engineering
+
+servers:
+  - url: https://booking-backend-6jbc.onrender.com
+    description: Production
+  - url: http://localhost:3001
+    description: Local development
+
+tags:
+  - name: Health
+  - name: Tenants
+  - name: Bookings
+  - name: Availability
+  - name: Services
+  - name: Staff
+  - name: Resources
+  - name: Customers
+  - name: Memberships
+  - name: Billing
+  - name: DSR
+
+components:
+  securitySchemes:
+    GoogleBearer:
+      type: http
+      scheme: bearer
+      bearerFormat: Google ID Token
+  parameters:
+    tenantSlug:
+      name: tenantSlug
+      in: query
+      required: true
+      schema:
+        type: string
+      example: birdie-golf
+  schemas:
+    Error:
+      type: object
+      properties:
+        error:
+          type: string
+    Booking:
+      type: object
+      properties:
+        id:          { type: integer }
+        tenant_id:   { type: integer }
+        service_id:  { type: integer }
+        staff_id:    { type: integer, nullable: true }
+        resource_id: { type: integer, nullable: true }
+        start_time:  { type: string, format: date-time }
+        duration_minutes: { type: integer }
+        customer_name:  { type: string }
+        customer_email: { type: string, nullable: true }
+        customer_phone: { type: string, nullable: true }
+        status:      { type: string, enum: [pending, confirmed, cancelled] }
+        booking_code: { type: string }
+        created_at:  { type: string, format: date-time }
+    Service:
+      type: object
+      properties:
+        id:       { type: integer }
+        name:     { type: string }
+        duration_minutes: { type: integer }
+        price:    { type: number }
+        currency: { type: string }
+        is_active: { type: boolean }
+    Tenant:
+      type: object
+      properties:
+        id:   { type: integer }
+        slug: { type: string }
+        name: { type: string }
+        timezone: { type: string }
+
+paths:
+
+  /health:
+    get:
+      tags: [Health]
+      summary: Liveness + readiness check
+      responses:
+        '200':
+          description: System healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: ok }
+                  db:     { type: string, example: ok }
+
+  /api/tenants/by-slug/{slug}:
+    get:
+      tags: [Tenants]
+      summary: Fetch a tenant by slug
+      parameters:
+        - name: slug
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Tenant found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Tenant'
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/bookings:
+    get:
+      tags: [Bookings]
+      summary: List bookings for a tenant
+      security:
+        - GoogleBearer: []
+      parameters:
+        - $ref: '#/components/parameters/tenantSlug'
+        - name: scope
+          in: query
+          schema: { type: string, enum: [upcoming, past, all, range, latest] }
+        - name: status
+          in: query
+          schema: { type: string, enum: [pending, confirmed, cancelled, all] }
+        - name: limit
+          in: query
+          schema: { type: integer, default: 50, maximum: 200 }
+        - name: from
+          in: query
+          schema: { type: string, format: date-time }
+        - name: to
+          in: query
+          schema: { type: string, format: date-time }
+        - name: query
+          in: query
+          description: Search customer name / email / phone / booking_code
+          schema: { type: string }
+      responses:
+        '200':
+          description: Bookings list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  bookings:
+                    type: array
+                    items: { $ref: '#/components/schemas/Booking' }
+                  nextCursor:
+                    type: object
+                    nullable: true
+        '401': { description: Unauthorized }
+        '403': { description: Forbidden }
+
+    post:
+      tags: [Bookings]
+      summary: Create a booking (public / customer-facing)
+      security:
+        - GoogleBearer: []
+      parameters:
+        - $ref: '#/components/parameters/tenantSlug'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [serviceId, startTime, durationMinutes]
+              properties:
+                serviceId:       { type: integer }
+                resourceId:      { type: integer, nullable: true }
+                staffId:         { type: integer, nullable: true }
+                startTime:       { type: string, format: date-time }
+                durationMinutes: { type: integer }
+                customerName:    { type: string }
+                customerEmail:   { type: string }
+                customerPhone:   { type: string }
+      responses:
+        '201':
+          description: Booking created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Booking' }
+        '400': { description: Validation error }
+        '409': { description: Slot no longer available }
+
+  /api/bookings/{id}/status:
+    patch:
+      tags: [Bookings]
+      summary: Update booking status (staff/owner)
+      security:
+        - GoogleBearer: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer }
+        - $ref: '#/components/parameters/tenantSlug'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status: { type: string, enum: [confirmed, cancelled] }
+      responses:
+        '200': { description: Updated }
+        '400': { description: Invalid transition }
+        '404': { description: Not found }
+
+  /api/availability:
+    get:
+      tags: [Availability]
+      summary: Get available slots for a service/resource
+      parameters:
+        - $ref: '#/components/parameters/tenantSlug'
+        - name: serviceId
+          in: query
+          required: true
+          schema: { type: integer }
+        - name: date
+          in: query
+          required: true
+          schema: { type: string, format: date, example: '2026-03-15' }
+        - name: resourceId
+          in: query
+          schema: { type: integer }
+        - name: staffId
+          in: query
+          schema: { type: integer }
+      responses:
+        '200':
+          description: Available slots
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  slots:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        startTime: { type: string, format: date-time }
+                        available: { type: boolean }
+
+  /api/services:
+    get:
+      tags: [Services]
+      summary: List services for a tenant
+      parameters:
+        - $ref: '#/components/parameters/tenantSlug'
+      responses:
+        '200':
+          description: Services list
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Service' }
+
+  /api/dsr/request:
+    post:
+      tags: [DSR]
+      summary: Submit a GDPR Data Subject Request
+      parameters:
+        - $ref: '#/components/parameters/tenantSlug'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [request_type, requester_email]
+              properties:
+                request_type:
+                  type: string
+                  enum: [access, erasure, portability]
+                requester_email:
+                  type: string
+                  format: email
+      responses:
+        '201': { description: Request submitted }
+        '409': { description: Duplicate pending request }
+
+  /api/csrf-token:
+    get:
+      tags: [Security]
+      summary: Issue a CSRF token (double-submit cookie pattern)
+      description: |
+        Call once per session. Returns a token in JSON and sets an httpOnly=false
+        cookie. Include the token as `X-Csrf-Token` on all mutating requests.
+      responses:
+        '200':
+          description: CSRF token issued
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  csrfToken: { type: string }
+
+  /api/billing/checkout:
+    post:
+      tags: [Billing]
+      summary: Create a Stripe Checkout session for a SaaS plan
+      security:
+        - GoogleBearer: []
+      parameters:
+        - $ref: '#/components/parameters/tenantSlug'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [plan]
+              properties:
+                plan: { type: string, enum: [starter, growth, pro] }
+      responses:
+        '200':
+          description: Checkout URL
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  url: { type: string }
+
+  /health/live:
+    get:
+      tags: [Health]
+      summary: Kubernetes liveness probe
+      responses:
+        '200': { description: Alive }
+
+  /health/ready:
+    get:
+      tags: [Health]
+      summary: Kubernetes readiness probe (checks DB)
+      responses:
+        '200': { description: Ready }
+        '503': { description: DB not ready }
