@@ -1482,6 +1482,7 @@ router.post("/", requireGoogleAuth, requireTenant, async (req, res) => {
             start,
             durationMinutes: Number(duration),
             basePriceAmount: Number(price_amount),
+            serviceSlotMinutes: Number(serviceDurationMinutes) || Number(duration),
           });
           if (computed && computed.adjusted_price_amount != null) {
             price_amount = Number(computed.adjusted_price_amount);

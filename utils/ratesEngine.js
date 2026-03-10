@@ -104,14 +104,27 @@ function specificityScore(rule) {
   return s;
 }
 
-function applyRule(basePriceAmount, rule) {
+function applyRule(basePriceAmount, rule, durationMinutes, serviceSlotMinutes) {
   const base = Number(basePriceAmount);
   if (!Number.isFinite(base)) return { adjusted: null, reason: "missing_base" };
   const amt = Number(rule.amount);
   if (!Number.isFinite(amt)) return { adjusted: round2(base), reason: "invalid_amount" };
 
   const t = String(rule.price_type || "").toLowerCase();
-  if (t === "fixed")      return { adjusted: round2(amt),        reason: "fixed" };
+
+  if (t === "fixed") {
+    // Fixed = price per service slot unit.
+    // Scale by number of slots so 2 slots at 100 JD → 200 JD.
+    const slotUnit = Number(serviceSlotMinutes) || 0;
+    const dur      = Number(durationMinutes)    || 0;
+    if (slotUnit > 0 && dur > 0 && dur !== slotUnit) {
+      return { adjusted: round2(amt * (dur / slotUnit)), reason: "fixed_scaled" };
+    }
+    return { adjusted: round2(amt), reason: "fixed" };
+  }
+
+  // Delta and Multiplier already operate on the duration-scaled base price,
+  // so they naturally handle multi-slot bookings correctly.
   if (t === "delta")      return { adjusted: round2(base + amt), reason: "delta" };
   if (t === "multiplier") return { adjusted: round2(base * amt), reason: "multiplier" };
   return { adjusted: round2(base), reason: "unknown_type" };
@@ -169,6 +182,7 @@ async function computeRateForBookingLike({
   start,
   durationMinutes,
   basePriceAmount,
+  serviceSlotMinutes,   // service base slot duration; used to scale Fixed rules
 }) {
   const base = basePriceAmount == null ? null : round2(basePriceAmount);
 
@@ -203,8 +217,15 @@ async function computeRateForBookingLike({
     });
 
   const winner  = matches[0] || null;
+  // Resolve the slot unit for Fixed-rule scaling.
+  // Prefer explicitly passed serviceSlotMinutes, fall back to durationMinutes
+  // (single-slot booking where slot duration === booking duration).
+  const resolvedSlotMinutes = Number(serviceSlotMinutes) > 0
+    ? Number(serviceSlotMinutes)
+    : Number(durationMinutes);
+
   const applied = winner
-    ? applyRule(base, winner)
+    ? applyRule(base, winner, durationMinutes, resolvedSlotMinutes)
     : { adjusted: base, reason: "no_rule" };
 
   const startIso = start.toISOString();
@@ -220,6 +241,7 @@ async function computeRateForBookingLike({
       local_time:        timeStr,
       local_dow:         dow,
       duration_minutes:  durationMinutes,
+      service_slot_minutes: resolvedSlotMinutes,
       base_price_amount: base,
     },
     rule: winner

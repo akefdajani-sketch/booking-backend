@@ -89,6 +89,7 @@ router.post("/:slug/pricing/quote", injectTenantSlug, requireTenant, async (req,
       SELECT
         s.id,
         s.duration_minutes,
+        COALESCE(s.slot_interval_minutes, s.duration_minutes) AS slot_interval_minutes,
         ${priceExpr}
       FROM services s
       WHERE s.tenant_id = $1 AND s.id = $2
@@ -101,6 +102,7 @@ router.post("/:slug/pricing/quote", injectTenantSlug, requireTenant, async (req,
 
     const servicePriceAmount = toNum(svc.rows[0].price_amount);
     const serviceDurationMinutes = toInt(svc.rows[0].duration_minutes);
+    const serviceSlotMinutes      = toInt(svc.rows[0].slot_interval_minutes) || serviceDurationMinutes;
 
     let basePriceAmount = null;
     if (servicePriceAmount != null && Number.isFinite(servicePriceAmount)) {
@@ -132,6 +134,7 @@ router.post("/:slug/pricing/quote", injectTenantSlug, requireTenant, async (req,
           start,
           durationMinutes,
           basePriceAmount,
+          serviceSlotMinutes,
         });
       }
     } catch (e) {
