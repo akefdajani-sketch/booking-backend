@@ -54,6 +54,7 @@ const invitesRouter = require("./routes/invites");
 const tenantPlanRouter = require("./routes/tenantPlan");
 const tenantDashboardRouter = require("./routes/tenantDashboard");
 const tenantStaffScheduleRouter = require("./routes/tenantStaffSchedule");
+const serviceHoursRouter = require("./routes/serviceHours");
 const tenantHomeLandingRouter = require("./routes/tenantHomeLanding");
 const tenantBrandingRouter = require("./routes/tenantBranding");
 const tenantMembershipCheckoutRouter = require("./routes/tenantMembershipCheckout");
@@ -156,6 +157,7 @@ app.use("/api/tenant", tenantUsersRouter);
 app.use("/api/tenant", tenantPlanRouter);
 app.use("/api/tenant", tenantDashboardRouter);
 app.use("/api/tenant", tenantStaffScheduleRouter);
+app.use("/api/tenant", serviceHoursRouter); // PR-SH1: per-service time windows
 app.use("/api/tenant", tenantHomeLandingRouter);
 app.use("/api/tenant", tenantBrandingRouter);
 app.use("/api/tenant", tenantMembershipCheckoutRouter);
