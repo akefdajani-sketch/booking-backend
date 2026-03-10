@@ -485,6 +485,16 @@ try {
 const windowStartLocal = `${date} ${openHHMM}:00`;
 const windowEndLocal = `${addDaysISO(date, isOvernight ? 1 : 0)} ${closeHHMM}:00`;
 
+function slotFallsWithinServiceHours(startHHMM) {
+  if (serviceHoursWindows === null) return true;
+  const slotStartBase = toMinutes(startHHMM);
+  const slotStartMin = normaliseSlotMinuteForWindow(slotStartBase, openMin, isOvernight);
+  const slotEndMin = slotStartMin + stepMin;
+  return serviceHoursWindows.some(
+    (w) => slotStartMin >= w.start_minute && slotEndMin <= w.end_minute
+  );
+}
+
 if (availabilityBasis === "none") {
   const q = `
     WITH slots AS (
@@ -515,15 +525,7 @@ if (availabilityBasis === "none") {
   for (const row of r.rows) {
     const startHHMM = row.time;
 
-    if (serviceHoursWindows !== null) {
-      const slotStartBase = toMinutes(startHHMM);
-      const slotStartMin = normaliseSlotMinuteForWindow(slotStartBase, openMin, isOvernight);
-      const slotEndMin = slotStartMin + stepMin;
-      const inWindow = serviceHoursWindows.some(
-        (w) => slotStartMin >= w.start_minute && slotEndMin <= w.end_minute
-      );
-      if (!inWindow) continue;
-    }
+    if (!slotFallsWithinServiceHours(startHHMM)) continue;
 
     const blackoutHits = Number(row.blackout_hits ?? 0);
     const slotObj = {
@@ -702,6 +704,15 @@ if (availabilityBasis === "none") {
   }
 }
 
+
+if (serviceHoursWindows !== null) {
+  const filteredSlots = allSlots.filter((slot) => slotFallsWithinServiceHours(slot.time));
+  const filteredTimes = availableTimes.filter((time) => slotFallsWithinServiceHours(time));
+  allSlots.length = 0;
+  allSlots.push(...filteredSlots);
+  availableTimes.length = 0;
+  availableTimes.push(...filteredTimes);
+}
 
     return res.json({
       tenantId,
