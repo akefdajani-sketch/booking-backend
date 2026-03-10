@@ -63,6 +63,7 @@ async function resolveTenant(req, res, next) {
     if (!tenantId) return res.status(404).json({ error: "Tenant not found." });
     req.tenantSlug = slug;
     req.tenantId   = Number(tenantId);
+    req.tenant     = { id: Number(tenantId), slug };
     return next();
   } catch (err) {
     console.error("serviceHours resolveTenant:", err);
@@ -91,7 +92,7 @@ function toMinutes(hhmm) {
 
 router.get(
   "/:slug/services/:serviceId/hours",
-  shAuth, shUser, shRole, resolveTenant,
+  shAuth, shUser, resolveTenant, shRole,
   async (req, res) => {
     try {
       const serviceId = Number(req.params.serviceId);
@@ -135,7 +136,7 @@ router.get(
 
 router.put(
   "/:slug/services/:serviceId/hours",
-  shAuth, shUser, shRole, resolveTenant,
+  shAuth, shUser, resolveTenant, shRole,
   async (req, res) => {
     try {
       const serviceId = Number(req.params.serviceId);
