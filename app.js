@@ -144,7 +144,12 @@ app.use("/api/customers", customersRouter);
 
 // PR-2: bookings — rate limit POST (public booking creation) only.
 // GET paths already require admin/tenant role auth so no limiter needed there.
-app.use("/api/bookings", bookingCreateLimiter, csrfProtection, bookingsRouter); // PR-16
+// NOTE: csrfProtection removed from this route (PR-16 fix):
+//   - Requests arrive via the Next.js server-side proxy (server-to-server),
+//     so no browser CSRF cookie is ever sent alongside them.
+//   - Bearer-token authenticated routes don't need CSRF per csrf.js design note.
+//   - The route is already guarded by bookingCreateLimiter + CORS.
+app.use("/api/bookings", bookingCreateLimiter, bookingsRouter);
 
 // PR-2: availability is fully public — rate-limit it.
 app.use("/api/availability", availabilityLimiter, availabilityRouter);
