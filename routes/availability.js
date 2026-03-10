@@ -441,11 +441,15 @@ try {
     [serviceId, tenantId, dayOfWeek]
   );
   if (shResult.rows.length > 0) {
-    // Intersect each service window with the tenant open/close window
+    // Intersect each service window with the tenant open/close window.
+    // Service windows follow the same overnight rule as tenant working hours:
+    // if close <= open, the window continues into the next day.
     serviceHoursWindows = shResult.rows
+      .map((r) => normaliseWindowMinutes(r.start_minute, r.end_minute))
+      .filter(Boolean)
       .map((r) => ({
-        start_minute: Math.max(openMin,  Number(r.start_minute)),
-        end_minute:   Math.min(closeMin, Number(r.end_minute)),
+        start_minute: Math.max(openMin, r.start_minute),
+        end_minute: Math.min(closeMin, r.end_minute),
       }))
       .filter((w) => Number.isFinite(w.start_minute) && Number.isFinite(w.end_minute) && w.end_minute > w.start_minute);
 
@@ -644,8 +648,9 @@ if (availabilityBasis === "none") {
     // A slot is valid only if it starts AND ends within at least one service_hours window.
     // (slot_start + stepMin = the slot interval, e.g. 60 min — must fit fully inside the window)
     if (serviceHoursWindows !== null) {
-      const slotStartMin = toMinutes(startHHMM);
-      const slotEndMin   = slotStartMin + stepMin;
+      const slotStartBase = toMinutes(startHHMM);
+      const slotStartMin = normaliseSlotMinuteForWindow(slotStartBase, openMin, isOvernight);
+      const slotEndMin = slotStartMin + stepMin;
       const inWindow = serviceHoursWindows.some(
         (w) => slotStartMin >= w.start_minute && slotEndMin <= w.end_minute
       );

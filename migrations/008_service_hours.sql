@@ -12,7 +12,7 @@ CREATE TABLE IF NOT EXISTS service_hours (
   close_time   TIME         NOT NULL,
   created_at   TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
   updated_at   TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-  CONSTRAINT chk_service_hours_order CHECK (close_time > open_time)
+  CONSTRAINT chk_service_hours_nonzero CHECK (close_time <> open_time)
 );
 
 CREATE INDEX IF NOT EXISTS idx_service_hours_service_day
