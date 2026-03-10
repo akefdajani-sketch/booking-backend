@@ -81,6 +81,12 @@ function normaliseTime(v) {
   return String(v).trim().slice(0, 5);
 }
 
+function toMinutes(hhmm) {
+  const [h, m] = String(hhmm || "").split(":").map(Number);
+  if (!Number.isFinite(h) || !Number.isFinite(m)) return NaN;
+  return (h * 60) + m;
+}
+
 // ─── GET /api/tenant/:slug/services/:serviceId/hours ─────────────────────────
 
 router.get(
@@ -165,9 +171,16 @@ router.put(
         }
         const open  = normaliseTime(w.open_time);
         const close = normaliseTime(w.close_time);
-        if (close <= open) {
+        const openMin = toMinutes(open);
+        const closeMin = toMinutes(close);
+        if (!Number.isFinite(openMin) || !Number.isFinite(closeMin)) {
           return res.status(400).json({
-            error: `close_time must be after open_time on day ${dow}.`,
+            error: `Invalid time value on day ${dow}. Use HH:MM.`,
+          });
+        }
+        if (openMin === closeMin) {
+          return res.status(400).json({
+            error: `open_time and close_time cannot be the same on day ${dow}.`,
           });
         }
         windows.push({ day_of_week: dow, open_time: open, close_time: close });
