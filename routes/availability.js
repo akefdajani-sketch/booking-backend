@@ -514,6 +514,17 @@ if (availabilityBasis === "none") {
   const r = await pool.query(q, [windowStartLocal, windowEndLocal, tenantId, tenantTz, stepMin, resourceId ?? null]);
   for (const row of r.rows) {
     const startHHMM = row.time;
+
+    if (serviceHoursWindows !== null) {
+      const slotStartBase = toMinutes(startHHMM);
+      const slotStartMin = normaliseSlotMinuteForWindow(slotStartBase, openMin, isOvernight);
+      const slotEndMin = slotStartMin + stepMin;
+      const inWindow = serviceHoursWindows.some(
+        (w) => slotStartMin >= w.start_minute && slotEndMin <= w.end_minute
+      );
+      if (!inWindow) continue;
+    }
+
     const blackoutHits = Number(row.blackout_hits ?? 0);
     const slotObj = {
       time: startHHMM,
