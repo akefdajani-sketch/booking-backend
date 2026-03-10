@@ -22,6 +22,32 @@ function minutesToHHMM(total) {
   return `${pad2(h)}:${pad2(m)}`;
 }
 
+function normaliseWindowMinutes(startMinute, endMinute) {
+  const start = Number(startMinute);
+  let end = Number(endMinute);
+
+  if (!Number.isFinite(start) || !Number.isFinite(end)) return null;
+  if (start === end) return null;
+
+  if (end <= start) end += 24 * 60;
+
+  return {
+    start_minute: start,
+    end_minute: end,
+  };
+}
+
+function normaliseSlotMinuteForWindow(slotMinute, openMinute, isOvernight) {
+  const slot = Number(slotMinute);
+  if (!Number.isFinite(slot)) return slot;
+
+  if (isOvernight && slot < openMinute) {
+    return slot + 24 * 60;
+  }
+
+  return slot;
+}
+
 async function loadEffectiveStaffBlocks({ tenantId, staffId, dateISO, weekday }) {
   // Returns array of { start_minute, end_minute } in local minutes.
   // Override precedence:
