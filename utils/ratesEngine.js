@@ -113,8 +113,17 @@ function applyRule(basePriceAmount, rule, durationMinutes, serviceSlotMinutes) {
   const t = String(rule.price_type || "").toLowerCase();
 
   if (t === "fixed") {
-    // Fixed = price per service slot unit.
-    // Scale by number of slots so 2 slots at 100 JD → 200 JD.
+    // Package rule: when min_duration === max_duration the amount IS the total
+    // price for that exact booking length — do NOT multiply by slot count.
+    // e.g. "Karaoke 2 Hour" → Fixed 70 JD for exactly 120 min = 70 JD total.
+    const minD = rule.min_duration_mins != null ? Number(rule.min_duration_mins) : null;
+    const maxD = rule.max_duration_mins != null ? Number(rule.max_duration_mins) : null;
+    if (minD != null && maxD != null && minD === maxD && minD > 0) {
+      return { adjusted: round2(amt), reason: "fixed_package" };
+    }
+
+    // Per-slot fixed rate: scale amount by number of slots selected.
+    // e.g. "Peak Hours" Fixed 40 JD per slot × 2 slots = 80 JD.
     const slotUnit = Number(serviceSlotMinutes) || 0;
     const dur      = Number(durationMinutes)    || 0;
     if (slotUnit > 0 && dur > 0 && dur !== slotUnit) {

@@ -147,6 +147,10 @@ router.get("/", async (req, res) => {
       ? "s.max_consecutive_slots AS max_consecutive_slots"
       : "NULL::int AS max_consecutive_slots";
 
+    const minConsecutiveExpr = svcCols.has("min_consecutive_slots")
+      ? "s.min_consecutive_slots AS min_consecutive_slots"
+      : "NULL::int AS min_consecutive_slots";
+
     const imageExpr =
       svcCols.has("image_url") && svcCols.has("photo_url")
         ? "COALESCE(s.image_url, s.photo_url) AS image_url"
@@ -177,6 +181,7 @@ router.get("/", async (req, res) => {
         s.duration_minutes,
         ${priceExpr},
         ${slotIntervalExpr},
+        ${minConsecutiveExpr},
         ${maxConsecutiveExpr},
         ${maxParallelExpr},
         COALESCE(s.requires_staff, false)    AS requires_staff,
@@ -310,6 +315,7 @@ router.post("/", requireTenant, requireAdminOrTenantRole("manager"), async (req,
     }
 
     if (svcCols.has("slot_interval_minutes")) add("slot_interval_minutes", slot_interval_minutes == null ? null : Number(slot_interval_minutes));
+    if (svcCols.has("min_consecutive_slots")) add("min_consecutive_slots", min_consecutive_slots == null ? null : Number(min_consecutive_slots));
     if (svcCols.has("max_consecutive_slots")) add("max_consecutive_slots", max_consecutive_slots == null ? null : Number(max_consecutive_slots));
     else if (svcCols.has("max_consecutive_slots")) add("max_consecutive_slots", max_consecutive_slots == null ? null : Number(max_consecutive_slots));
 
@@ -363,6 +369,7 @@ router.patch("/:id", resolveTenantFromServiceId, requireAdminOrTenantRole("manag
       price_amount,
       price_jd,
       slot_interval_minutes,
+      min_consecutive_slots,
       max_consecutive_slots,
       max_parallel_bookings,
       requires_staff,
@@ -400,6 +407,9 @@ router.patch("/:id", resolveTenantFromServiceId, requireAdminOrTenantRole("manag
 
     if (slot_interval_minutes !== undefined && svcCols.has("slot_interval_minutes"))
       add("slot_interval_minutes", slot_interval_minutes == null ? null : Number(slot_interval_minutes));
+
+    if (min_consecutive_slots !== undefined && svcCols.has("min_consecutive_slots"))
+      add("min_consecutive_slots", min_consecutive_slots == null ? null : Number(min_consecutive_slots));
 
     if (max_consecutive_slots !== undefined) {
       if (svcCols.has("max_consecutive_slots")) add("max_consecutive_slots", max_consecutive_slots == null ? null : Number(max_consecutive_slots));
