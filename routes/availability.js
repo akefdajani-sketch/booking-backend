@@ -425,6 +425,59 @@ if (availabilityBasis === "staff" || availabilityBasis === "both") {
   }
 }
 
+// ── PR-SH1: Service hours windows ────────────────────────────────────────────
+// If service_hours rows exist for this service+day, slots must fall within at
+// least one window AND be clipped to business hours (intersection).
+// No rows = unrestricted (preserves all existing behavior).
+let serviceHoursWindows = null; // null = no restriction
+try {
+  const shResult = await pool.query(
+    `SELECT
+       (EXTRACT(HOUR FROM open_time)::int  * 60 + EXTRACT(MINUTE FROM open_time)::int)  AS start_minute,
+       (EXTRACT(HOUR FROM close_time)::int * 60 + EXTRACT(MINUTE FROM close_time)::int) AS end_minute
+     FROM service_hours
+     WHERE service_id = $1 AND tenant_id = $2 AND day_of_week = $3
+     ORDER BY open_time ASC`,
+    [serviceId, tenantId, dayOfWeek]
+  );
+  if (shResult.rows.length > 0) {
+    // Intersect each service window with the tenant open/close window
+    serviceHoursWindows = shResult.rows
+      .map((r) => ({
+        start_minute: Math.max(openMin,  Number(r.start_minute)),
+        end_minute:   Math.min(closeMin, Number(r.end_minute)),
+      }))
+      .filter((w) => Number.isFinite(w.start_minute) && Number.isFinite(w.end_minute) && w.end_minute > w.start_minute);
+
+    // If intersection produced no usable windows → no slots for this day
+    if (serviceHoursWindows.length === 0) {
+      return res.json({
+        tenantId,
+        tenantSlug: tenantSlug ?? null,
+        date,
+        times: [],
+        slots: [],
+        meta: {
+          duration_minutes: durationMin,
+          slot_interval_minutes: stepMin,
+          max_parallel_bookings: maxParallel,
+          requires_staff: reqStaff,
+          requires_resource: reqResource,
+          availability_basis: availabilityBasis,
+          derived_basis: derivedBasis,
+          reason: "service_hours_outside_business_hours",
+        },
+      });
+    }
+  }
+} catch (shErr) {
+  // 42P01 = table not yet migrated; silently skip restriction
+  if (!shErr || shErr.code !== "42P01") {
+    console.error("serviceHours load error:", shErr);
+  }
+  serviceHoursWindows = null;
+}
+
 const windowStartLocal = `${date} ${openHHMM}:00`;
 const windowEndLocal = `${addDaysISO(date, isOvernight ? 1 : 0)} ${closeHHMM}:00`;
 
@@ -586,6 +639,19 @@ if (availabilityBasis === "none") {
 
   for (const row of r.rows) {
     const startHHMM = row.time;
+
+    // PR-SH1: If this service has time-window restrictions, skip slots outside all windows.
+    // A slot is valid only if it starts AND ends within at least one service_hours window.
+    // (slot_start + stepMin = the slot interval, e.g. 60 min — must fit fully inside the window)
+    if (serviceHoursWindows !== null) {
+      const slotStartMin = toMinutes(startHHMM);
+      const slotEndMin   = slotStartMin + stepMin;
+      const inWindow = serviceHoursWindows.some(
+        (w) => slotStartMin >= w.start_minute && slotEndMin <= w.end_minute
+      );
+      if (!inWindow) continue;
+    }
+
     const overlapsResource = Number(row.overlaps_resource ?? 0);
     const overlapsStaff = Number(row.overlaps_staff ?? 0);
     const blackoutHits = Number(row.blackout_hits ?? 0);
