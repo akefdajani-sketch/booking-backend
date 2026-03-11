@@ -1609,6 +1609,7 @@ const charge_amount = (finalCustomerMembershipId || prepaidApplied) ? 0 : price_
         }
       } catch (err) {
         if (idemKey && err && err.code === "23505") {
+          // Idempotency replay: same key used before – return the existing booking.
           const existing = await client.query(
             `SELECT id FROM bookings WHERE tenant_id=$1 AND idempotency_key=$2 LIMIT 1`,
             [resolvedTenantId, idemKey]
@@ -1619,6 +1620,34 @@ const charge_amount = (finalCustomerMembershipId || prepaidApplied) ? 0 : price_
           } else {
             throw err;
           }
+        } else if (err && err.code === "23P01") {
+          // ── Exclusion constraint violation ────────────────────────────────────
+          // The production DB has an EXCLUDE USING GIST constraint on
+          // (tenant_id, resource_id, booking_range) that prevents overlapping
+          // bookings on the same resource.  For parallel/group services this
+          // constraint fires on the 2nd+ participant even though the session has
+          // capacity – a false conflict.
+          //
+          // FIX: run migration 012_drop_booking_range_exclude.sql to remove the
+          // constraint permanently. Until then, surface this as a clean 409
+          // instead of a 500 so the UI can show a helpful message.
+          //
+          // For single-capacity services a 23P01 here is a genuine double-book
+          // that slipped past checkConflicts (race condition); 409 is still correct.
+          await client.query("ROLLBACK");
+          if (serviceMaxParallel > 1) {
+            return res.status(409).json({
+              error:
+                "A database constraint is blocking this parallel booking. " +
+                "Please ask your administrator to run migration " +
+                "012_drop_booking_range_exclude.sql on the production database.",
+              code: "PARALLEL_BOOKING_CONSTRAINT",
+            });
+          }
+          return res.status(409).json({
+            error: "Booking conflicts with an existing booking (resource overlap).",
+            code: "RESOURCE_CONFLICT",
+          });
         } else {
           throw err;
         }
