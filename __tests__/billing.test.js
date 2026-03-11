@@ -133,3 +133,9 @@ describe('Billing route registration', () => {
     expect(res.status).toBe(404);
   });
 });
+
+// Close the pg pool so Jest can exit cleanly
+const { pool } = require('../db');
+afterAll(async () => {
+  await pool.end();
+});
