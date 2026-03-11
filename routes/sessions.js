@@ -1,9 +1,9 @@
 // routes/sessions.js
 // PR-SESSIONS: Owner API for group/parallel booking sessions
 //
-// GET  /api/tenant/:tenantSlug/sessions          – list sessions (with participant counts)
-// GET  /api/tenant/:tenantSlug/sessions/:id      – session detail with participant list
-// POST /api/tenant/:tenantSlug/sessions/:id/cancel – cancel a session + all its bookings
+// GET  /api/tenant/:slug/sessions          – list sessions (with participant counts)
+// GET  /api/tenant/:slug/sessions/:id      – session detail with participant list
+// POST /api/tenant/:slug/sessions/:id/cancel – cancel a session + all its bookings
 
 "use strict";
 
@@ -15,16 +15,25 @@ const db = pool;
 const requireGoogleAuth            = require("../middleware/requireGoogleAuth");
 const requireAdminOrTenantRole     = require("../middleware/requireAdminOrTenantRole");
 const { requireTenant }            = require("../middleware/requireTenant");
-const { decrementSessionCount }    = require("../utils/bookings");
 
-// ── Middleware: all routes require auth + tenant resolution ───────────────────
-router.use(requireGoogleAuth);
-router.use(requireTenant);
-router.use(requireAdminOrTenantRole("staff"));
+// ── Shared helpers ────────────────────────────────────────────────────────────
 
-// ─── GET /api/tenant/:tenantSlug/sessions ─────────────────────────────────────
+function injectTenantSlug(req, _res, next) {
+  req.query = req.query || {};
+  req.query.tenantSlug = req.params.slug;
+  next();
+}
+
+const baseMiddleware = [
+  requireGoogleAuth,
+  injectTenantSlug,
+  requireTenant,
+  requireAdminOrTenantRole("staff"),
+];
+
+// ─── GET /api/tenant/:slug/sessions ──────────────────────────────────────────
 // List sessions for a tenant, optionally filtered by date, service, or resource.
-router.get("/", async (req, res) => {
+router.get("/:slug/sessions", ...baseMiddleware, async (req, res) => {
   try {
     const tenantId = req.tenantId;
     const {
@@ -48,7 +57,6 @@ router.get("/", async (req, res) => {
       filters.push(`ss.resource_id = $${params.length}`);
     }
     if (status && status !== "all") {
-      // allow comma-separated e.g. "open,full"
       const statuses = status.split(",").map(s => s.trim()).filter(Boolean);
       params.push(statuses);
       filters.push(`ss.status = ANY($${params.length})`);
@@ -56,22 +64,19 @@ router.get("/", async (req, res) => {
       filters.push(`ss.status IN ('open','full')`);
     }
     if (date) {
-      // Load tenant timezone to do correct date comparison
       const tzRes = await db.query(
         `SELECT timezone FROM tenants WHERE id = $1 LIMIT 1`,
         [tenantId]
       );
       const tz = tzRes.rows[0]?.timezone || "UTC";
-      params.push(date, tz);
+      params.push(date);
+      params.push(tz);
       filters.push(
-        `DATE(ss.start_time AT TIME ZONE $${params.length - 1}) = $${params.length - 1}::date`
+        `DATE(ss.start_time AT TIME ZONE $${params.length}) = $${params.length - 1}::date`
       );
-      // re-push tz (already added above via two pushes)
     }
 
-    const whereClause = filters.length
-      ? `AND ${filters.join(" AND ")}`
-      : "";
+    const whereClause = filters.length ? `AND ${filters.join(" AND ")}` : "";
 
     params.push(Number(limit) || 50, Number(offset) || 0);
     const limitIdx  = params.length - 1;
@@ -93,7 +98,6 @@ router.get("/", async (req, res) => {
         ss.confirmed_count,
         ss.status,
         ss.created_at,
-        -- Participant summary (active bookings only)
         COUNT(b.id) FILTER (WHERE b.status IN ('pending','confirmed')) AS active_bookings,
         COUNT(b.id) FILTER (WHERE b.status = 'cancelled')              AS cancelled_bookings
       FROM service_sessions ss
@@ -117,9 +121,9 @@ router.get("/", async (req, res) => {
   }
 });
 
-// ─── GET /api/tenant/:tenantSlug/sessions/:id ─────────────────────────────────
+// ─── GET /api/tenant/:slug/sessions/:id ──────────────────────────────────────
 // Session detail with full participant booking list.
-router.get("/:id", async (req, res) => {
+router.get("/:slug/sessions/:id", ...baseMiddleware, async (req, res) => {
   try {
     const tenantId  = req.tenantId;
     const sessionId = Number(req.params.id);
@@ -178,65 +182,69 @@ router.get("/:id", async (req, res) => {
   }
 });
 
-// ─── POST /api/tenant/:tenantSlug/sessions/:id/cancel ─────────────────────────
+// ─── POST /api/tenant/:slug/sessions/:id/cancel ───────────────────────────────
 // Cancel the session and all its active bookings.
-// Decrements nothing — all bookings are cancelled, session goes to 'cancelled'.
-router.post("/:id/cancel", requireAdminOrTenantRole("owner"), async (req, res) => {
-  try {
-    const tenantId  = req.tenantId;
-    const sessionId = Number(req.params.id);
-
-    if (!Number.isFinite(sessionId) || sessionId <= 0) {
-      return res.status(400).json({ error: "Invalid session id." });
-    }
-
-    const sessionRes = await db.query(
-      `SELECT id, status FROM service_sessions WHERE id = $1 AND tenant_id = $2 LIMIT 1`,
-      [sessionId, tenantId]
-    );
-
-    if (!sessionRes.rows.length) {
-      return res.status(404).json({ error: "Session not found." });
-    }
-    if (sessionRes.rows[0].status === "cancelled") {
-      return res.status(409).json({ error: "Session is already cancelled." });
-    }
-
-    const client = await db.connect();
+router.post(
+  "/:slug/sessions/:id/cancel",
+  requireGoogleAuth,
+  injectTenantSlug,
+  requireTenant,
+  requireAdminOrTenantRole("owner"),
+  async (req, res) => {
     try {
-      await client.query("BEGIN");
+      const tenantId  = req.tenantId;
+      const sessionId = Number(req.params.id);
 
-      // Cancel all active bookings in this session
-      await client.query(
-        `UPDATE bookings
-         SET status = 'cancelled'
-         WHERE session_id = $1
-           AND status IN ('pending', 'confirmed')
-           AND deleted_at IS NULL`,
-        [sessionId]
+      if (!Number.isFinite(sessionId) || sessionId <= 0) {
+        return res.status(400).json({ error: "Invalid session id." });
+      }
+
+      const sessionRes = await db.query(
+        `SELECT id, status FROM service_sessions WHERE id = $1 AND tenant_id = $2 LIMIT 1`,
+        [sessionId, tenantId]
       );
 
-      // Cancel the session itself
-      await client.query(
-        `UPDATE service_sessions
-         SET status = 'cancelled', confirmed_count = 0
-         WHERE id = $1`,
-        [sessionId]
-      );
+      if (!sessionRes.rows.length) {
+        return res.status(404).json({ error: "Session not found." });
+      }
+      if (sessionRes.rows[0].status === "cancelled") {
+        return res.status(409).json({ error: "Session is already cancelled." });
+      }
 
-      await client.query("COMMIT");
+      const client = await db.connect();
+      try {
+        await client.query("BEGIN");
+
+        await client.query(
+          `UPDATE bookings
+           SET status = 'cancelled'
+           WHERE session_id = $1
+             AND status IN ('pending', 'confirmed')
+             AND deleted_at IS NULL`,
+          [sessionId]
+        );
+
+        await client.query(
+          `UPDATE service_sessions
+           SET status = 'cancelled', confirmed_count = 0
+           WHERE id = $1`,
+          [sessionId]
+        );
+
+        await client.query("COMMIT");
+      } catch (err) {
+        await client.query("ROLLBACK");
+        throw err;
+      } finally {
+        client.release();
+      }
+
+      return res.json({ success: true, sessionId });
     } catch (err) {
-      await client.query("ROLLBACK");
-      throw err;
-    } finally {
-      client.release();
+      console.error("sessions cancel error:", err);
+      return res.status(500).json({ error: "Failed to cancel session." });
     }
-
-    return res.json({ success: true, sessionId });
-  } catch (err) {
-    console.error("sessions cancel error:", err);
-    return res.status(500).json({ error: "Failed to cancel session." });
   }
-});
+);
 
 module.exports = router;
