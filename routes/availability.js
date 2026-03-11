@@ -596,8 +596,9 @@ if (availabilityBasis === "none") {
     const basisIdx = p++;
     const resourceIdx = p++;
     const staffIdx = p++;
+    const serviceIdIdx = p++;
 
-    params.push(tenantId, stepMin, availabilityBasis, resourceId ?? null, staffId ?? null);
+    params.push(tenantId, stepMin, availabilityBasis, resourceId ?? null, staffId ?? null, serviceId ?? null);
 
     q = `
       WITH working_blocks(start_local, end_local) AS (
@@ -618,12 +619,30 @@ if (availabilityBasis === "none") {
         to_char(slot_start AT TIME ZONE $${tzIdx}, 'HH24:MI') AS time,
         COUNT(b.*) FILTER (WHERE $${basisIdx} IN ('resource','both') AND b.resource_id = $${resourceIdx})::int AS overlaps_resource,
         COUNT(b.*) FILTER (WHERE $${basisIdx} IN ('staff','both') AND b.staff_id = $${staffIdx})::int AS overlaps_staff,
-        COUNT(tb.*)::int AS blackout_hits
+        COUNT(tb.*)::int AS blackout_hits,
+        -- Session-aware columns (parallel services)
+        MAX(ss.confirmed_count) FILTER (WHERE ss.resource_id = $${resourceIdx}) AS session_confirmed,
+        MAX(ss.max_capacity)    FILTER (WHERE ss.resource_id = $${resourceIdx}) AS session_capacity,
+        MAX(ss.id)              FILTER (WHERE ss.resource_id = $${resourceIdx}) AS session_id,
+        MAX(ss.status)          FILTER (WHERE ss.resource_id = $${resourceIdx}) AS session_status,
+        -- Count bookings from OTHER services on same resource (blocks parallel service)
+        COUNT(b.*) FILTER (
+          WHERE $${basisIdx} IN ('resource','both')
+            AND b.resource_id = $${resourceIdx}
+            AND b.service_id <> $${serviceIdIdx}
+        )::int AS overlaps_other_service
       FROM slots
       LEFT JOIN bookings b
         ON b.tenant_id = $${tenantIdIdx}
        AND b.status IN ('pending','confirmed')
        AND b.booking_range && tstzrange(slot_start, slot_end, '[)')
+       AND b.deleted_at IS NULL
+      LEFT JOIN service_sessions ss
+        ON ss.tenant_id  = $${tenantIdIdx}
+       AND ss.resource_id = $${resourceIdx}
+       AND ss.service_id  = $${serviceIdIdx}
+       AND ss.status <> 'cancelled'
+       AND tstzrange(ss.start_time, ss.start_time + make_interval(mins => ss.duration_minutes), '[)') && tstzrange(slot_start, slot_end, '[)')
       LEFT JOIN tenant_blackouts tb
         ON tb.tenant_id = $${tenantIdIdx}
        AND tb.is_active = TRUE
@@ -650,12 +669,28 @@ if (availabilityBasis === "none") {
         to_char(slot_start AT TIME ZONE $4, 'HH24:MI') AS time,
         COUNT(b.*) FILTER (WHERE $6 IN ('resource','both') AND b.resource_id = $7)::int AS overlaps_resource,
         COUNT(b.*) FILTER (WHERE $6 IN ('staff','both') AND b.staff_id = $8)::int AS overlaps_staff,
-        COUNT(tb.*)::int AS blackout_hits
+        COUNT(tb.*)::int AS blackout_hits,
+        MAX(ss.confirmed_count) FILTER (WHERE ss.resource_id = $7) AS session_confirmed,
+        MAX(ss.max_capacity)    FILTER (WHERE ss.resource_id = $7) AS session_capacity,
+        MAX(ss.id)              FILTER (WHERE ss.resource_id = $7) AS session_id,
+        MAX(ss.status)          FILTER (WHERE ss.resource_id = $7) AS session_status,
+        COUNT(b.*) FILTER (
+          WHERE $6 IN ('resource','both')
+            AND b.resource_id = $7
+            AND b.service_id <> $9
+        )::int AS overlaps_other_service
       FROM slots
       LEFT JOIN bookings b
         ON b.tenant_id = $3
        AND b.status IN ('pending','confirmed')
        AND b.booking_range && tstzrange(slot_start, slot_end, '[)')
+       AND b.deleted_at IS NULL
+      LEFT JOIN service_sessions ss
+        ON ss.tenant_id   = $3
+       AND ss.resource_id = $7
+       AND ss.service_id  = $9
+       AND ss.status <> 'cancelled'
+       AND tstzrange(ss.start_time, ss.start_time + make_interval(mins => ss.duration_minutes), '[)') && tstzrange(slot_start, slot_end, '[)')
       LEFT JOIN tenant_blackouts tb
         ON tb.tenant_id = $3
        AND tb.is_active = TRUE
@@ -675,6 +710,7 @@ if (availabilityBasis === "none") {
       availabilityBasis,
       resourceId ?? null,
       staffId ?? null,
+      serviceId ?? null,
     ];
   }
 
@@ -699,9 +735,28 @@ if (availabilityBasis === "none") {
     const overlapsResource = Number(row.overlaps_resource ?? 0);
     const overlapsStaff = Number(row.overlaps_staff ?? 0);
     const blackoutHits = Number(row.blackout_hits ?? 0);
+    const overlapsOtherService = Number(row.overlaps_other_service ?? 0);
+
+    // Session data (populated for parallel services when a session already exists)
+    const sessionConfirmed  = row.session_confirmed  != null ? Number(row.session_confirmed)  : null;
+    const sessionCapacity   = row.session_capacity   != null ? Number(row.session_capacity)   : null;
+    const sessionId         = row.session_id         != null ? Number(row.session_id)         : null;
+    const sessionStatus     = row.session_status     ?? null;
+    const isParallelService = maxParallel > 1;
 
     let isAvailable = true;
-    if (availabilityBasis === "resource") {
+
+    if (isParallelService && availabilityBasis === "resource") {
+      // Parallel service: blocked if another service owns the resource this window
+      if (overlapsOtherService > 0) {
+        isAvailable = false;
+      } else if (sessionStatus === "full") {
+        isAvailable = false;
+      } else if (sessionConfirmed !== null && sessionCapacity !== null) {
+        isAvailable = sessionConfirmed < sessionCapacity;
+      }
+      // else: no session exists yet → slot is open
+    } else if (availabilityBasis === "resource") {
       isAvailable = overlapsResource < maxParallel;
     } else if (availabilityBasis === "staff") {
       isAvailable = overlapsStaff < maxParallel;
@@ -713,6 +768,12 @@ if (availabilityBasis === "none") {
       ? Math.max(overlapsResource, overlapsStaff)
       : (availabilityBasis === "staff" ? overlapsStaff : overlapsResource);
 
+    const spotsRemaining = isParallelService
+      ? (sessionConfirmed !== null && sessionCapacity !== null
+          ? sessionCapacity - sessionConfirmed
+          : maxParallel)
+      : null;
+
     const slotObj = {
       time: startHHMM,
       label: startHHMM,
@@ -723,6 +784,10 @@ if (availabilityBasis === "none") {
       overlaps_staff: overlapsStaff,
       capacity: maxParallel,
       blackout_hits: blackoutHits,
+      // Session fields (null for regular services)
+      session_id: sessionId,
+      spots_remaining: spotsRemaining,
+      total_capacity: isParallelService ? maxParallel : null,
     };
 
     allSlots.push(slotObj);

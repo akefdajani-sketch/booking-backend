@@ -10,7 +10,7 @@ const { requireTenant } = require("../middleware/requireTenant");
 const { ensureBookingMoneyColumns } = require("../utils/ensureBookingMoneyColumns");
 const { ensureBookingRateColumns } = require("../utils/ensureBookingRateColumns");
 const { computeRateForBookingLike } = require("../utils/ratesEngine");
-const { checkConflicts, loadJoinedBookingById } = require("../utils/bookings");
+const { checkConflicts, loadJoinedBookingById, findOrCreateSession, incrementSessionCount, decrementSessionCount } = require("../utils/bookings");
 
 function shouldUseCustomerHistory(req) {
   // Frontend booking page currently calls /api/bookings with customerId/customerEmail.
@@ -915,7 +915,7 @@ router.delete("/:id", requireTenant, requireAdminOrTenantRole("staff"), async (r
     }
 
     const curRes = await db.query(
-      `SELECT status FROM bookings WHERE id=$1 AND tenant_id=$2 AND deleted_at IS NULL LIMIT 1`, // PR-19
+      `SELECT status, session_id FROM bookings WHERE id=$1 AND tenant_id=$2 AND deleted_at IS NULL LIMIT 1`, // PR-19
       [bookingId, tenantId]
     );
     if (!curRes.rows.length) {
@@ -923,6 +923,7 @@ router.delete("/:id", requireTenant, requireAdminOrTenantRole("staff"), async (r
     }
 
     const currentStatus = String(curRes.rows[0].status || "").toLowerCase();
+    const bookingSessionId = curRes.rows[0].session_id || null;
     const nextStatus = "cancelled";
 
     if (!canTransitionStatus(currentStatus, nextStatus)) {
@@ -938,6 +939,11 @@ router.delete("/:id", requireTenant, requireAdminOrTenantRole("staff"), async (r
          WHERE id=$1 AND tenant_id=$2`,
         [bookingId, tenantId]
       );
+
+      // If this was a parallel booking, decrement the session confirmed_count
+      if (bookingSessionId) {
+        await decrementSessionCount({ sessionId: bookingSessionId });
+      }
     }
 
     await bumpTenantBookingChange(tenantId);
@@ -1094,6 +1100,7 @@ router.post("/", requireGoogleAuth, requireTenant, async (req, res) => {
     let requiresConfirmation = false;
     let serviceDurationMinutes = null;
     let servicePriceAmount = null;
+    let serviceMaxParallel = 1;
     let tenantCurrencyCode = null;
 
     if (resolvedServiceId) {
@@ -1141,7 +1148,7 @@ router.post("/", requireGoogleAuth, requireTenant, async (req, res) => {
       }
 
       const sRes = await db.query(
-        `SELECT id, tenant_id, duration_minutes, ${priceExpr}${hasReqConf ? ", COALESCE(requires_confirmation,false) AS requires_confirmation" : ""}
+        `SELECT id, tenant_id, duration_minutes, max_parallel_bookings, ${priceExpr}${hasReqConf ? ", COALESCE(requires_confirmation,false) AS requires_confirmation" : ""}
          FROM services WHERE id=$1 AND tenant_id=$2 LIMIT 1`,
         [resolvedServiceId, resolvedTenantId]
       );
@@ -1160,6 +1167,7 @@ router.post("/", requireGoogleAuth, requireTenant, async (req, res) => {
       }
 
       requiresConfirmation = hasReqConf ? !!sRes.rows[0].requires_confirmation : true;
+      serviceMaxParallel = Number(sRes.rows[0].max_parallel_bookings) || 1;
     } else {
       duration = duration || 60;
     }
@@ -1212,6 +1220,8 @@ router.post("/", requireGoogleAuth, requireTenant, async (req, res) => {
       resourceId: resource_id,
       startTime: start.toISOString(),
       durationMinutes: duration,
+      serviceId: resolvedServiceId,
+      maxParallel: serviceMaxParallel,
     });
 
     if (conflicts.conflict) {
@@ -1502,8 +1512,34 @@ const charge_amount = (finalCustomerMembershipId || prepaidApplied) ? 0 : price_
       let bookingId;
       let created = true;
       try {
+        // ── Session handling for parallel services ──────────────────────────────
+        // If the service has max_parallel_bookings > 1, find or create a session
+        // and check capacity. This happens inside the transaction so the
+        // confirmed_count increment and booking INSERT are atomic.
+        let resolvedSessionId = null;
+        if (serviceMaxParallel > 1 && resolvedServiceId) {
+          const sessionResult = await findOrCreateSession({
+            client,
+            tenantId: resolvedTenantId,
+            serviceId: resolvedServiceId,
+            resourceId: resource_id,
+            staffId: staff_id,
+            startTimeIso: start.toISOString(),
+            durationMinutes: duration,
+            maxCapacity: serviceMaxParallel,
+          });
+          if (sessionResult.full) {
+            await client.query("ROLLBACK");
+            return res.status(409).json({
+              error: "This session is full. No spots remaining.",
+              spotsRemaining: 0,
+            });
+          }
+          resolvedSessionId = sessionResult.sessionId;
+        }
+
         const baseCols = `tenant_id, service_id, staff_id, resource_id, start_time, duration_minutes,
-             customer_id, customer_name, customer_phone, customer_email, status, idempotency_key, customer_membership_id`;
+             customer_id, customer_name, customer_phone, customer_email, status, idempotency_key, customer_membership_id, session_id`;
 
         const baseVals = [
             resolvedTenantId,
@@ -1519,6 +1555,7 @@ const charge_amount = (finalCustomerMembershipId || prepaidApplied) ? 0 : price_
             initialStatus,
             idemKey,
             finalCustomerMembershipId,
+            resolvedSessionId,
         ];
 
         let insertSql;
@@ -1530,8 +1567,8 @@ const charge_amount = (finalCustomerMembershipId || prepaidApplied) ? 0 : price_
             (${baseCols}, price_amount, charge_amount, currency_code, applied_rate_rule_id, applied_rate_snapshot)
           VALUES
             ($1, $2, $3, $4, $5, $6,
-             $7, $8, $9, $10, $11, $12, $13,
-             $14, $15, $16, $17, $18)
+             $7, $8, $9, $10, $11, $12, $13, $14,
+             $15, $16, $17, $18, $19)
           RETURNING id;
           `;
           insertParams = [...baseVals, price_amount, charge_amount, tenantCurrencyCode, applied_rate_rule_id, applied_rate_snapshot];
@@ -1541,8 +1578,8 @@ const charge_amount = (finalCustomerMembershipId || prepaidApplied) ? 0 : price_
             (${baseCols}, price_amount, charge_amount, currency_code)
           VALUES
             ($1, $2, $3, $4, $5, $6,
-             $7, $8, $9, $10, $11, $12, $13,
-             $14, $15, $16)
+             $7, $8, $9, $10, $11, $12, $13, $14,
+             $15, $16, $17)
           RETURNING id;
           `;
           insertParams = [...baseVals, price_amount, charge_amount, tenantCurrencyCode];
@@ -1554,13 +1591,22 @@ const charge_amount = (finalCustomerMembershipId || prepaidApplied) ? 0 : price_
             (${baseCols})
           VALUES
             ($1, $2, $3, $4, $5, $6,
-             $7, $8, $9, $10, $11, $12, $13)
+             $7, $8, $9, $10, $11, $12, $13, $14)
           RETURNING id;
           `;
         }
 
         const insert = await client.query(insertSql, insertParams);
         bookingId = insert.rows[0].id;
+
+        // Increment session confirmed_count atomically with the booking INSERT
+        if (resolvedSessionId) {
+          await incrementSessionCount({
+            client,
+            sessionId: resolvedSessionId,
+            maxCapacity: serviceMaxParallel,
+          });
+        }
       } catch (err) {
         if (idemKey && err && err.code === "23505") {
           const existing = await client.query(
