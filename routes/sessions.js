@@ -181,7 +181,7 @@ router.get("/:id", async (req, res) => {
 // ─── POST /api/tenant/:tenantSlug/sessions/:id/cancel ─────────────────────────
 // Cancel the session and all its active bookings.
 // Decrements nothing — all bookings are cancelled, session goes to 'cancelled'.
-router.post("/:id/cancel", requireAdminOrTenantRole("admin"), async (req, res) => {
+router.post("/:id/cancel", requireAdminOrTenantRole("owner"), async (req, res) => {
   try {
     const tenantId  = req.tenantId;
     const sessionId = Number(req.params.id);
