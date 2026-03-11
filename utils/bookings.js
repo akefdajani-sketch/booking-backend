@@ -1,21 +1,136 @@
 // utils/bookings.js
 const { pool } = require("../db");
 const db = pool;
+
+// ─── findOrCreateSession ──────────────────────────────────────────────────────
 /**
- * Returns true if two time ranges overlap.
- * We rely on SQL overlap checks instead of doing it in JS.
+ * For services with max_parallel_bookings > 1, find an existing OPEN session
+ * for the given slot or create a new one atomically.
  *
- * Conflicts are checked within the same tenant and (optionally) for staff/resource.
- * If staffId/resourceId are not provided, those constraints are not applied.
+ * Returns { sessionId, spotsRemaining, full: false } on success.
+ * Returns { sessionId: null, full: true } when the session is at capacity.
  *
- * @param {object} args
- * @param {number} args.tenantId
- * @param {Date|string} args.startTime        - booking start in UTC (Date or ISO string)
- * @param {number} args.durationMinutes
- * @param {number|null|undefined} args.staffId
- * @param {number|null|undefined} args.resourceId
- * @param {number|null|undefined} args.excludeBookingId  - ignore this booking id (used for updates)
- * @returns {Promise<{ conflict: boolean, conflicts: any[] }>}
+ * Must be called inside a DB client transaction (pass client, not pool).
+ */
+async function findOrCreateSession({
+  client,
+  tenantId,
+  serviceId,
+  resourceId,
+  staffId,
+  startTimeIso,
+  durationMinutes,
+  maxCapacity,
+}) {
+  const tId   = Number(tenantId);
+  const svcId = Number(serviceId);
+  const resId = resourceId != null && resourceId !== "" ? Number(resourceId) : null;
+  const stfId = staffId    != null && staffId    !== "" ? Number(staffId)    : null;
+  const cap   = Number(maxCapacity) || 1;
+
+  // Lock the row so concurrent requests serialise here
+  const findRes = await client.query(
+    `SELECT id, confirmed_count, max_capacity, status
+     FROM service_sessions
+     WHERE tenant_id   = $1
+       AND service_id  = $2
+       AND resource_id IS NOT DISTINCT FROM $3
+       AND start_time  = $4::timestamptz
+     FOR UPDATE`,
+    [tId, svcId, resId, startTimeIso]
+  );
+
+  if (findRes.rows.length > 0) {
+    const session = findRes.rows[0];
+    if (session.status === "full" || session.status === "cancelled") {
+      return { sessionId: null, spotsRemaining: 0, full: true };
+    }
+    const spotsRemaining = session.max_capacity - session.confirmed_count;
+    if (spotsRemaining <= 0) {
+      await client.query(
+        `UPDATE service_sessions SET status = 'full' WHERE id = $1`,
+        [session.id]
+      );
+      return { sessionId: null, spotsRemaining: 0, full: true };
+    }
+    return { sessionId: session.id, spotsRemaining, full: false };
+  }
+
+  // No session yet — create one atomically
+  const insertRes = await client.query(
+    `INSERT INTO service_sessions
+       (tenant_id, service_id, resource_id, staff_id,
+        start_time, duration_minutes, max_capacity, confirmed_count, status)
+     VALUES ($1, $2, $3, $4, $5::timestamptz, $6, $7, 0, 'open')
+     ON CONFLICT ON CONSTRAINT uq_session_slot
+       DO UPDATE SET max_capacity = service_sessions.max_capacity
+     RETURNING id, confirmed_count, max_capacity, status`,
+    [tId, svcId, resId, stfId, startTimeIso, durationMinutes, cap]
+  );
+
+  const newSession = insertRes.rows[0];
+  if (newSession.status === "full" || newSession.confirmed_count >= newSession.max_capacity) {
+    return { sessionId: null, spotsRemaining: 0, full: true };
+  }
+
+  return {
+    sessionId: newSession.id,
+    spotsRemaining: newSession.max_capacity - newSession.confirmed_count,
+    full: false,
+  };
+}
+
+// ─── incrementSessionCount ────────────────────────────────────────────────────
+/**
+ * Increments confirmed_count after a booking is inserted.
+ * Sets status='full' when capacity is reached.
+ * Must be called inside the same transaction as the booking INSERT.
+ */
+async function incrementSessionCount({ client, sessionId, maxCapacity }) {
+  await client.query(
+    `UPDATE service_sessions
+     SET
+       confirmed_count = confirmed_count + 1,
+       status = CASE
+         WHEN confirmed_count + 1 >= max_capacity THEN 'full'
+         ELSE 'open'
+       END
+     WHERE id = $1`,
+    [sessionId]
+  );
+}
+
+// ─── decrementSessionCount ────────────────────────────────────────────────────
+/**
+ * Decrements confirmed_count when a parallel booking is cancelled.
+ * Re-opens a 'full' session. Sets 'cancelled' when it hits 0.
+ */
+async function decrementSessionCount({ sessionId }) {
+  await db.query(
+    `UPDATE service_sessions
+     SET
+       confirmed_count = GREATEST(confirmed_count - 1, 0),
+       status = CASE
+         WHEN status = 'cancelled' THEN 'cancelled'
+         WHEN GREATEST(confirmed_count - 1, 0) <= 0 THEN 'cancelled'
+         ELSE 'open'
+       END
+     WHERE id = $1`,
+    [sessionId]
+  );
+}
+
+// ─── checkConflicts ───────────────────────────────────────────────────────────
+/**
+ * Session-aware conflict checker.
+ *
+ * Parallel service (maxParallel > 1):
+ *   - Any booking OR session for a DIFFERENT service on same resource → conflict
+ *   - Same-service capacity handled by findOrCreateSession, not here
+ *
+ * Regular service (maxParallel = 1):
+ *   - Original logic fully preserved
+ *   - Also blocked if any parallel session owns the resource
  */
 async function checkConflicts({
   tenantId,
@@ -24,6 +139,8 @@ async function checkConflicts({
   staffId,
   resourceId,
   excludeBookingId,
+  serviceId   = null,
+  maxParallel = 1,
 }) {
   const tId = Number(tenantId);
   if (!tId) throw new Error("checkConflicts: tenantId is required");
@@ -34,36 +151,107 @@ async function checkConflicts({
   const startIso =
     startTime instanceof Date ? startTime.toISOString() : new Date(startTime).toISOString();
 
-  const staff = staffId != null && staffId !== "" ? Number(staffId) : null;
-  const resource = resourceId != null && resourceId !== "" ? Number(resourceId) : null;
-  const excludeId =
-    excludeBookingId != null && excludeBookingId !== "" ? Number(excludeBookingId) : null;
+  const staff     = staffId        != null && staffId        !== "" ? Number(staffId)        : null;
+  const resource  = resourceId     != null && resourceId     !== "" ? Number(resourceId)     : null;
+  const excludeId = excludeBookingId != null && excludeBookingId !== "" ? Number(excludeBookingId) : null;
+  const svcId     = serviceId      != null && serviceId      !== "" ? Number(serviceId)      : null;
+  const isParallel = Number(maxParallel) > 1;
 
-  // We treat these statuses as "blocking time".
-  // If your app blocks on more statuses, add them here.
+  // ── Parallel service path ──────────────────────────────────────────────────
+  if (isParallel && resource && svcId) {
+    const params = [tId, startIso, dur, ["pending", "confirmed"], resource, svcId];
+    let excludeClause = "";
+    if (excludeId) {
+      params.push(excludeId);
+      excludeClause = `AND b.id <> $${params.length}`;
+    }
+
+    const bookingConflict = await db.query(
+      `SELECT b.id, b.start_time, b.duration_minutes, b.status, b.service_id, b.resource_id
+       FROM bookings b
+       WHERE b.tenant_id   = $1
+         AND b.status      = ANY($4)
+         AND b.resource_id = $5
+         AND b.service_id  <> $6
+         AND b.start_time  < ($2::timestamptz + ($3::int || ' minutes')::interval)
+         AND (b.start_time + (b.duration_minutes::int || ' minutes')::interval) > $2::timestamptz
+         AND b.deleted_at IS NULL
+         ${excludeClause}
+       LIMIT 5`,
+      params
+    );
+
+    if (bookingConflict.rows.length > 0) {
+      return {
+        conflict: true,
+        conflicts: bookingConflict.rows,
+        reason: "resource_owned_by_different_service",
+      };
+    }
+
+    const sessionConflict = await db.query(
+      `SELECT ss.id, ss.start_time, ss.duration_minutes, ss.service_id, ss.resource_id
+       FROM service_sessions ss
+       WHERE ss.tenant_id   = $1
+         AND ss.resource_id = $2
+         AND ss.service_id  <> $3
+         AND ss.status      <> 'cancelled'
+         AND ss.start_time  < ($4::timestamptz + ($5::int || ' minutes')::interval)
+         AND (ss.start_time + (ss.duration_minutes::int || ' minutes')::interval) > $4::timestamptz
+       LIMIT 5`,
+      [tId, resource, svcId, startIso, dur]
+    );
+
+    if (sessionConflict.rows.length > 0) {
+      return {
+        conflict: true,
+        conflicts: sessionConflict.rows,
+        reason: "resource_owned_by_session_of_different_service",
+      };
+    }
+
+    return { conflict: false, conflicts: [] };
+  }
+
+  // ── Regular service path (original logic, fully preserved) ────────────────
+
+  // Also block if a parallel session owns this resource in this window
+  if (resource) {
+    const sessionBlock = await db.query(
+      `SELECT ss.id, ss.start_time, ss.service_id
+       FROM service_sessions ss
+       WHERE ss.tenant_id   = $1
+         AND ss.resource_id = $2
+         AND ss.status      <> 'cancelled'
+         AND ss.start_time  < ($3::timestamptz + ($4::int || ' minutes')::interval)
+         AND (ss.start_time + (ss.duration_minutes::int || ' minutes')::interval) > $3::timestamptz
+       LIMIT 5`,
+      [tId, resource, startIso, dur]
+    );
+    if (sessionBlock.rows.length > 0) {
+      return {
+        conflict: true,
+        conflicts: sessionBlock.rows,
+        reason: "resource_owned_by_parallel_session",
+      };
+    }
+  }
+
   const blockingStatuses = ["pending", "confirmed"];
-
-  // Overlap condition:
-  // existing.start < newEnd AND existing.end > newStart
-  //
-  // newEnd = newStart + interval 'X minutes'
   const params = [tId, startIso, dur, blockingStatuses];
-  let idx = params.length + 1;
 
   let where = `
     b.tenant_id = $1
     AND b.status = ANY($4)
     AND b.start_time < ($2::timestamptz + ($3::int || ' minutes')::interval)
     AND (b.start_time + (b.duration_minutes::int || ' minutes')::interval) > $2::timestamptz
+    AND b.deleted_at IS NULL
   `;
 
   if (excludeId) {
     params.push(excludeId);
     where += ` AND b.id <> $${params.length}`;
   }
-
-  // If a service requires staff/resource, your create route will pass staff/resource.
-  // We only enforce conflict check when that id exists.
   if (staff) {
     params.push(staff);
     where += ` AND b.staff_id = $${params.length}`;
@@ -74,14 +262,7 @@ async function checkConflicts({
   }
 
   const q = `
-    SELECT
-      b.id,
-      b.start_time,
-      b.duration_minutes,
-      b.status,
-      b.service_id,
-      b.staff_id,
-      b.resource_id
+    SELECT b.id, b.start_time, b.duration_minutes, b.status, b.service_id, b.staff_id, b.resource_id
     FROM bookings b
     WHERE ${where}
     ORDER BY b.start_time ASC
@@ -94,19 +275,6 @@ async function checkConflicts({
   return { conflict: conflicts.length > 0, conflicts };
 }
 
-/**
- * Loads a booking by id and returns a "joined" row used by the frontend:
- * - service_name
- * - staff_name
- * - resource_name
- * - tenant_slug / tenant_name (optional but helpful)
- *
- * IMPORTANT: column names here match your newer frontend types:
- * start_time, duration_minutes, status, etc.
- *
- * @param {number} bookingId
- * @returns {Promise<object|null>}
- */
 async function loadJoinedBookingById(bookingId, tenantId) {
   const id = Number(bookingId);
   if (!id) throw new Error("loadJoinedBookingById: bookingId is required");
@@ -213,5 +381,8 @@ async function loadJoinedBookingById(bookingId, tenantId) {
 
 module.exports = {
   checkConflicts,
+  findOrCreateSession,
+  incrementSessionCount,
+  decrementSessionCount,
   loadJoinedBookingById,
 };
