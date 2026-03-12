@@ -247,6 +247,8 @@ async function computeRateForBookingLike({
   const signatures = slotParts.map((parts) => {
     const ids = rules
       .filter((r) => ruleMatchesLocalInstant(r, parts))
+      // ✅ Only include rules that could apply to at least one slot unit
+      .filter((r) => matchesDuration(slotUnit, r.min_duration_mins, r.max_duration_mins))
       .map((r) => Number(r.id))
       .sort((a, b) => a - b);
     return ids.join(",");
