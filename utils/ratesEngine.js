@@ -114,25 +114,33 @@ function isWithinTimeWindow(startTimeStr, timeStart, timeEnd) {
   const e = parseTimeToMinutes(timeEnd);
 
   // If parsing fails, fall back to string compare (legacy behavior).
+  // IMPORTANT: end is treated as exclusive to avoid overlap at boundaries (e.g. Off-Peak ending at 16:00).
   if (t == null || (timeStart && s == null) || (timeEnd && e == null)) {
-    if (timeStart && timeEnd) {
-      if (String(timeEnd) < String(timeStart)) {
-        return String(startTimeStr) >= String(timeStart) || String(startTimeStr) <= String(timeEnd);
+    const st = String(startTimeStr);
+    const ss = timeStart != null ? String(timeStart) : null;
+    const se = timeEnd != null ? String(timeEnd) : null;
+
+    if (ss && se) {
+      if (se < ss) {
+        // Wraps midnight: [start, 24h) U [0, end)
+        return st >= ss || st < se;
       }
-      return String(startTimeStr) >= String(timeStart) && String(startTimeStr) <= String(timeEnd);
+      return st >= ss && st < se;
     }
-    if (timeStart) return String(startTimeStr) >= String(timeStart);
-    if (timeEnd) return String(startTimeStr) <= String(timeEnd);
+    if (ss) return st >= ss;
+    if (se) return st < se;
     return true;
   }
 
   if (s != null && e != null) {
     // Handle windows that wrap midnight (e.g. 22:00 → 02:00).
-    if (e < s) return t >= s || t <= e;
-    return t >= s && t <= e;
+    // Treat end as exclusive: [start, 24h) U [0, end)
+    if (e < s) return t >= s || t < e;
+    // Normal window: [start, end)
+    return t >= s && t < e;
   }
   if (s != null) return t >= s;
-  if (e != null) return t <= e;
+  if (e != null) return t < e;
   return true;
 }
 
