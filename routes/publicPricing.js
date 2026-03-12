@@ -169,4 +169,113 @@ router.post("/:slug/pricing/quote", injectTenantSlug, requireTenant, async (req,
   }
 });
 
+
+// ---------------------------------------------------------------------------
+// Public Packages Catalog (Prepaid Products)
+// GET /api/public/:slug/packages
+// Returns active prepaid products that are customer-visible.
+// ---------------------------------------------------------------------------
+router.get("/:slug/packages", injectTenantSlug, requireTenant, async (req, res) => {
+  try {
+    const tenantId = Number(req.tenantId);
+    if (!tenantId) return res.status(400).json({ error: "Missing tenant" });
+
+    const schemaCheck = await db.query(
+      `SELECT to_regclass('public.prepaid_products') AS prod`
+    );
+    const ready = !!schemaCheck.rows?.[0]?.prod;
+    if (!ready) return res.json({ items: [] });
+
+    // customer_visible is optional across schema versions; if absent, treat as visible.
+    const colsRes = await db.query(
+      `SELECT column_name
+         FROM information_schema.columns
+        WHERE table_schema='public' AND table_name='prepaid_products'`
+    );
+    const cols = new Set(colsRes.rows.map((r) => r.column_name));
+    const visCol = cols.has("customer_visible")
+      ? "customer_visible"
+      : cols.has("is_customer_visible")
+        ? "is_customer_visible"
+        : null;
+
+    const visClause = visCol ? `AND COALESCE(${visCol}, true) = true` : "";
+
+    const q = await db.query(
+      `
+      SELECT
+        id,
+        tenant_id,
+        name,
+        description,
+        product_type,
+        price,
+        currency,
+        validity_unit,
+        validity_value,
+        credit_amount,
+        session_count,
+        minutes_total,
+        eligible_service_ids,
+        rules,
+        is_active
+        ${visCol ? `, ${visCol} AS customer_visible` : ""}
+      FROM prepaid_products
+      WHERE tenant_id=$1
+        AND COALESCE(is_active, true)=true
+        ${visClause}
+      ORDER BY updated_at DESC, id DESC
+      `,
+      [tenantId]
+    );
+
+    const items = q.rows.map((p) => {
+      const unit_type =
+        Number(p?.minutes_total ?? 0) > 0
+          ? "minute"
+          : Number(p?.credit_amount ?? 0) > 0
+            ? "credit"
+            : "package_use";
+      const included_quantity =
+        Number(p?.minutes_total ?? 0) > 0
+          ? Number(p.minutes_total)
+          : Number(p?.credit_amount ?? 0) > 0
+            ? Number(p.credit_amount)
+            : Number(p?.session_count ?? 0) > 0
+              ? Number(p.session_count)
+              : 1;
+
+      const validity_days =
+        String(p?.validity_unit || "").toLowerCase() === "days"
+          ? Number(p?.validity_value ?? 0) || 0
+          : String(p?.validity_unit || "").toLowerCase() === "weeks"
+            ? (Number(p?.validity_value ?? 0) || 0) * 7
+            : String(p?.validity_unit || "").toLowerCase() === "months"
+              ? (Number(p?.validity_value ?? 0) || 0) * 30
+              : null;
+
+      return {
+        id: p.id,
+        tenant_id: p.tenant_id,
+        name: p.name,
+        description: p.description ?? null,
+        product_type: p.product_type || "service_package",
+        unit_type,
+        price_amount: p.price == null ? null : Number(p.price),
+        currency: p.currency ?? null,
+        validity_days,
+        included_quantity,
+        eligible_service_ids: Array.isArray(p.eligible_service_ids) ? p.eligible_service_ids : [],
+        active: !!p.is_active,
+        customer_visible: visCol ? !!p.customer_visible : true,
+      };
+    });
+
+    return res.json({ items });
+  } catch (err) {
+    console.error("GET /public/:slug/packages error:", err);
+    return res.status(500).json({ error: "Failed to load packages." });
+  }
+});
+
 module.exports = router;
