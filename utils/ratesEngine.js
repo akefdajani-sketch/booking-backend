@@ -202,19 +202,33 @@ async function computeRateForBookingLike({
   start,
   durationMinutes,
   basePriceAmount,
-  serviceSlotMinutes,   // service base slot duration; used to scale Fixed rules
+  serviceSlotMinutes,
 }) {
   const base = basePriceAmount == null ? null : round2(basePriceAmount);
 
-  const resolvedSlotMinutes =
-    Number(serviceSlotMinutes) > 0 ? Number(serviceSlotMinutes) : Number(durationMinutes);
+  const slotUnit = Number(serviceSlotMinutes) > 0 ? Number(serviceSlotMinutes) : Number(durationMinutes) || 0;
+  const totalMins = Number(durationMinutes) || 0;
 
   const timezone = await loadTenantTimezone(tenantId);
   const rules = await loadRules({ tenantId, serviceId, staffId, resourceId });
 
-  function slotLocalParts(slotStart) {
-    return toLocalParts(slotStart, timezone);
+  if (!slotUnit || !totalMins) {
+    return {
+      base_price_amount: base,
+      adjusted_price_amount: base,
+      applied_rate_rule_id: null,
+      applied_rate_snapshot: {
+        computed_at: new Date().toISOString(),
+        timezone_used: timezone,
+        mode: "invalid_input",
+        inputs: { tenantId, serviceId, staffId, resourceId, start_time: start?.toISOString?.(), duration_minutes: totalMins, service_slot_minutes: slotUnit, base_price_amount: base },
+      },
+    };
   }
+
+  const slotCount = Math.max(1, Math.ceil(totalMins / slotUnit));
+  const slotStarts = Array.from({ length: slotCount }, (_, i) => new Date(start.getTime() + i * slotUnit * 60_000));
+  const slotParts = slotStarts.map((d) => toLocalParts(d, timezone));
 
   function ruleMatchesLocalInstant(rule, parts) {
     const { dateStr, timeStr, dow } = parts;
@@ -227,11 +241,15 @@ async function computeRateForBookingLike({
     return true;
   }
 
-  function pickWinnerFor(parts, durMins) {
+  function ruleWinnerForSegment(fromIdx, lenSlots) {
+    const segMins = lenSlots * slotUnit;
+
     const matches = rules
       .filter((r) => {
-        if (!ruleMatchesLocalInstant(r, parts)) return false;
-        if (!matchesDuration(durMins, r.min_duration_mins, r.max_duration_mins)) return false;
+        if (!matchesDuration(segMins, r.min_duration_mins, r.max_duration_mins)) return false;
+        for (let i = fromIdx; i < fromIdx + lenSlots; i += 1) {
+          if (!ruleMatchesLocalInstant(r, slotParts[i])) return false;
+        }
         return true;
       })
       .sort((a, b) => {
@@ -247,211 +265,111 @@ async function computeRateForBookingLike({
     return matches[0] || null;
   }
 
-  const slotUnit =
-    Number(resolvedSlotMinutes) > 0 ? Number(resolvedSlotMinutes) : Number(durationMinutes);
-  const totalMins = Number(durationMinutes) || 0;
-  const slotCount = slotUnit > 0 ? Math.max(1, Math.ceil(totalMins / slotUnit)) : 1;
-
-  const slotStarts = Array.from({ length: slotCount }, (_, i) => new Date(start.getTime() + i * slotUnit * 60_000));
-  const slotParts = slotStarts.map(slotLocalParts);
-
-  const signatures = slotParts.map((parts) => {
-    const ids = rules
-      .filter((r) => ruleMatchesLocalInstant(r, parts))
-      // ✅ Only include rules that could apply to at least one slot unit
-      .filter((r) => matchesDuration(slotUnit, r.min_duration_mins, r.max_duration_mins))
-      .map((r) => Number(r.id))
-      .sort((a, b) => a - b);
-    return ids.join(",");
-  });
-
-  const isSingleUniverse = signatures.every((s) => s === signatures[0]);
-
-  function computeSegment({ fromIdx, toIdx }) {
-    const segSlots = toIdx - fromIdx + 1;
-    const segDuration = segSlots * slotUnit;
-
-    const segBase =
-      base == null || !Number.isFinite(Number(base)) ? null : round2(Number(base) * (segDuration / totalMins));
-
-    const winner =
-      rules
-        .filter((r) => {
-          if (!matchesDuration(segDuration, r.min_duration_mins, r.max_duration_mins)) return false;
-          for (let i = fromIdx; i <= toIdx; i += 1) {
-            if (!ruleMatchesLocalInstant(r, slotParts[i])) return false;
-          }
-          return true;
-        })
-        .sort((a, b) => {
-          const pa = Number(a.priority || 0);
-          const pb = Number(b.priority || 0);
-          if (pb !== pa) return pb - pa;
-          const sa = specificityScore(a);
-          const sb = specificityScore(b);
-          if (sb !== sa) return sb - sa;
-          return Number(b.id) - Number(a.id);
-        })[0] || null;
-
-    if (winner) {
-      const applied = applyRule(segBase, winner, segDuration, slotUnit);
-      return { winner, applied, segBase, segDuration, segSlots, mode: "segment_rule" };
-    }
-
-    let sum = 0;
-    const perSlot = [];
-    for (let i = fromIdx; i <= toIdx; i += 1) {
-      const oneBase = segBase == null ? null : round2(Number(segBase) * (slotUnit / segDuration));
-      const oneWinner = pickWinnerFor(slotParts[i], slotUnit);
-      const oneApplied = oneWinner
-        ? applyRule(oneBase, oneWinner, slotUnit, slotUnit)
-        : { adjusted: oneBase, reason: "no_rule" };
-      sum += Number(oneApplied.adjusted || 0);
-      perSlot.push({
-        slot_start: slotStarts[i].toISOString(),
-        local_date: slotParts[i].dateStr,
-        local_time: slotParts[i].timeStr,
-        local_dow: slotParts[i].dow,
-        duration_minutes: slotUnit,
-        base_price_amount: oneBase,
-        rule_id: oneWinner ? oneWinner.id : null,
-        rule_name: oneWinner ? oneWinner.name : null,
-        adjusted_price_amount: oneApplied.adjusted,
-        reason: oneApplied.reason,
-      });
-    }
-
-    return {
-      winner: null,
-      applied: { adjusted: round2(sum), reason: "sum_of_slots" },
-      segBase,
-      segDuration,
-      segSlots,
-      perSlot,
-      mode: "sum_of_slots",
-    };
+  function baseForSegment(segMins) {
+    if (base == null || !Number.isFinite(Number(base)) || !Number.isFinite(totalMins) || totalMins <= 0) return null;
+    return round2(Number(base) * (segMins / totalMins));
   }
 
-  let winner = null;
-  let applied = null;
-  let snapshot = null;
+  // DP over slots; choose combination that yields the lowest total price among valid combinations.
+  const dp = Array(slotCount + 1).fill(Number.POSITIVE_INFINITY);
+  const next = Array(slotCount + 1).fill(null);
 
-  if (isSingleUniverse) {
-    const parts = slotParts[0];
-    winner = pickWinnerFor(parts, totalMins);
+  dp[slotCount] = 0;
 
-    applied = winner ? applyRule(base, winner, totalMins, slotUnit) : { adjusted: base, reason: "no_rule" };
+  for (let i = slotCount - 1; i >= 0; i -= 1) {
+    for (let len = 1; len <= slotCount - i; len += 1) {
+      const segMins = len * slotUnit;
 
-    snapshot = {
-      computed_at: new Date().toISOString(),
-      timezone_used: timezone,
-      mode: "single_rule",
-      inputs: {
-        service_id: serviceId || null,
-        staff_id: staffId || null,
-        resource_id: resourceId || null,
-        start_time: start.toISOString(),
-        local_date: parts.dateStr,
-        local_time: parts.timeStr,
-        local_dow: parts.dow,
-        duration_minutes: totalMins,
-        service_slot_minutes: slotUnit,
-        base_price_amount: base,
-      },
-      rule: winner
-        ? {
-            id: winner.id,
-            name: winner.name,
-            service_id: winner.service_id,
-            staff_id: winner.staff_id,
-            resource_id: winner.resource_id,
-            currency_code: winner.currency_code,
-            price_type: winner.price_type,
-            amount: winner.amount,
-            days_of_week: winner.days_of_week,
-            time_start: winner.time_start,
-            time_end: winner.time_end,
-            date_start: winner.date_start,
-            date_end: winner.date_end,
-            min_duration_mins: winner.min_duration_mins,
-            max_duration_mins: winner.max_duration_mins,
-            priority: winner.priority,
-          }
-        : null,
-      result: { adjusted_price_amount: applied.adjusted, reason: applied.reason },
-    };
-  } else {
-    const segments = [];
-    let fromIdx = 0;
-    for (let i = 1; i < slotCount; i += 1) {
-      if (signatures[i] !== signatures[i - 1]) {
-        segments.push({ fromIdx, toIdx: i - 1 });
-        fromIdx = i;
+      let rule = ruleWinnerForSegment(i, len);
+      let applied = null;
+
+      if (rule) {
+        applied = applyRule(baseForSegment(segMins), rule, segMins, slotUnit);
+      } else if (len === 1) {
+        // per-slot fallback
+        const per = rules
+          .filter((r) => ruleMatchesLocalInstant(r, slotParts[i]))
+          .filter((r) => matchesDuration(slotUnit, r.min_duration_mins, r.max_duration_mins))
+          .sort((a, b) => {
+            const pa = Number(a.priority || 0);
+            const pb = Number(b.priority || 0);
+            if (pb !== pa) return pb - pa;
+            const sa = specificityScore(a);
+            const sb = specificityScore(b);
+            if (sb !== sa) return sb - sa;
+            return Number(b.id) - Number(a.id);
+          })[0] || null;
+
+        rule = per;
+        applied = per ? applyRule(baseForSegment(slotUnit), per, slotUnit, slotUnit) : { adjusted: baseForSegment(slotUnit), reason: "no_rule" };
+      }
+
+      if (!applied || applied.adjusted == null || !Number.isFinite(Number(applied.adjusted))) continue;
+
+      const cost = Number(applied.adjusted) + dp[i + len];
+      if (cost < dp[i]) {
+        dp[i] = cost;
+        next[i] = { len, rule, applied };
       }
     }
-    segments.push({ fromIdx, toIdx: slotCount - 1 });
+  }
 
-    const computedSegments = segments.map(computeSegment);
-    const totalAdjusted = round2(computedSegments.reduce((acc, s) => acc + Number(s.applied.adjusted || 0), 0));
+  const adjusted = Number.isFinite(dp[0]) ? round2(dp[0]) : null;
 
-    applied = { adjusted: totalAdjusted, reason: "segmented_pricing" };
-
-    snapshot = {
-      computed_at: new Date().toISOString(),
-      timezone_used: timezone,
-      mode: "segmented_pricing",
-      inputs: {
-        service_id: serviceId || null,
-        staff_id: staffId || null,
-        resource_id: resourceId || null,
-        start_time: start.toISOString(),
-        duration_minutes: totalMins,
-        service_slot_minutes: slotUnit,
-        base_price_amount: base,
-      },
-      segments: computedSegments.map((s, idx) => {
-        const segStart = slotStarts[segments[idx].fromIdx];
-        const segEnd = new Date(segStart.getTime() + s.segDuration * 60_000);
-        return {
-          segment_index: idx,
-          from_slot_index: segments[idx].fromIdx,
-          to_slot_index: segments[idx].toIdx,
-          start_time: segStart.toISOString(),
-          end_time_exclusive: segEnd.toISOString(),
-          duration_minutes: s.segDuration,
-          slot_count: s.segSlots,
-          base_price_amount: s.segBase,
-          mode: s.mode,
-          rule: s.winner
-            ? {
-                id: s.winner.id,
-                name: s.winner.name,
-                price_type: s.winner.price_type,
-                amount: s.winner.amount,
-                time_start: s.winner.time_start,
-                time_end: s.winner.time_end,
-                min_duration_mins: s.winner.min_duration_mins,
-                max_duration_mins: s.winner.max_duration_mins,
-                priority: s.winner.priority,
-              }
-            : null,
-          adjusted_price_amount: s.applied.adjusted,
-          reason: s.applied.reason,
-          per_slot: s.perSlot || undefined,
-        };
-      }),
-      result: { adjusted_price_amount: totalAdjusted, reason: "segmented_pricing" },
-    };
+  // Reconstruct chosen segments
+  const segments = [];
+  let i = 0;
+  while (i < slotCount && next[i]) {
+    const seg = next[i];
+    const segMins = seg.len * slotUnit;
+    segments.push({
+      start_time: slotStarts[i].toISOString(),
+      end_time_exclusive: new Date(slotStarts[i].getTime() + segMins * 60_000).toISOString(),
+      slot_count: seg.len,
+      duration_minutes: segMins,
+      base_price_amount: baseForSegment(segMins),
+      rule: seg.rule
+        ? {
+            id: seg.rule.id,
+            name: seg.rule.name,
+            price_type: seg.rule.price_type,
+            amount: seg.rule.amount,
+            time_start: seg.rule.time_start,
+            time_end: seg.rule.time_end,
+            min_duration_mins: seg.rule.min_duration_mins,
+            max_duration_mins: seg.rule.max_duration_mins,
+            priority: seg.rule.priority,
+          }
+        : null,
+      adjusted_price_amount: round2(Number(seg.applied.adjusted)),
+      reason: seg.applied.reason,
+    });
+    i += seg.len;
   }
 
   return {
     base_price_amount: base,
-    adjusted_price_amount: applied.adjusted,
-    applied_rate_rule_id: winner ? winner.id : null,
-    applied_rate_snapshot: snapshot,
+    adjusted_price_amount: adjusted,
+    applied_rate_rule_id: null,
+    applied_rate_snapshot: {
+      computed_at: new Date().toISOString(),
+      timezone_used: timezone,
+      mode: "dp_segments",
+      inputs: {
+        tenantId,
+        service_id: serviceId || null,
+        staff_id: staffId || null,
+        resource_id: resourceId || null,
+        start_time: start.toISOString(),
+        duration_minutes: totalMins,
+        service_slot_minutes: slotUnit,
+        base_price_amount: base,
+      },
+      segments,
+      result: { adjusted_price_amount: adjusted },
+    },
   };
 }
-
 module.exports = {
   computeRateForBookingLike,
 };
