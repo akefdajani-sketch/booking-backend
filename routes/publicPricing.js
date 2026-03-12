@@ -125,19 +125,26 @@ router.post("/:slug/pricing/quote", injectTenantSlug, requireTenant, async (req,
     };
 
     try {
-      if (basePriceAmount != null && Number.isFinite(Number(basePriceAmount))) {
-        computed = await computeRateForBookingLike({
-          tenantId,
-          serviceId,
-          staffId,
-          resourceId,
-          start,
-          durationMinutes,
-          basePriceAmount,
-          serviceSlotMinutes,
-        });
-      }
-    } catch (e) {
+  // Apply rate rules even when the service has no base price.
+  // Fixed rules (packages/per-slot) can be used as the primary pricing model.
+  computed = await computeRateForBookingLike({
+    tenantId,
+    serviceId,
+    staffId,
+    resourceId,
+    start,
+    durationMinutes,
+    basePriceAmount,
+    serviceSlotMinutes,
+  });
+
+  // If the engine couldn't compute (e.g. delta/multiplier without base),
+  // fall back to base price.
+  if (computed.adjusted_price_amount == null) {
+    computed.adjusted_price_amount = basePriceAmount;
+  }
+} catch (e) {
+
       // Keep endpoint resilient; UI can still show base price.
       console.warn("ratesEngine non-fatal error (pricing quote):", e?.message || e);
     }
