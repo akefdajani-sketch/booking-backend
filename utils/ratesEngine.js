@@ -8,6 +8,95 @@
 const { pool } = require("../db");
 const db = pool;
 
+/**
+ * Load tenant timezone (IANA string) from tenants table.
+ * Falls back to "UTC" if missing/invalid.
+ */
+async function loadTenantTimezone(tenantId) {
+  try {
+    const r = await db.query(`SELECT timezone FROM tenants WHERE id = $1 LIMIT 1`, [tenantId]);
+    const tz = r.rows?.[0]?.timezone;
+    return typeof tz === "string" && tz.trim() ? tz.trim() : "UTC";
+  } catch (_e) {
+    return "UTC";
+  }
+}
+
+/**
+ * Load active rate rules for a booking context.
+ * Rules may target a specific service/staff/resource or be global (NULL).
+ */
+async function loadRules({ tenantId, serviceId, staffId, resourceId }) {
+  const params = [tenantId, serviceId, staffId, resourceId];
+  const q = `
+    SELECT
+      id,
+      tenant_id,
+      name,
+      is_active,
+      service_id,
+      staff_id,
+      resource_id,
+      currency_code,
+      price_type,
+      amount,
+      days_of_week,
+      time_start,
+      time_end,
+      date_start,
+      date_end,
+      min_duration_mins,
+      max_duration_mins,
+      priority,
+      metadata,
+      created_at,
+      updated_at
+    FROM rate_rules
+    WHERE tenant_id = $1
+      AND COALESCE(is_active, false) = true
+      AND ($2::int IS NULL OR service_id IS NULL OR service_id = $2::int)
+      AND ($3::int IS NULL OR staff_id   IS NULL OR staff_id   = $3::int)
+      AND ($4::int IS NULL OR resource_id IS NULL OR resource_id = $4::int)
+  `;
+  const r = await db.query(q, params);
+
+  return r.rows.map((row) => {
+    // Normalize days_of_week from Postgres array / CSV-ish strings.
+    let dows = row.days_of_week;
+    if (typeof dows === "string") {
+      const s = dows.trim();
+      if (s.startsWith("{") && s.endsWith("}")) {
+        dows = s
+          .slice(1, -1)
+          .split(",")
+          .map((x) => x.trim())
+          .filter(Boolean)
+          .map((x) => Number(x))
+          .filter((n) => Number.isFinite(n));
+      } else {
+        dows = s
+          .split(",")
+          .map((x) => x.trim())
+          .filter(Boolean)
+          .map((x) => Number(x))
+          .filter((n) => Number.isFinite(n));
+      }
+    }
+    if (Array.isArray(dows) && dows.length === 0) dows = null;
+
+    let meta = row.metadata;
+    if (typeof meta === "string") {
+      try {
+        meta = JSON.parse(meta);
+      } catch (_e) {
+        // leave as string
+      }
+    }
+
+    return { ...row, days_of_week: dows, metadata: meta };
+  });
+}
+
 function round2(n) {
   if (n == null) return null;
   const x = Number(n);
