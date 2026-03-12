@@ -76,19 +76,66 @@ function isWithinDateRange(startDateStr, dateStart, dateEnd) {
   return true;
 }
 
+function parseTimeToMinutes(value) {
+  if (value == null) return null;
+  const raw = String(value).trim();
+  if (!raw) return null;
+
+  // Accept "HH:MM", "HH:MM:SS", and "hh:mm AM/PM".
+  const m12 = raw.match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?\s*([AP]M)$/i);
+  if (m12) {
+    let h = Number(m12[1]);
+    const min = Number(m12[2]);
+    const ap = String(m12[4]).toUpperCase();
+    if (ap === "AM") {
+      if (h === 12) h = 0;
+    } else {
+      if (h !== 12) h += 12;
+    }
+    return h * 60 + min;
+  }
+
+  const m24 = raw.match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
+  if (m24) {
+    const h = Number(m24[1]);
+    const min = Number(m24[2]);
+    if (!Number.isFinite(h) || !Number.isFinite(min)) return null;
+    return h * 60 + min;
+  }
+
+  return null;
+}
+
 function isWithinTimeWindow(startTimeStr, timeStart, timeEnd) {
   if (!timeStart && !timeEnd) return true;
-  if (timeStart && timeEnd) {
-    // Handle windows that wrap midnight (e.g. 22:00 → 02:00).
-    if (timeEnd < timeStart) {
-      return startTimeStr >= timeStart || startTimeStr <= timeEnd;
+
+  const t = parseTimeToMinutes(startTimeStr);
+  const s = parseTimeToMinutes(timeStart);
+  const e = parseTimeToMinutes(timeEnd);
+
+  // If parsing fails, fall back to string compare (legacy behavior).
+  if (t == null || (timeStart && s == null) || (timeEnd && e == null)) {
+    if (timeStart && timeEnd) {
+      if (String(timeEnd) < String(timeStart)) {
+        return String(startTimeStr) >= String(timeStart) || String(startTimeStr) <= String(timeEnd);
+      }
+      return String(startTimeStr) >= String(timeStart) && String(startTimeStr) <= String(timeEnd);
     }
-    return startTimeStr >= timeStart && startTimeStr <= timeEnd;
+    if (timeStart) return String(startTimeStr) >= String(timeStart);
+    if (timeEnd) return String(startTimeStr) <= String(timeEnd);
+    return true;
   }
-  if (timeStart) return startTimeStr >= timeStart;
-  if (timeEnd)   return startTimeStr <= timeEnd;
+
+  if (s != null && e != null) {
+    // Handle windows that wrap midnight (e.g. 22:00 → 02:00).
+    if (e < s) return t >= s || t <= e;
+    return t >= s && t <= e;
+  }
+  if (s != null) return t >= s;
+  if (e != null) return t <= e;
   return true;
 }
+
 
 function matchesDuration(durationMinutes, minDur, maxDur) {
   if (minDur != null && durationMinutes < Number(minDur)) return false;
@@ -105,17 +152,14 @@ function specificityScore(rule) {
 }
 
 function applyRule(basePriceAmount, rule, durationMinutes, serviceSlotMinutes) {
-  const base = Number(basePriceAmount);
-  if (!Number.isFinite(base)) return { adjusted: null, reason: "missing_base" };
   const amt = Number(rule.amount);
-  if (!Number.isFinite(amt)) return { adjusted: round2(base), reason: "invalid_amount" };
+  if (!Number.isFinite(amt)) return { adjusted: round2(Number(basePriceAmount) || 0), reason: "invalid_amount" };
 
   const t = String(rule.price_type || "").toLowerCase();
 
   if (t === "fixed") {
     // Package rule: when min_duration === max_duration the amount IS the total
     // price for that exact booking length — do NOT multiply by slot count.
-    // e.g. "Karaoke 2 Hour" → Fixed 70 JD for exactly 120 min = 70 JD total.
     const minD = rule.min_duration_mins != null ? Number(rule.min_duration_mins) : null;
     const maxD = rule.max_duration_mins != null ? Number(rule.max_duration_mins) : null;
     if (minD != null && maxD != null && minD === maxD && minD > 0) {
@@ -123,65 +167,24 @@ function applyRule(basePriceAmount, rule, durationMinutes, serviceSlotMinutes) {
     }
 
     // Per-slot fixed rate: scale amount by number of slots selected.
-    // e.g. "Peak Hours" Fixed 40 JD per slot × 2 slots = 80 JD.
     const slotUnit = Number(serviceSlotMinutes) || 0;
-    const dur      = Number(durationMinutes)    || 0;
+    const dur = Number(durationMinutes) || 0;
     if (slotUnit > 0 && dur > 0 && dur !== slotUnit) {
       return { adjusted: round2(amt * (dur / slotUnit)), reason: "fixed_scaled" };
     }
     return { adjusted: round2(amt), reason: "fixed" };
   }
 
-  // Delta and Multiplier already operate on the duration-scaled base price,
-  // so they naturally handle multi-slot bookings correctly.
+  // Delta and Multiplier require a base price.
+  const base = Number(basePriceAmount);
+  if (!Number.isFinite(base)) return { adjusted: null, reason: "missing_base" };
+
   if (t === "delta")      return { adjusted: round2(base + amt), reason: "delta" };
   if (t === "multiplier") return { adjusted: round2(base * amt), reason: "multiplier" };
+
   return { adjusted: round2(base), reason: "unknown_type" };
 }
 
-async function loadRules({ tenantId, serviceId, staffId, resourceId }) {
-  const { rows } = await db.query(
-    `
-    SELECT
-      id, name, is_active,
-      service_id, staff_id, resource_id,
-      currency_code, price_type, amount,
-      days_of_week, time_start, time_end,
-      date_start, date_end,
-      min_duration_mins, max_duration_mins,
-      priority,
-      COALESCE(metadata, '{}'::jsonb) AS metadata
-    FROM rate_rules
-    WHERE tenant_id = $1
-      AND COALESCE(is_active,true) = true
-      AND (service_id  IS NULL OR service_id  = $2)
-      AND (staff_id    IS NULL OR staff_id    = $3)
-      AND (resource_id IS NULL OR resource_id = $4)
-    `,
-    [tenantId, serviceId || null, staffId || null, resourceId || null]
-  );
-  return rows;
-}
-
-/**
- * Load the tenant's configured timezone from the DB.
- * Returns a valid IANA timezone string, or "UTC" as fallback.
- */
-async function loadTenantTimezone(tenantId) {
-  try {
-    const { rows } = await db.query(
-      `SELECT timezone FROM tenants WHERE id = $1 LIMIT 1`,
-      [tenantId]
-    );
-    const tz = String(rows?.[0]?.timezone || "").trim();
-    if (!tz) return "UTC";
-    // Validate it's a real IANA timezone before returning.
-    new Intl.DateTimeFormat("en", { timeZone: tz });
-    return tz;
-  } catch {
-    return "UTC";
-  }
-}
 
 async function computeRateForBookingLike({
   tenantId,
