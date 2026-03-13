@@ -216,7 +216,16 @@ async function resolvePrepaidSelection(client, { tenantId, customerId, entitleme
   }
   if (serviceId) {
     params.push(Number(serviceId));
-    where.push(`(p.eligible_service_ids IS NULL OR jsonb_array_length(p.eligible_service_ids) = 0 OR p.eligible_service_ids ? $${params.length}::text)`);
+    where.push(`(
+      p.eligible_service_ids IS NULL
+      OR jsonb_typeof(p.eligible_service_ids) <> 'array'
+      OR jsonb_array_length(p.eligible_service_ids) = 0
+      OR EXISTS (
+        SELECT 1
+        FROM jsonb_array_elements_text(p.eligible_service_ids) AS svc(value)
+        WHERE svc.value = $${params.length}::text
+      )
+    )`);
   }
   const q = await client.query(
     `SELECT

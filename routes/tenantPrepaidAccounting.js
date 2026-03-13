@@ -37,6 +37,17 @@ const TRANSACTION_TYPES = new Set([
 const REDEMPTION_MODES = new Set(["session", "credit", "minute", "package_use", "manual"]);
 const VALIDITY_UNITS = new Set(["none", "days", "weeks", "months"]);
 
+function resolveIncludedQuantityFromProductRow(product) {
+  const minutes = Number(product?.minutes_total ?? 0) || 0;
+  const credit = Number(product?.credit_amount ?? 0) || 0;
+  const sessions = Number(product?.session_count ?? 0) || 0;
+  if (minutes > 0) return minutes;
+  if (credit > 0) return credit;
+  if (sessions > 0) return sessions;
+  const rulesQty = Number(product?.rules?.included_quantity ?? product?.rules?.includedQuantity ?? 0) || 0;
+  return rulesQty > 0 ? rulesQty : 1;
+}
+
 function isAdminRequest(req) {
   const expected = String(process.env.ADMIN_API_KEY || "").trim();
   if (!expected) return false;
@@ -507,13 +518,18 @@ router.post(
       }
 
       const productCheck = await client.query(
-        `SELECT id, currency FROM prepaid_products WHERE tenant_id = $1 AND id = $2 LIMIT 1`,
+        `SELECT * FROM prepaid_products WHERE tenant_id = $1 AND id = $2 LIMIT 1`,
         [tenantId, payload.prepaidProductId]
       );
       if (!productCheck.rows.length) {
         await client.query("ROLLBACK");
         return res.status(404).json({ error: "Prepaid product not found" });
       }
+
+      const productRow = productCheck.rows[0];
+      const unitQuantity = resolveIncludedQuantityFromProductRow(productRow);
+      const packageCount = Math.max(1, Number(payload.quantity || 0));
+      const effectiveQuantity = Math.max(1, packageCount * unitQuantity);
 
       const entitlementRes = await client.query(
         `
@@ -542,11 +558,11 @@ router.post(
           payload.prepaidProductId,
           payload.status,
           payload.source,
-          payload.quantity,
+          effectiveQuantity,
           payload.startsAt,
           payload.expiresAt,
           payload.notes,
-          JSON.stringify(payload.metadata),
+          JSON.stringify({ ...(payload.metadata || {}), packageCount, unitQuantity, effectiveQuantity }),
           actorUserId(req),
         ]
       );
@@ -577,10 +593,10 @@ router.post(
           payload.customerId,
           entitlement.id,
           payload.prepaidProductId,
-          payload.quantity,
-          productCheck.rows[0].currency || null,
+          effectiveQuantity,
+          productRow.currency || null,
           payload.notes,
-          JSON.stringify(payload.metadata),
+          JSON.stringify({ ...(payload.metadata || {}), packageCount, unitQuantity, effectiveQuantity }),
           actorUserId(req),
         ]
       );
