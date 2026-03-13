@@ -251,18 +251,23 @@ async function resolvePrepaidSelection(client, { tenantId, customerId, entitleme
   return q.rows?.[0] || null;
 }
 
-function computePrepaidRedemptionSelection(entitlement, durationMinutes) {
+function computePrepaidRedemptionSelection(entitlement, durationMinutes, serviceDurationMinutes) {
   const minutesTotal = Number(entitlement?.minutes_total || 0);
   const creditAmount = Number(entitlement?.credit_amount || 0);
   const sessionCount = Number(entitlement?.session_count || 0);
+  const bookingMinutes = Math.max(0, Number(durationMinutes || 0));
+  const serviceUnitMinutes = Math.max(0, Number(serviceDurationMinutes || 0));
   if (minutesTotal > 0) {
-    return { redeemedQuantity: Math.max(1, Number(durationMinutes || 0)), redemptionMode: 'minute' };
+    return { redeemedQuantity: Math.max(1, bookingMinutes), redemptionMode: 'minute' };
   }
   if (creditAmount > 0) {
     return { redeemedQuantity: 1, redemptionMode: 'credit' };
   }
   if (sessionCount > 0) {
-    return { redeemedQuantity: 1, redemptionMode: 'package_use' };
+    const packageUses = serviceUnitMinutes > 0 && bookingMinutes > 0
+      ? Math.max(1, Math.ceil(bookingMinutes / serviceUnitMinutes))
+      : 1;
+    return { redeemedQuantity: packageUses, redemptionMode: 'package_use' };
   }
   return { redeemedQuantity: 1, redemptionMode: 'manual' };
 }
@@ -1451,7 +1456,7 @@ router.post("/", requireGoogleAuth, requireTenant, async (req, res) => {
             return res.status(409).json({ error: "No eligible prepaid balance found for this booking." });
           }
         } else {
-          const prepaidSelection = computePrepaidRedemptionSelection(selectedEntitlement, Number(duration));
+          const prepaidSelection = computePrepaidRedemptionSelection(selectedEntitlement, Number(duration), Number(serviceDurationMinutes || duration || 0));
           const remaining = Number(selectedEntitlement.remaining_quantity || 0);
           if (remaining < prepaidSelection.redeemedQuantity) {
             await client.query("ROLLBACK");
