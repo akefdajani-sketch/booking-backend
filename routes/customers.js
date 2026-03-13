@@ -1323,7 +1323,7 @@ router.get("/me/packages/:entitlementId/ledger", requireGoogleAuth, requireTenan
       `SELECT
          id,
          entitlement_id,
-         booking_id,
+         NULL::int AS booking_id,
          transaction_type,
          quantity_delta,
          notes,
