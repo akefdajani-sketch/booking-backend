@@ -319,12 +319,12 @@ router.patch("/:id/status", requireTenant, requireAdminOrTenantRole("staff"), as
 });
 
 // POST /api/customer-memberships/subscribe?tenantSlug=...
-// Body: { customerId, membershipPlanId }
+// Body: { customerId, membershipPlanId } or { customerId, planId }
 router.post("/subscribe", requireTenant, requireAdminOrTenantRole("staff"), async (req, res) => {
   try {
     const tenantId = req.tenantId;
     const customerId = Number(req.body?.customerId);
-    const membershipPlanId = Number(req.body?.membershipPlanId);
+    const membershipPlanId = Number(req.body?.membershipPlanId || req.body?.planId);
 
     if (!Number.isFinite(customerId) || customerId <= 0) {
       return res.status(400).json({ error: "Invalid customerId." });
@@ -380,6 +380,8 @@ router.post("/subscribe", requireTenant, requireAdminOrTenantRole("staff"), asyn
         membership: existing.rows[0],
         alreadyActive: true,
         idempotencyKey: idemKey,
+        customerId,
+        membershipPlanId,
       });
     }
     
@@ -424,7 +426,7 @@ router.post("/subscribe", requireTenant, requireAdminOrTenantRole("staff"), asyn
       [tenantId, membership.id, minutesRemaining, usesRemaining, `Initial grant for ${plan.name}`]
     );
 
-    return res.json({ membership });
+    return res.json({ membership, customerId, membershipPlanId, planName: plan.name });
   } catch (err) {
     console.error("POST /api/customer-memberships/subscribe error:", err);
     return res.status(500).json({ error: "Failed to subscribe." });
