@@ -8,6 +8,46 @@ const requireAdminOrTenantRole = require("../middleware/requireAdminOrTenantRole
 const requireGoogleAuth = require("../middleware/requireGoogleAuth");
 const { requireTenant } = require("../middleware/requireTenant");
 
+
+// -----------------------------------------------------------------------------
+// Schema compatibility helpers
+// Detect available columns at runtime so membership list queries do not 500 on
+// older tenant databases that still use legacy membership column names.
+// -----------------------------------------------------------------------------
+
+const _columnsCache = new Map(); // tableName -> Set(column_name)
+
+async function getExistingColumns(tableName) {
+  if (_columnsCache.has(tableName)) return _columnsCache.get(tableName);
+  const res = await db.query(
+    `SELECT column_name
+       FROM information_schema.columns
+      WHERE table_schema = 'public'
+        AND table_name = $1`,
+    [tableName]
+  );
+  const set = new Set(res.rows.map((r) => r.column_name));
+  _columnsCache.set(tableName, set);
+  return set;
+}
+
+function firstExisting(colSet, candidates) {
+  for (const c of candidates) {
+    if (c && colSet.has(c)) return c;
+  }
+  return null;
+}
+
+async function pickCol(tableName, alias, candidates, fallbackSql = "NULL") {
+  const cols = await getExistingColumns(tableName);
+  const col = firstExisting(cols, candidates);
+  return col ? `${alias}.${col}` : fallbackSql;
+}
+
+function safeIntExpr(sql) {
+  return `COALESCE((${sql})::int, 0)`;
+}
+
 function shouldUseCustomerView(req) {
   const q = req.query || {};
 
@@ -135,6 +175,67 @@ router.get("/", requireTenant, requireAdminOrTenantRole("staff"), async (req, re
       }
     }
 
+    // Build a schema-compatible query. Some environments still have the legacy
+    // membership schema (credits_remaining / starts_at / expires_at / duration_days),
+    // while newer environments use minutes_remaining / uses_remaining / start_at / end_at.
+    const cmPlanId = await pickCol("customer_memberships", "cm", ["plan_id", "membership_plan_id"]);
+    const cmStatusRaw = await pickCol("customer_memberships", "cm", ["status"], "'active'");
+    const cmStarted = await pickCol(
+      "customer_memberships",
+      "cm",
+      ["started_at", "starts_at", "start_at", "created_at"],
+      "NULL"
+    );
+    const cmEndAt = await pickCol(
+      "customer_memberships",
+      "cm",
+      ["end_at", "expires_at", "valid_until"],
+      "NULL"
+    );
+    const cmMinutesRemaining = await pickCol("customer_memberships", "cm", ["minutes_remaining"], "NULL");
+    const cmUsesRemaining = await pickCol("customer_memberships", "cm", ["uses_remaining"], "NULL");
+    const cmCreditsRemaining = await pickCol("customer_memberships", "cm", ["credits_remaining"], "NULL");
+    const orderCol = await pickCol(
+      "customer_memberships",
+      "cm",
+      ["created_at", "started_at", "starts_at", "start_at"],
+      "cm.id"
+    );
+
+    const mpName = await pickCol("membership_plans", "mp", ["name", "title"], "NULL");
+    const mpDesc = await pickCol("membership_plans", "mp", ["description", "subtitle"], "NULL");
+    const mpPrice = await pickCol("membership_plans", "mp", ["price"], "NULL");
+    const mpCurrency = await pickCol("membership_plans", "mp", ["currency", "currency_code"], "'USD'");
+    const mpIncludedMinutes = await pickCol(
+      "membership_plans",
+      "mp",
+      ["included_minutes", "minutes_total", "minutes_included"],
+      "NULL"
+    );
+    const mpIncludedUses = await pickCol(
+      "membership_plans",
+      "mp",
+      ["included_uses", "uses_total", "uses_included"],
+      "NULL"
+    );
+    const mpValidityDays = await pickCol("membership_plans", "mp", ["validity_days", "duration_days"], "NULL");
+
+    // Legacy shape only has credits_remaining, so treat that as minutes_remaining
+    // for list-display purposes. This keeps the owner page stable until all tenants
+    // are migrated to the ledger-era membership schema.
+    const minutesRemainingExpr = `COALESCE(${cmMinutesRemaining}, ${cmCreditsRemaining}, 0)`;
+    const usesRemainingExpr = `COALESCE(${cmUsesRemaining}, 0)`;
+
+    const lifecycleCase = `
+      CASE
+        WHEN LOWER(COALESCE(${cmStatusRaw}::text, 'active')) = 'archived' THEN 'archived'
+        WHEN ${cmEndAt} IS NOT NULL AND ${cmEndAt} <= NOW() THEN 'expired'
+        WHEN ${cmStarted} IS NOT NULL AND ${cmStarted} > NOW() THEN 'scheduled'
+        WHEN LOWER(COALESCE(${cmStatusRaw}::text, 'active')) = 'active' THEN 'active'
+        ELSE LOWER(COALESCE(${cmStatusRaw}::text, 'active'))
+      END
+    `;
+
     const params = [tenantId];
     let where = `WHERE cm.tenant_id = $1`;
 
@@ -144,27 +245,16 @@ router.get("/", requireTenant, requireAdminOrTenantRole("staff"), async (req, re
     }
 
     if (!includeExpired) {
-      where += ` AND (cm.end_at IS NULL OR cm.end_at > NOW())`;
+      where += ` AND (${cmEndAt} IS NULL OR ${cmEndAt} > NOW())`;
     }
     if (!includeArchived) {
-      where += ` AND cm.status <> 'archived'`;
+      where += ` AND LOWER(COALESCE(${cmStatusRaw}::text, 'active')) <> 'archived'`;
     }
     if (q) {
       params.push(`%${q}%`);
-      where += ` AND (c.name ILIKE $${params.length} OR c.phone ILIKE $${params.length} OR c.email ILIKE $${params.length} OR mp.name ILIKE $${params.length})`;
+      where += ` AND (c.name ILIKE $${params.length} OR c.phone ILIKE $${params.length} OR c.email ILIKE $${params.length} OR ${mpName} ILIKE $${params.length})`;
     }
-
-    const lifecycleCase = `
-      CASE
-        WHEN cm.status = 'archived' THEN 'archived'
-        WHEN cm.end_at IS NOT NULL AND cm.end_at <= NOW() THEN 'expired'
-        WHEN cm.start_at IS NOT NULL AND cm.start_at > NOW() THEN 'scheduled'
-        WHEN cm.status = 'active' THEN 'active'
-        ELSE cm.status
-      END
-    `;
-
-    if (status && status !== 'all') {
+    if (status && status !== "all") {
       params.push(status);
       where += ` AND (${lifecycleCase}) = $${params.length}`;
     }
@@ -172,8 +262,8 @@ router.get("/", requireTenant, requireAdminOrTenantRole("staff"), async (req, re
     const countSql = `
       SELECT COUNT(*)::int AS total
       FROM customer_memberships cm
-      JOIN membership_plans mp
-        ON mp.id = cm.plan_id
+      LEFT JOIN membership_plans mp
+        ON mp.id = ${cmPlanId}
        AND mp.tenant_id = $1
       JOIN customers c
         ON c.id = cm.customer_id
@@ -184,39 +274,41 @@ router.get("/", requireTenant, requireAdminOrTenantRole("staff"), async (req, re
     const total = Number(countResult.rows?.[0]?.total || 0);
 
     const dataParams = [...params, limit, offset];
-    const r = await db.query(
-      `
+    const limitParam = `$${dataParams.length - 1}`;
+    const offsetParam = `$${dataParams.length}`;
+
+    const dataSql = `
       SELECT
         cm.id,
         cm.tenant_id,
         cm.customer_id,
-        cm.plan_id,
-        cm.status,
-        cm.start_at,
-        cm.end_at,
-        cm.minutes_remaining,
-        cm.uses_remaining,
+        ${cmPlanId} AS plan_id,
+        LOWER(COALESCE(${cmStatusRaw}::text, 'active')) AS status,
+        ${cmStarted} AS start_at,
+        ${cmEndAt} AS end_at,
+        ${safeIntExpr(minutesRemainingExpr)} AS minutes_remaining,
+        ${safeIntExpr(usesRemainingExpr)} AS uses_remaining,
         cm.created_at,
         cm.updated_at,
         c.name AS customer_name,
         c.phone AS customer_phone,
         c.email AS customer_email,
-        mp.name AS plan_name,
-        mp.description AS plan_description,
-        mp.price AS plan_price,
-        mp.currency AS plan_currency,
-        mp.included_minutes,
-        mp.included_uses,
-        mp.validity_days,
+        ${mpName} AS plan_name,
+        ${mpDesc} AS plan_description,
+        ${mpPrice} AS plan_price,
+        ${mpCurrency} AS plan_currency,
+        ${safeIntExpr(mpIncludedMinutes)} AS included_minutes,
+        ${safeIntExpr(mpIncludedUses)} AS included_uses,
+        ${safeIntExpr(mpValidityDays)} AS validity_days,
         ${lifecycleCase} AS lifecycle_state,
         (
-          cm.status = 'active'
-          AND (cm.start_at IS NULL OR cm.start_at <= NOW())
-          AND (cm.end_at IS NULL OR cm.end_at > NOW())
+          LOWER(COALESCE(${cmStatusRaw}::text, 'active')) = 'active'
+          AND (${cmStarted} IS NULL OR ${cmStarted} <= NOW())
+          AND (${cmEndAt} IS NULL OR ${cmEndAt} > NOW())
         ) AS is_currently_active
       FROM customer_memberships cm
-      JOIN membership_plans mp
-        ON mp.id = cm.plan_id
+      LEFT JOIN membership_plans mp
+        ON mp.id = ${cmPlanId}
        AND mp.tenant_id = $1
       JOIN customers c
         ON c.id = cm.customer_id
@@ -230,13 +322,12 @@ router.get("/", requireTenant, requireAdminOrTenantRole("staff"), async (req, re
           WHEN ${lifecycleCase} = 'archived' THEN 3
           ELSE 4
         END ASC,
-        cm.start_at DESC NULLS LAST,
-        cm.created_at DESC NULLS LAST
-      LIMIT ${dataParams.length - 1}
-      OFFSET ${dataParams.length}
-      `,
-      dataParams
-    );
+        ${orderCol} DESC NULLS LAST,
+        cm.id DESC
+      LIMIT ${limitParam}
+      OFFSET ${offsetParam}
+    `;
+    const r = await db.query(dataSql, dataParams);
 
     return res.json({
       memberships: r.rows,
@@ -254,7 +345,7 @@ router.get("/", requireTenant, requireAdminOrTenantRole("staff"), async (req, re
 });
 
 
-// GET /api/customer-memberships/ledger?tenantSlug=...
+// GET /api/customer-memberships/ledger?tenantSlug=...?tenantSlug=...
 router.get("/ledger", requireTenant, requireAdminOrTenantRole("staff"), async (req, res) => {
   try {
     const tenantId = req.tenantId;
