@@ -250,6 +250,175 @@ router.get("/", requireTenant, requireAdminOrTenantRole("staff"), async (req, re
   }
 });
 
+
+// GET /api/customer-memberships/ledger?tenantSlug=...
+router.get("/ledger", requireTenant, requireAdminOrTenantRole("staff"), async (req, res) => {
+  try {
+    const tenantId = req.tenantId;
+    const q = String(req.query.q || "").trim();
+    const customerIdRaw = Number(req.query.customerId);
+    const membershipIdRaw = Number(req.query.membershipId);
+    const bookingIdRaw = Number(req.query.bookingId);
+    const type = String(req.query.type || "all").trim().toLowerCase();
+    const limitRaw = Number(req.query.limit);
+    const offsetRaw = Number(req.query.offset);
+    const limit = Math.max(1, Math.min(200, Number.isFinite(limitRaw) ? limitRaw : 50));
+    const offset = Math.max(0, Number.isFinite(offsetRaw) ? offsetRaw : 0);
+
+    const customerId = Number.isFinite(customerIdRaw) && customerIdRaw > 0 ? customerIdRaw : null;
+    const membershipId = Number.isFinite(membershipIdRaw) && membershipIdRaw > 0 ? membershipIdRaw : null;
+    const bookingId = Number.isFinite(bookingIdRaw) && bookingIdRaw > 0 ? bookingIdRaw : null;
+
+    const params = [tenantId];
+    const where = ["ml.tenant_id = $1"];
+
+    if (customerId) {
+      params.push(customerId);
+      where.push(`cm.customer_id = $${params.length}`);
+    }
+    if (membershipId) {
+      params.push(membershipId);
+      where.push(`ml.customer_membership_id = $${params.length}`);
+    }
+    if (bookingId) {
+      params.push(bookingId);
+      where.push(`ml.booking_id = $${params.length}`);
+    }
+    if (type && type !== "all") {
+      params.push(type);
+      where.push(`LOWER(COALESCE(ml.type, '')) = $${params.length}`);
+    }
+    if (q) {
+      params.push(`%${q}%`);
+      where.push(`(
+        c.name ILIKE $${params.length}
+        OR c.email ILIKE $${params.length}
+        OR c.phone ILIKE $${params.length}
+        OR mp.name ILIKE $${params.length}
+        OR COALESCE(ml.note, '') ILIKE $${params.length}
+        OR COALESCE(s.name, '') ILIKE $${params.length}
+      )`);
+    }
+
+    const whereSql = `WHERE ${where.join(" AND ")}`;
+
+    const countSql = `
+      SELECT COUNT(*)::int AS total
+      FROM membership_ledger ml
+      JOIN customer_memberships cm
+        ON cm.id = ml.customer_membership_id
+       AND cm.tenant_id = ml.tenant_id
+      LEFT JOIN membership_plans mp
+        ON mp.id = cm.plan_id
+       AND mp.tenant_id = ml.tenant_id
+      LEFT JOIN customers c
+        ON c.id = cm.customer_id
+       AND c.tenant_id = ml.tenant_id
+      LEFT JOIN bookings b
+        ON b.id = ml.booking_id
+       AND b.tenant_id = ml.tenant_id
+      LEFT JOIN services s
+        ON s.id = b.service_id
+       AND s.tenant_id = ml.tenant_id
+      ${whereSql}
+    `;
+    const countResult = await db.query(countSql, params);
+    const total = Number(countResult.rows?.[0]?.total || 0);
+
+    const dataParams = [...params, limit, offset];
+    const limitParam = `$${dataParams.length - 1}`;
+    const offsetParam = `$${dataParams.length}`;
+
+    const result = await db.query(
+      `
+      SELECT
+        ml.id,
+        ml.tenant_id,
+        ml.customer_membership_id,
+        ml.booking_id,
+        ml.type,
+        ml.minutes_delta,
+        ml.uses_delta,
+        ml.note,
+        ml.created_at,
+        cm.customer_id,
+        cm.status AS membership_status,
+        cm.start_at,
+        cm.end_at,
+        cm.minutes_remaining,
+        cm.uses_remaining,
+        c.name AS customer_name,
+        c.email AS customer_email,
+        c.phone AS customer_phone,
+        mp.id AS plan_id,
+        mp.name AS plan_name,
+        b.service_id,
+        b.start_time AS booking_start_time,
+        s.name AS service_name
+      FROM membership_ledger ml
+      JOIN customer_memberships cm
+        ON cm.id = ml.customer_membership_id
+       AND cm.tenant_id = ml.tenant_id
+      LEFT JOIN membership_plans mp
+        ON mp.id = cm.plan_id
+       AND mp.tenant_id = ml.tenant_id
+      LEFT JOIN customers c
+        ON c.id = cm.customer_id
+       AND c.tenant_id = ml.tenant_id
+      LEFT JOIN bookings b
+        ON b.id = ml.booking_id
+       AND b.tenant_id = ml.tenant_id
+      LEFT JOIN services s
+        ON s.id = b.service_id
+       AND s.tenant_id = ml.tenant_id
+      ${whereSql}
+      ORDER BY ml.created_at DESC, ml.id DESC
+      LIMIT ${limitParam}
+      OFFSET ${offsetParam}
+      `,
+      dataParams
+    );
+
+    const summary = result.rows.reduce(
+      (acc, row) => {
+        const rowType = String(row?.type || "").toLowerCase();
+        acc.minutesDelta += Number(row?.minutes_delta || 0);
+        acc.usesDelta += Number(row?.uses_delta || 0);
+        if (rowType === "debit") acc.debitCount += 1;
+        else if (rowType === "grant") acc.grantCount += 1;
+        else if (rowType === "topup") acc.topUpCount += 1;
+        else acc.otherCount += 1;
+        if (row?.booking_id) acc.bookingLinkedCount += 1;
+        return acc;
+      },
+      { minutesDelta: 0, usesDelta: 0, debitCount: 0, grantCount: 0, topUpCount: 0, otherCount: 0, bookingLinkedCount: 0 }
+    );
+
+    return res.json({
+      ledger: result.rows,
+      summary: {
+        entryCount: total,
+        minutesDelta: summary.minutesDelta,
+        usesDelta: summary.usesDelta,
+        debitCount: summary.debitCount,
+        grantCount: summary.grantCount,
+        topUpCount: summary.topUpCount,
+        otherCount: summary.otherCount,
+        bookingLinkedCount: summary.bookingLinkedCount,
+      },
+      meta: {
+        total,
+        limit,
+        offset,
+        hasMore: offset + result.rows.length < total,
+      },
+    });
+  } catch (err) {
+    console.error("GET /api/customer-memberships/ledger error:", err);
+    return res.status(500).json({ error: "Failed to load membership ledger." });
+  }
+});
+
 // Manually archive a membership (keeps the record but hides it from default lists)
 // PATCH /api/customer-memberships/:id/archive?tenantSlug=...
 router.patch("/:id/archive", requireTenant, requireAdminOrTenantRole("staff"), async (req, res) => {
