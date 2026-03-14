@@ -10,12 +10,15 @@ const { requireTenant } = require("../middleware/requireTenant");
 
 function shouldUseCustomerView(req) {
   const q = req.query || {};
-  // Customer self-service calls this endpoint without a customerId (it uses the
-  // authenticated Google identity). Staff/owner/admin calls it with a customerId
-  // to fetch a specific customer's memberships.
-  //
-  // If customerId is present, we must use the admin route (role/API-key auth).
-  return !q.customerId;
+
+  // Tenant/staff/admin routes may legitimately omit customerId when listing all
+  // memberships for a tenant, so absence of customerId alone is not enough to
+  // classify a request as customer self-service.
+  if (q.customerId) return false;
+
+  // Only use the customer self-service route when the request is clearly part
+  // of the signed-in customer flow.
+  return Boolean(q.customerEmail);
 }
 
 // GET /api/customer-memberships?tenantSlug|tenantId&customerId=
