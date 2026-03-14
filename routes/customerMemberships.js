@@ -111,25 +111,76 @@ router.get(
 router.get("/", requireTenant, requireAdminOrTenantRole("staff"), async (req, res) => {
   try {
     const tenantId = req.tenantId;
-    const customerId = Number(req.query.customerId);
-
-    // Optional filters
-    // includeExpired=true   -> include memberships with end_at <= now()
-    // includeArchived=true  -> include status='archived'
+    const rawCustomerId = Number(req.query.customerId);
+    const customerId = Number.isFinite(rawCustomerId) && rawCustomerId > 0 ? rawCustomerId : null;
     const includeExpired = String(req.query.includeExpired || "").toLowerCase() === "true";
     const includeArchived = String(req.query.includeArchived || "").toLowerCase() === "true";
+    const q = String(req.query.q || "").trim();
+    const status = String(req.query.status || "all").trim().toLowerCase();
+    const limitRaw = Number(req.query.limit);
+    const offsetRaw = Number(req.query.offset);
+    const limit = Math.max(1, Math.min(200, Number.isFinite(limitRaw) ? limitRaw : 50));
+    const offset = Math.max(0, Number.isFinite(offsetRaw) ? offsetRaw : 0);
 
-    if (!Number.isFinite(customerId) || customerId <= 0) {
-      return res.json({ memberships: [] });
+    if (customerId) {
+      const c = await db.query(
+        `SELECT id FROM customers WHERE id=$1 AND tenant_id=$2 LIMIT 1`,
+        [customerId, tenantId]
+      );
+      if (!c.rows.length) {
+        return res.json({ memberships: [], meta: { total: 0, limit, offset, hasMore: false } });
+      }
     }
 
-    // Customer must belong to tenant
-    const c = await db.query(
-      `SELECT id FROM customers WHERE id=$1 AND tenant_id=$2 LIMIT 1`,
-      [customerId, tenantId]
-    );
-    if (!c.rows.length) return res.json({ memberships: [] });
+    const params = [tenantId];
+    let where = `WHERE cm.tenant_id = $1`;
 
+    if (customerId) {
+      params.push(customerId);
+      where += ` AND cm.customer_id = $${params.length}`;
+    }
+
+    if (!includeExpired) {
+      where += ` AND (cm.end_at IS NULL OR cm.end_at > NOW())`;
+    }
+    if (!includeArchived) {
+      where += ` AND cm.status <> 'archived'`;
+    }
+    if (q) {
+      params.push(`%${q}%`);
+      where += ` AND (c.name ILIKE $${params.length} OR c.phone ILIKE $${params.length} OR c.email ILIKE $${params.length} OR mp.name ILIKE $${params.length})`;
+    }
+
+    const lifecycleCase = `
+      CASE
+        WHEN cm.status = 'archived' THEN 'archived'
+        WHEN cm.end_at IS NOT NULL AND cm.end_at <= NOW() THEN 'expired'
+        WHEN cm.start_at IS NOT NULL AND cm.start_at > NOW() THEN 'scheduled'
+        WHEN cm.status = 'active' THEN 'active'
+        ELSE cm.status
+      END
+    `;
+
+    if (status && status !== 'all') {
+      params.push(status);
+      where += ` AND (${lifecycleCase}) = $${params.length}`;
+    }
+
+    const countSql = `
+      SELECT COUNT(*)::int AS total
+      FROM customer_memberships cm
+      JOIN membership_plans mp
+        ON mp.id = cm.plan_id
+       AND mp.tenant_id = $1
+      JOIN customers c
+        ON c.id = cm.customer_id
+       AND c.tenant_id = cm.tenant_id
+      ${where}
+    `;
+    const countResult = await db.query(countSql, params);
+    const total = Number(countResult.rows?.[0]?.total || 0);
+
+    const dataParams = [...params, limit, offset];
     const r = await db.query(
       `
       SELECT
@@ -142,6 +193,11 @@ router.get("/", requireTenant, requireAdminOrTenantRole("staff"), async (req, re
         cm.end_at,
         cm.minutes_remaining,
         cm.uses_remaining,
+        cm.created_at,
+        cm.updated_at,
+        c.name AS customer_name,
+        c.phone AS customer_phone,
+        c.email AS customer_email,
         mp.name AS plan_name,
         mp.description AS plan_description,
         mp.price AS plan_price,
@@ -149,13 +205,7 @@ router.get("/", requireTenant, requireAdminOrTenantRole("staff"), async (req, re
         mp.included_minutes,
         mp.included_uses,
         mp.validity_days,
-        CASE
-          WHEN cm.status = 'archived' THEN 'archived'
-          WHEN cm.end_at IS NOT NULL AND cm.end_at <= NOW() THEN 'expired'
-          WHEN cm.start_at IS NOT NULL AND cm.start_at > NOW() THEN 'scheduled'
-          WHEN cm.status = 'active' THEN 'active'
-          ELSE cm.status
-        END AS lifecycle_state,
+        ${lifecycleCase} AS lifecycle_state,
         (
           cm.status = 'active'
           AND (cm.start_at IS NULL OR cm.start_at <= NOW())
@@ -165,16 +215,35 @@ router.get("/", requireTenant, requireAdminOrTenantRole("staff"), async (req, re
       JOIN membership_plans mp
         ON mp.id = cm.plan_id
        AND mp.tenant_id = $1
-      WHERE cm.tenant_id = $1
-        AND cm.customer_id = $2
-        AND ($3::boolean OR cm.end_at IS NULL OR cm.end_at > NOW())
-        AND ($4::boolean OR cm.status <> 'archived')
-      ORDER BY cm.start_at DESC NULLS LAST, cm.created_at DESC NULLS LAST
+      JOIN customers c
+        ON c.id = cm.customer_id
+       AND c.tenant_id = cm.tenant_id
+      ${where}
+      ORDER BY
+        CASE
+          WHEN ${lifecycleCase} = 'active' THEN 0
+          WHEN ${lifecycleCase} = 'scheduled' THEN 1
+          WHEN ${lifecycleCase} = 'expired' THEN 2
+          WHEN ${lifecycleCase} = 'archived' THEN 3
+          ELSE 4
+        END ASC,
+        cm.start_at DESC NULLS LAST,
+        cm.created_at DESC NULLS LAST
+      LIMIT ${dataParams.length - 1}
+      OFFSET ${dataParams.length}
       `,
-      [tenantId, customerId, includeExpired, includeArchived]
+      dataParams
     );
 
-    return res.json({ memberships: r.rows });
+    return res.json({
+      memberships: r.rows,
+      meta: {
+        total,
+        limit,
+        offset,
+        hasMore: offset + r.rows.length < total,
+      },
+    });
   } catch (err) {
     console.error("GET /api/customer-memberships error:", err);
     return res.status(500).json({ error: "Failed to load memberships." });
@@ -208,6 +277,43 @@ router.patch("/:id/archive", requireTenant, requireAdminOrTenantRole("staff"), a
     return res.json({ membership: result.rows[0] });
   } catch (err) {
     console.error("archive membership error", err);
+    return res.status(500).json({ error: "internal error" });
+  }
+});
+
+
+// PATCH /api/customer-memberships/:id/status?tenantSlug=...
+// Body: { status: 'active' | 'archived' }
+router.patch("/:id/status", requireTenant, requireAdminOrTenantRole("staff"), async (req, res) => {
+  try {
+    const tenantId = req.tenantId;
+    const id = Number(req.params.id);
+    const nextStatus = String(req.body?.status || "").trim().toLowerCase();
+    if (!Number.isFinite(id) || id <= 0) {
+      return res.status(400).json({ error: "invalid membership id" });
+    }
+    if (!["active", "archived"].includes(nextStatus)) {
+      return res.status(400).json({ error: "invalid status" });
+    }
+
+    const result = await db.query(
+      `
+      UPDATE customer_memberships
+      SET status = $3,
+          updated_at = NOW()
+      WHERE tenant_id = $1 AND id = $2
+      RETURNING id, tenant_id, customer_id, status, start_at, end_at, minutes_remaining, uses_remaining, plan_id, updated_at
+      `,
+      [tenantId, id, nextStatus]
+    );
+
+    if (!result.rows.length) {
+      return res.status(404).json({ error: "membership not found" });
+    }
+
+    return res.json({ membership: result.rows[0] });
+  } catch (err) {
+    console.error("membership status update error", err);
     return res.status(500).json({ error: "internal error" });
   }
 });
