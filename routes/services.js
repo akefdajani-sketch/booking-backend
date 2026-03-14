@@ -242,6 +242,7 @@ router.post("/", requireTenant, requireAdminOrTenantRole("manager"), async (req,
       price_amount,
       price_jd,
       slot_interval_minutes,
+      min_consecutive_slots,
       max_consecutive_slots,
       max_parallel_bookings,
       requires_staff,
@@ -316,8 +317,9 @@ router.post("/", requireTenant, requireAdminOrTenantRole("manager"), async (req,
 
     if (svcCols.has("slot_interval_minutes")) add("slot_interval_minutes", slot_interval_minutes == null ? null : Number(slot_interval_minutes));
     if (svcCols.has("min_consecutive_slots")) add("min_consecutive_slots", min_consecutive_slots == null ? null : Number(min_consecutive_slots));
-    if (svcCols.has("max_consecutive_slots")) add("max_consecutive_slots", max_consecutive_slots == null ? null : Number(max_consecutive_slots));
-    else if (svcCols.has("max_consecutive_slots")) add("max_consecutive_slots", max_consecutive_slots == null ? null : Number(max_consecutive_slots));
+    if (svcCols.has("max_consecutive_slots")) {
+      add("max_consecutive_slots", max_consecutive_slots == null ? null : Number(max_consecutive_slots));
+    }
 
     // Parallel: write to max_parallel_bookings if present, else legacy max_parallel
     if (svcCols.has("max_parallel_bookings")) add("max_parallel_bookings", max_parallel_bookings == null ? null : Number(max_parallel_bookings));
