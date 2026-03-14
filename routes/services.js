@@ -52,6 +52,26 @@ function normalizeAllowMembership(v) {
   return undefined;
 }
 
+
+const ALLOWED_MEMBERSHIP_REDEMPTION_MODES = new Set(["auto", "minutes", "uses"]);
+function normalizeMembershipRedemptionMode(v) {
+  if (v === undefined) return undefined;
+  if (v === null || v === "") return null;
+  const s = String(v).toLowerCase().trim();
+  if (!ALLOWED_MEMBERSHIP_REDEMPTION_MODES.has(s)) return undefined;
+  return s;
+}
+
+function normalizePositiveInt(v, { allowNull = true } = {}) {
+  if (v === undefined) return undefined;
+  if (v === null || v === "") return allowNull ? null : undefined;
+  const n = Number(v);
+  if (!Number.isFinite(n)) return undefined;
+  const intVal = Math.round(n);
+  if (intVal <= 0) return allowNull ? null : undefined;
+  return intVal;
+}
+
 async function getServicesColumns() {
   const { rows } = await db.query(
     `
@@ -172,6 +192,23 @@ router.get("/", async (req, res) => {
       ? "COALESCE(s.allow_membership, false) AS allow_membership"
       : "false::boolean AS allow_membership";
 
+
+    const membershipRedemptionModeExpr = svcCols.has("membership_redemption_mode")
+      ? "COALESCE(NULLIF(TRIM(s.membership_redemption_mode), ''), 'auto') AS membership_redemption_mode"
+      : "'auto'::text AS membership_redemption_mode";
+
+    const membershipMinutesPerBookingExpr = svcCols.has("membership_minutes_per_booking")
+      ? "s.membership_minutes_per_booking AS membership_minutes_per_booking"
+      : "NULL::int AS membership_minutes_per_booking";
+
+    const membershipUsesPerBookingExpr = svcCols.has("membership_uses_per_booking")
+      ? "s.membership_uses_per_booking AS membership_uses_per_booking"
+      : "NULL::int AS membership_uses_per_booking";
+
+    const membershipRedemptionNotesExpr = svcCols.has("membership_redemption_notes")
+      ? "s.membership_redemption_notes AS membership_redemption_notes"
+      : "NULL::text AS membership_redemption_notes";
+
     const q = `
       SELECT
         s.id,
@@ -188,6 +225,10 @@ router.get("/", async (req, res) => {
         COALESCE(s.requires_resource, false) AS requires_resource,
         ${requiresConfirmationExpr},
         ${allowMembershipExpr},
+        ${membershipRedemptionModeExpr},
+        ${membershipMinutesPerBookingExpr},
+        ${membershipUsesPerBookingExpr},
+        ${membershipRedemptionNotesExpr},
         s.availability_basis                AS availability_basis,
         COALESCE(s.is_active, true)         AS is_active,
         ${imageExpr},
@@ -249,6 +290,10 @@ router.post("/", requireTenant, requireAdminOrTenantRole("manager"), async (req,
       requires_resource,
       requires_confirmation,
       allow_membership,
+      membership_redemption_mode,
+      membership_minutes_per_booking,
+      membership_uses_per_booking,
+      membership_redemption_notes,
       availability_basis,
       is_active,
     } = req.body || {};
@@ -378,6 +423,10 @@ router.patch("/:id", resolveTenantFromServiceId, requireAdminOrTenantRole("manag
       requires_resource,
       requires_confirmation,
       allow_membership,
+      membership_redemption_mode,
+      membership_minutes_per_booking,
+      membership_uses_per_booking,
+      membership_redemption_notes,
       availability_basis,
       is_active,
     } = req.body || {};
@@ -385,6 +434,19 @@ router.patch("/:id", resolveTenantFromServiceId, requireAdminOrTenantRole("manag
     const ab = normalizeAvailabilityBasis(availability_basis);
     if (availability_basis != null && availability_basis !== "" && ab == null) {
       return res.status(400).json({ error: "Invalid availability_basis" });
+    }
+
+    const redemptionMode = normalizeMembershipRedemptionMode(membership_redemption_mode);
+    if (membership_redemption_mode !== undefined && redemptionMode === undefined) {
+      return res.status(400).json({ error: "Invalid membership_redemption_mode" });
+    }
+    const minutesPerBooking = normalizePositiveInt(membership_minutes_per_booking);
+    if (membership_minutes_per_booking !== undefined && minutesPerBooking === undefined) {
+      return res.status(400).json({ error: "Invalid membership_minutes_per_booking" });
+    }
+    const usesPerBooking = normalizePositiveInt(membership_uses_per_booking);
+    if (membership_uses_per_booking !== undefined && usesPerBooking === undefined) {
+      return res.status(400).json({ error: "Invalid membership_uses_per_booking" });
     }
 
     const svcCols = await getServicesColumns();
@@ -432,6 +494,10 @@ router.patch("/:id", resolveTenantFromServiceId, requireAdminOrTenantRole("manag
       const am = normalizeAllowMembership(allow_membership);
       if (am !== undefined) add("allow_membership", !!am);
     }
+    if (membership_redemption_mode !== undefined && svcCols.has("membership_redemption_mode")) add("membership_redemption_mode", redemptionMode || "auto");
+    if (membership_minutes_per_booking !== undefined && svcCols.has("membership_minutes_per_booking")) add("membership_minutes_per_booking", minutesPerBooking);
+    if (membership_uses_per_booking !== undefined && svcCols.has("membership_uses_per_booking")) add("membership_uses_per_booking", usesPerBooking);
+    if (membership_redemption_notes !== undefined && svcCols.has("membership_redemption_notes")) add("membership_redemption_notes", membership_redemption_notes == null ? null : String(membership_redemption_notes).trim());
     if (availability_basis !== undefined && svcCols.has("availability_basis")) add("availability_basis", ab);
     if (is_active !== undefined && svcCols.has("is_active")) add("is_active", !!is_active);
 
