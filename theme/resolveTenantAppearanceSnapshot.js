@@ -6,6 +6,13 @@ function toObj(v) {
   try { return JSON.parse(v); } catch { return {}; }
 }
 
+function firstNonEmpty(...values) {
+  for (const v of values) {
+    if (typeof v === "string" && v.trim()) return v.trim();
+  }
+  return null;
+}
+
 function resolveLayoutKey(themeKey, themeRow) {
   const raw = String(themeRow?.layout_key || themeKey || "classic").trim().toLowerCase();
   if (raw === "premium_v2") return "premium";
@@ -74,6 +81,13 @@ async function resolveTenantAppearanceSnapshot(tenantId) {
            t.branding_published,
            t.publish_status,
            t.theme_schema_published_json,
+           t.logo_url,
+           t.cover_image_url,
+           t.banner_home_url,
+           t.banner_book_url,
+           t.banner_account_url,
+           t.banner_reservations_url,
+           t.banner_memberships_url,
            pt.key AS platform_theme_key,
            pt.layout_key,
            pt.tokens_json
@@ -106,6 +120,24 @@ async function resolveTenantAppearanceSnapshot(tenantId) {
     isLightTheme,
   });
 
+  const brandingAssets = toObj(branding.assets);
+  const brandingBanners = toObj(brandingAssets.banners);
+  const assets = {
+    logoUrl: firstNonEmpty(brandingAssets.logoUrl, row.logo_url),
+    heroImageUrl: firstNonEmpty(brandingAssets.heroImageUrl, brandingAssets.heroUrl),
+    coverImageUrl: firstNonEmpty(brandingAssets.coverImageUrl, row.cover_image_url),
+    membershipsImageUrl: firstNonEmpty(brandingAssets.membershipsImageUrl),
+    packagesImageUrl: firstNonEmpty(brandingAssets.packagesImageUrl),
+    banners: {
+      home: firstNonEmpty(brandingBanners.home, row.banner_home_url),
+      book: firstNonEmpty(brandingBanners.book, row.banner_book_url),
+      account: firstNonEmpty(brandingBanners.account, row.banner_account_url),
+      reservations: firstNonEmpty(brandingBanners.reservations, row.banner_reservations_url),
+      memberships: firstNonEmpty(brandingBanners.memberships, row.banner_memberships_url),
+      packages: firstNonEmpty(brandingBanners.packages),
+    },
+  };
+
   return {
     themeKey,
     layoutKey,
@@ -120,6 +152,7 @@ async function resolveTenantAppearanceSnapshot(tenantId) {
       showPattern: premiumFamily,
       patternStyle: premiumFamily ? 'premium-grid-subtle' : 'none',
     },
+    assets,
     publishedAt: new Date().toISOString(),
   };
 }

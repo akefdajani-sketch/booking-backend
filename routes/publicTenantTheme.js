@@ -17,7 +17,7 @@ async function hasTenantColumn(col) {
           AND table_name = 'tenants'
           AND column_name = ANY($1::text[])
         `,
-        [["default_phone_country_code", "appearance_snapshot_published_json", "appearance_snapshot_version", "appearance_snapshot_published_at"]]
+        [["default_phone_country_code", "appearance_snapshot_published_json", "appearance_snapshot_version", "appearance_snapshot_published_at", "cover_image_url"]]
       );
       __tenantColCache = new Set(r.rows.map((x) => x.column_name));
     } catch {
@@ -50,7 +50,7 @@ router.get("/:slug", async (req, res) => {
             appearance_snapshot_version,
             appearance_snapshot_published_at,
             banner_home_url, banner_book_url, banner_account_url, banner_reservations_url, banner_memberships_url,
-            logo_url
+            logo_url, cover_image_url
      FROM tenants
      WHERE slug = $1`,
     [slug]
@@ -102,6 +102,8 @@ router.get("/:slug", async (req, res) => {
   const publishedObj = tenant.branding_published && typeof tenant.branding_published === "object"
     ? tenant.branding_published
     : null;
+  const publishedAssets = publishedObj && typeof publishedObj.assets === 'object' ? publishedObj.assets : {};
+  const publishedAssetBanners = publishedAssets && typeof publishedAssets.banners === 'object' ? publishedAssets.banners : {};
   const hasPublished = publishedObj && Object.keys(publishedObj).length > 0;
   const isPublished = String(tenant.publish_status || "") === "published";
   const effectiveBranding = (isPublished && hasPublished) ? publishedObj : null;
@@ -110,11 +112,12 @@ router.get("/:slug", async (req, res) => {
   // Tenants can keep a published branding snapshot for tokens, but still expect
   // banner uploads (stored on the tenant row) to show right away.
   const tenantBanners = {
-    home: tenant.banner_home_url,
-    book: tenant.banner_book_url,
-    account: tenant.banner_account_url,
-    reservations: tenant.banner_reservations_url,
-    memberships: tenant.banner_memberships_url,
+    home: tenant.banner_home_url || publishedAssetBanners.home || null,
+    book: tenant.banner_book_url || publishedAssetBanners.book || null,
+    account: tenant.banner_account_url || publishedAssetBanners.account || null,
+    reservations: tenant.banner_reservations_url || publishedAssetBanners.reservations || null,
+    memberships: tenant.banner_memberships_url || publishedAssetBanners.memberships || null,
+    packages: publishedAssetBanners.packages || null,
   };
 
   const effectiveBrandingWithBanners = effectiveBranding
@@ -122,6 +125,8 @@ router.get("/:slug", async (req, res) => {
         ...effectiveBranding,
         assets: {
           ...(effectiveBranding.assets || {}),
+          logoUrl: (effectiveBranding.assets && effectiveBranding.assets.logoUrl) || tenant.logo_url || null,
+          coverImageUrl: (effectiveBranding.assets && effectiveBranding.assets.coverImageUrl) || tenant.cover_image_url || null,
           banners: {
             ...((effectiveBranding.assets && effectiveBranding.assets.banners) || {}),
             ...tenantBanners,
@@ -150,6 +155,28 @@ router.get("/:slug", async (req, res) => {
     snapshotUsed = false;
   }
 
+  if (appearanceSnapshot && typeof appearanceSnapshot === "object") {
+    const snapshotAssets = appearanceSnapshot.assets && typeof appearanceSnapshot.assets === "object"
+      ? appearanceSnapshot.assets
+      : {};
+    const snapshotBanners = snapshotAssets.banners && typeof snapshotAssets.banners === "object"
+      ? snapshotAssets.banners
+      : {};
+
+    appearanceSnapshot = {
+      ...appearanceSnapshot,
+      assets: {
+        ...snapshotAssets,
+        logoUrl: snapshotAssets.logoUrl || tenant.logo_url || null,
+        coverImageUrl: snapshotAssets.coverImageUrl || tenant.cover_image_url || null,
+        banners: {
+          ...snapshotBanners,
+          ...Object.fromEntries(Object.entries(tenantBanners).filter(([, v]) => !!v)),
+        },
+      },
+    };
+  }
+
   res.json({
     ok: true,
     tenantSlug: tenant.slug,
@@ -162,6 +189,7 @@ router.get("/:slug", async (req, res) => {
       id: tenant.id,
       slug: tenant.slug,
       logo_url: tenant.logo_url,
+      cover_image_url: tenant.cover_image_url || null,
       // Phase C: lightweight booking policy flags (schema-free, stored in branding json).
       settings: {
         // default true unless explicitly disabled
