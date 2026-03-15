@@ -1,0 +1,141 @@
+const db = require("../db");
+
+function toObj(v) {
+  if (!v) return {};
+  if (typeof v === "object") return v;
+  try { return JSON.parse(v); } catch { return {}; }
+}
+
+function resolveLayoutKey(themeKey, themeRow) {
+  const raw = String(themeRow?.layout_key || themeKey || "classic").trim().toLowerCase();
+  if (raw === "premium_v2") return "premium";
+  return raw || "classic";
+}
+
+function isPremiumFamily(themeKey, layoutKey) {
+  const key = String(themeKey || "").toLowerCase();
+  const layout = String(layoutKey || "").toLowerCase();
+  return key === "premium" || key === "premium_v2" || layout === "premium";
+}
+
+function buildResolvedCssVars({ branding, brandOverrides, themeTokens, isPremium, isLightTheme }) {
+  const colors = toObj(branding).colors || {};
+  const primary = String(colors.primary || "#22c55e");
+  const background = String(colors.background || (isLightTheme ? "#ffffff" : "#020617"));
+  const surface = String(colors.surface || (isLightTheme ? "#ffffff" : "rgba(2, 6, 23, 0.38)"));
+  const border = String(colors.border || (isLightTheme ? "rgba(15,23,42,0.12)" : "rgba(255,255,255,0.12)"));
+  const text = String(colors.text || (isLightTheme ? "rgba(15,23,42,0.92)" : "rgba(255,255,255,0.92)"));
+  const muted = String(colors.mutedText || (isLightTheme ? "rgba(15,23,42,0.68)" : "rgba(255,255,255,0.72)"));
+
+  const vars = {
+    '--bf-brand-primary': primary,
+    '--bf-page-bg': background,
+    '--bf-card-bg': surface,
+    '--bf-card-border': border,
+    '--bf-text-main': text,
+    '--bf-text-muted': muted,
+    '--bf-text-soft': muted,
+    '--bf-surface': surface,
+    '--bf-border': border,
+  };
+
+  if (isPremium) {
+    Object.assign(vars, {
+      '--bf-glass-bg': isLightTheme ? 'rgba(255,255,255,0.26)' : 'rgba(2,6,23,0.42)',
+      '--bf-glass-bg-strong': isLightTheme ? 'rgba(255,255,255,0.38)' : 'rgba(2,6,23,0.56)',
+      '--bf-glass-border': isLightTheme ? 'rgba(255,255,255,0.46)' : 'rgba(255,255,255,0.18)',
+      '--bf-glass-shadow': isLightTheme ? '0 18px 42px rgba(15,23,42,0.12)' : '0 22px 70px rgba(2,6,23,0.30)',
+      '--bf-glass-highlight': isLightTheme ? 'linear-gradient(180deg, rgba(255,255,255,0.38) 0%, rgba(255,255,255,0.10) 100%)' : 'linear-gradient(180deg, rgba(255,255,255,0.16) 0%, rgba(255,255,255,0.04) 100%)',
+      '--bf-glass-blur': isLightTheme ? 'blur(16px)' : 'blur(18px)',
+      '--bf-glass-saturate': isLightTheme ? 'saturate(1.10)' : 'saturate(1.08)',
+      '--bf-menu-bg': isLightTheme ? 'rgba(255,255,255,0.72)' : 'rgba(2,6,23,0.62)',
+      '--bf-drawer-bg': isLightTheme ? 'rgba(255,255,255,0.78)' : 'rgba(2,6,23,0.68)',
+      '--bf-drawer-item-bg': isLightTheme ? 'rgba(255,255,255,0.44)' : 'rgba(255,255,255,0.08)',
+      '--bf-drawer-item-bg-active': isLightTheme ? 'rgba(34,197,94,0.16)' : 'rgba(34,197,94,0.22)',
+      '--bf-drawer-item-text': isLightTheme ? 'rgba(15,23,42,0.92)' : 'rgba(255,255,255,0.92)',
+      '--bf-drawer-item-text-active': isLightTheme ? 'rgba(15,23,42,0.96)' : '#ffffff',
+    });
+  }
+
+  if (themeTokens && typeof themeTokens === 'object') {
+    for (const [k, v] of Object.entries(themeTokens)) if (typeof v === 'string' && v.trim()) vars[k] = v;
+  }
+  if (brandOverrides && typeof brandOverrides === 'object') {
+    for (const [k, v] of Object.entries(brandOverrides)) if (typeof v === 'string' && v.trim()) vars[k] = v;
+  }
+  return vars;
+}
+
+async function resolveTenantAppearanceSnapshot(tenantId) {
+  const q = await db.query(`
+    SELECT t.id, t.slug, t.theme_key,
+           t.brand_overrides_json,
+           t.branding,
+           t.branding_published,
+           t.publish_status,
+           t.theme_schema_published_json,
+           pt.key AS platform_theme_key,
+           pt.layout_key,
+           pt.tokens_json
+    FROM tenants t
+    LEFT JOIN platform_themes pt ON pt.key = t.theme_key AND pt.is_published = TRUE
+    WHERE t.id = $1
+    LIMIT 1
+  `, [tenantId]);
+  const row = q.rows[0];
+  if (!row) {
+    const err = new Error('Tenant not found');
+    err.status = 404;
+    throw err;
+  }
+
+  const themeKey = String(row.theme_key || 'default_v1');
+  const layoutKey = resolveLayoutKey(themeKey, row);
+  const published = String(row.publish_status || '') === 'published';
+  const branding = published ? toObj(row.branding_published) : {};
+  const brandOverrides = toObj(row.brand_overrides_json);
+  const themeStudioTokens = toObj(row.theme_schema_published_json);
+  const platformTokens = toObj(row.tokens_json);
+  const premiumFamily = isPremiumFamily(themeKey, layoutKey);
+  const isLightTheme = String(layoutKey).toLowerCase() === 'premium_light';
+  const resolvedCssVars = buildResolvedCssVars({
+    branding,
+    brandOverrides,
+    themeTokens: platformTokens,
+    isPremium: premiumFamily,
+    isLightTheme,
+  });
+
+  return {
+    themeKey,
+    layoutKey,
+    presetVersion: 1,
+    isPremiumFamily: premiumFamily,
+    isLightTheme,
+    branding,
+    brandOverrides,
+    themeStudioTokens,
+    resolvedCssVars,
+    landing: {
+      showPattern: premiumFamily,
+      patternStyle: premiumFamily ? 'premium-grid-subtle' : 'none',
+    },
+    publishedAt: new Date().toISOString(),
+  };
+}
+
+async function writeTenantAppearanceSnapshot(tenantId) {
+  const snapshot = await resolveTenantAppearanceSnapshot(tenantId);
+  await db.query(`
+    UPDATE tenants
+       SET appearance_snapshot_published_json = $2::jsonb,
+           appearance_snapshot_published_at = NOW(),
+           appearance_snapshot_version = COALESCE(appearance_snapshot_version, 0) + 1,
+           appearance_snapshot_source_theme_key = $3,
+           appearance_snapshot_layout_key = $4
+     WHERE id = $1
+  `, [tenantId, JSON.stringify(snapshot), snapshot.themeKey, snapshot.layoutKey]);
+  return snapshot;
+}
+
+module.exports = { resolveTenantAppearanceSnapshot, writeTenantAppearanceSnapshot };

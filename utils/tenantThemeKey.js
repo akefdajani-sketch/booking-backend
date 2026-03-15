@@ -1,5 +1,5 @@
 // Keep built-in theme keys usable even if platform_themes isn't seeded yet.
-const BUILTIN_THEME_KEYS = new Set(["default_v1", "classic", "premium", "premium_light"]);
+const BUILTIN_THEME_KEYS = new Set(["default_v1", "classic", "premium", "premium_v2", "premium_light"]);
 
 async function validateThemeKey(db, themeKey) {
   if (BUILTIN_THEME_KEYS.has(themeKey)) return;
