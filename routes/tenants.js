@@ -23,6 +23,7 @@ const { upload, uploadErrorHandler } = require("../middleware/upload");
 const { uploadFileToR2, deleteFromR2, safeName } = require("../utils/r2");
 const { validateTenantPublish } = require("../utils/publish");
 const { getDashboardSummary } = require("../utils/dashboardSummary");
+const { writeTenantAppearanceSnapshot } = require("../theme/resolveTenantAppearanceSnapshot");
 
 const fs = require("fs/promises");
 
@@ -613,12 +614,20 @@ router.post("/publish", maybeEnsureUser, requireTenant, requireAdminOrTenantRole
       // Only treat as "no changes" if the tenant is already published.
       // If they are still draft, pressing publish should still flip state.
       if (persistedStatus === "published" && noBrandingChanges) {
+        let appearance_snapshot = null;
+        try {
+          appearance_snapshot = await writeTenantAppearanceSnapshot(tenantId);
+        } catch (e) {
+          console.error("publish snapshot refresh error (no_changes path):", e);
+        }
+
         return res.status(200).json({
           ok: true,
           no_changes: true,
           publish_status: "published",
           dryRun,
           serverTime: new Date().toISOString(),
+          appearance_snapshot,
         });
       }
     }
@@ -669,6 +678,13 @@ router.post("/publish", maybeEnsureUser, requireTenant, requireAdminOrTenantRole
         [tenantId]
       );
 
+      let appearance_snapshot = null;
+      try {
+        appearance_snapshot = await writeTenantAppearanceSnapshot(tenantId);
+      } catch (e) {
+        console.error("publish snapshot refresh error:", e);
+      }
+
       const row = upd.rows?.[0] || {};
       return res.json({
         ok: true,
@@ -680,6 +696,7 @@ router.post("/publish", maybeEnsureUser, requireTenant, requireAdminOrTenantRole
         metrics: validation.metrics || {},
         dryRun,
         serverTime: now,
+        appearance_snapshot,
       });
     }
 
