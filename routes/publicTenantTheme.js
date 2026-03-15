@@ -1,6 +1,7 @@
 const express = require("express");
 const router = express.Router();
 const db = require("../db");
+const { resolveTenantAppearanceSnapshot } = require("../theme/resolveTenantAppearanceSnapshot");
 
 // Schema-compat: public endpoints must not crash if a newer optional column
 // doesn't exist yet in an environment.
@@ -16,7 +17,7 @@ async function hasTenantColumn(col) {
           AND table_name = 'tenants'
           AND column_name = ANY($1::text[])
         `,
-        [["default_phone_country_code"]]
+        [["default_phone_country_code", "appearance_snapshot_published_json", "appearance_snapshot_version", "appearance_snapshot_published_at"]]
       );
       __tenantColCache = new Set(r.rows.map((x) => x.column_name));
     } catch {
@@ -45,6 +46,9 @@ router.get("/:slug", async (req, res) => {
             publish_status,
             theme_schema_published_json,
             ${defaultPhoneSel},
+            appearance_snapshot_published_json,
+            appearance_snapshot_version,
+            appearance_snapshot_published_at,
             banner_home_url, banner_book_url, banner_account_url, banner_reservations_url, banner_memberships_url,
             logo_url
      FROM tenants
@@ -59,7 +63,7 @@ router.get("/:slug", async (req, res) => {
 
   // Built-in theme keys that ship with the frontend layouts.
   // These must work even if `platform_themes` rows haven't been seeded yet.
-  const BUILTIN_THEME_KEYS = new Set(["default_v1", "classic", "premium", "premium_light"]);
+  const BUILTIN_THEME_KEYS = new Set(["default_v1", "classic", "premium", "premium_v2", "premium_light"]);
 
   let theme = null;
 
@@ -133,7 +137,27 @@ router.get("/:slug", async (req, res) => {
     : null;
   const effectiveThemeSchema = isPublished ? publishedThemeSchema : null;
 
+  let appearanceSnapshot = tenant.appearance_snapshot_published_json && typeof tenant.appearance_snapshot_published_json === "object"
+    ? tenant.appearance_snapshot_published_json
+    : null;
+  let snapshotUsed = !!appearanceSnapshot;
+  if (!appearanceSnapshot && isPublished) {
+    try {
+      appearanceSnapshot = await resolveTenantAppearanceSnapshot(tenant.id);
+    } catch {
+      appearanceSnapshot = null;
+    }
+    snapshotUsed = false;
+  }
+
   res.json({
+    ok: true,
+    tenantSlug: tenant.slug,
+    themeKey: theme.key,
+    layoutKey: theme.layout_key || "classic",
+    snapshotUsed,
+    snapshotVersion: tenant.appearance_snapshot_version || null,
+    appearance: appearanceSnapshot,
     tenant: {
       id: tenant.id,
       slug: tenant.slug,

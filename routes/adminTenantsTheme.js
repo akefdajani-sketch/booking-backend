@@ -80,6 +80,7 @@ function summarizeDiff(changes) {
 const db = require("../db");
 const requireAdminOrTenantRole = require("../middleware/requireAdminOrTenantRole");
 const { getPlanSummaryForTenant } = require("../utils/planEnforcement");
+const { writeTenantAppearanceSnapshot } = require("../theme/resolveTenantAppearanceSnapshot");
 
 function setTenantIdFromParam(req, res, next) {
   const tid = Number(req.params.tenantId);
@@ -127,6 +128,28 @@ async function ensureBrandOverridesColumn() {
   await db.query(`ALTER TABLE tenants ADD COLUMN IF NOT EXISTS brand_overrides_json JSONB;`);
 }
 
+
+async function ensureAppearanceSnapshotColumns() {
+  await db.query(`ALTER TABLE tenants ADD COLUMN IF NOT EXISTS appearance_snapshot_published_json JSONB;`);
+  await db.query(`ALTER TABLE tenants ADD COLUMN IF NOT EXISTS appearance_snapshot_version INTEGER NOT NULL DEFAULT 1;`);
+  await db.query(`ALTER TABLE tenants ADD COLUMN IF NOT EXISTS appearance_snapshot_published_at TIMESTAMPTZ;`);
+  await db.query(`ALTER TABLE tenants ADD COLUMN IF NOT EXISTS appearance_snapshot_source_theme_key TEXT;`);
+  await db.query(`ALTER TABLE tenants ADD COLUMN IF NOT EXISTS appearance_snapshot_layout_key TEXT;`);
+}
+
+async function refreshAppearanceSnapshot(tenantId) {
+  await ensureThemeKeyColumn();
+  await ensureBrandingColumns();
+  await ensureThemeSchemaColumns();
+  await ensureBrandOverridesColumn();
+  await ensureAppearanceSnapshotColumns();
+  try {
+    return await writeTenantAppearanceSnapshot(tenantId);
+  } catch (e) {
+    console.error("refreshAppearanceSnapshot error:", e);
+    return null;
+  }
+}
 
 async function ensureChangelog() {
   await db.query(`
@@ -384,8 +407,9 @@ router.post("/:tenantId/theme-key", setTenantIdFromParam, requireAdminOrTenantRo
     const tenant = await updateTenantThemeKey(db, tenantId, themeKey);
 
     await logChange(tenantId, "THEME_KEY_SET", getActor(req), { theme_key: themeKey });
+    const appearance_snapshot = await refreshAppearanceSnapshot(tenantId);
 
-    return res.json({ ok: true, tenant });
+    return res.json({ ok: true, tenant, appearance_snapshot });
   } catch (e) {
     const status = Number(e?.status) || 500;
     const msg = e?.message || "Failed to set theme key";
@@ -485,8 +509,9 @@ router.post("/:tenantId/theme-schema/publish", setTenantIdFromParam, requireAdmi
   if (!rows[0]) return res.status(404).json({ error: "Tenant not found" });
 
   await logChange(tenantId, "THEME_SCHEMA_PUBLISH", getActor(req), {});
+  const appearance_snapshot = await refreshAppearanceSnapshot(tenantId);
 
-  res.json({ ok: true, published_at: rows[0].theme_schema_published_at });
+  res.json({ ok: true, published_at: rows[0].theme_schema_published_at, appearance_snapshot });
 });
 
 router.post("/:tenantId/theme-schema/rollback", setTenantIdFromParam, requireAdminOrTenantRole("owner"), async (req, res) => {
@@ -621,8 +646,9 @@ router.post("/:tenantId/branding/publish", setTenantIdFromParam, requireAdminOrT
     if (!rows[0]) return res.status(404).json({ error: "Tenant not found" });
 
     await logChange(tenantId, "BRANDING_PUBLISH", getActor(req), {});
+    const appearance_snapshot = await refreshAppearanceSnapshot(tenantId);
 
-    return res.json({ ok: true, published_at: rows[0].branding_published_at });
+    return res.json({ ok: true, published_at: rows[0].branding_published_at, appearance_snapshot });
   } catch (e) {
     console.error("POST /api/admin/tenants/:tenantId/branding/publish error:", e);
     return res.status(500).json({ error: "Failed to publish branding" });
