@@ -139,21 +139,22 @@ async function resolveTenantAppearanceSnapshot(tenantId) {
   };
 
   return {
-    themeKey,
-    layoutKey,
-    presetVersion: 1,
-    isPremiumFamily: premiumFamily,
-    isLightTheme,
-    branding,
-    brandOverrides,
-    themeStudioTokens,
-    resolvedCssVars,
-    landing: {
-      showPattern: premiumFamily,
-      patternStyle: premiumFamily ? 'premium-grid-subtle' : 'none',
-    },
-    assets,
-    publishedAt: new Date().toISOString(),
+  themeKey,
+  layoutKey,
+  presetVersion: 1,
+  debugSnapshotMarker: "plg2-assets-v1",
+  isPremiumFamily: premiumFamily,
+  isLightTheme,
+  branding,
+  brandOverrides,
+  themeStudioTokens,
+  resolvedCssVars,
+  landing: {
+    showPattern: premiumFamily,
+    patternStyle: premiumFamily ? 'premium-grid-subtle' : 'none',
+  },
+  assets,
+  publishedAt: new Date().toISOString(),
   };
 }
 
