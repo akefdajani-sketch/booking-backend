@@ -81,6 +81,49 @@ const db = require("../db");
 const requireAdminOrTenantRole = require("../middleware/requireAdminOrTenantRole");
 const { getPlanSummaryForTenant } = require("../utils/planEnforcement");
 const { writeTenantAppearanceSnapshot } = require("../theme/resolveTenantAppearanceSnapshot");
+const { sanitizeBrandOverrides } = require("../theme/validateTokens");
+
+// Glass vars and other snapshot-computed vars that must NEVER be stored in
+// branding.brand_overrides. They are derived dynamically from the brand colors
+// by buildResolvedCssVars in resolveTenantAppearanceSnapshot. Storing them
+// hard-wires the appearance and makes Brand Setup color changes have no effect.
+const SNAPSHOT_COMPUTED_VARS = new Set([
+  "--bf-glass-bg",
+  "--bf-glass-bg-strong",
+  "--bf-glass-blur",
+  "--bf-glass-saturate",
+  "--bf-glass-border",
+  "--bf-glass-shadow",
+  "--bf-glass-highlight",
+  "--bf-glass-menu-blur",
+  "--bf-premium-pattern-line",
+  "--bf-premium-pattern-opacity",
+  "--bf-premium-pattern-size",
+  "--bf-premium-pattern-sheen-opacity",
+  "--bf-premium-light-grid-opacity",
+  "--bf-premium-pattern-blend",
+  "--bf-selection-bg",
+  "--bf-selection-text",
+]);
+
+/**
+ * Strip snapshot-computed vars from branding.brand_overrides.
+ * Called on every save-draft and publish so the snapshot resolver always
+ * owns the glass/pattern/selection vars — never a stale stored override.
+ */
+function stripComputedVarsFromBranding(branding) {
+  if (!branding || typeof branding !== "object") return branding;
+  const bo = branding.brand_overrides;
+  if (!bo || typeof bo !== "object") return branding;
+
+  const cleaned = {};
+  for (const [k, v] of Object.entries(bo)) {
+    if (!SNAPSHOT_COMPUTED_VARS.has(k)) cleaned[k] = v;
+  }
+
+  // Return a shallow clone with the cleaned brand_overrides
+  return { ...branding, brand_overrides: cleaned };
+}
 
 function setTenantIdFromParam(req, res, next) {
   const tid = Number(req.params.tenantId);
@@ -603,8 +646,13 @@ router.post("/:tenantId/branding/save-draft", setTenantIdFromParam, requireAdmin
 
     await ensureBrandingColumns();
 
-    const branding = parseJsonBody(req);
-    if (!branding) return res.status(400).json({ error: "Missing draft branding" });
+    const brandingRaw = parseJsonBody(req);
+    if (!brandingRaw) return res.status(400).json({ error: "Missing draft branding" });
+
+    // Strip glass/pattern/selection vars that the snapshot resolver computes
+    // dynamically. Storing them in brand_overrides would permanently override
+    // the computed values and make Brand Setup color changes have no effect.
+    const branding = stripComputedVarsFromBranding(brandingRaw);
 
     await db.query(
       `UPDATE tenants
@@ -633,14 +681,27 @@ router.post("/:tenantId/branding/publish", setTenantIdFromParam, requireAdminOrT
 
     await ensureBrandingColumns();
 
+    // Strip computed vars from the draft before promoting to published.
+    // This ensures the published snapshot is always clean even if old saved
+    // drafts still contain stale glass/pattern overrides from before this fix.
+    const { rows: draftRows } = await db.query(
+      `SELECT branding FROM tenants WHERE id = $1`,
+      [tenantId]
+    );
+    const draftBranding = draftRows[0]?.branding ?? {};
+    const cleanBranding = stripComputedVarsFromBranding(
+      typeof draftBranding === "object" ? draftBranding : {}
+    );
+
     const { rows } = await db.query(
       `UPDATE tenants
-       SET branding_published = branding,
+       SET branding = $2::jsonb,
+           branding_published = $2::jsonb,
            branding_published_at = NOW(),
            publish_status = 'published'
        WHERE id = $1
        RETURNING branding_published_at`,
-      [tenantId]
+      [tenantId, JSON.stringify(cleanBranding)]
     );
 
     if (!rows[0]) return res.status(404).json({ error: "Tenant not found" });
