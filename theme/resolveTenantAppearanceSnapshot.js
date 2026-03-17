@@ -1,4 +1,5 @@
 const db = require("../db");
+const { schemaToCssVars } = require("./resolveThemeSchema");
 
 function toObj(v) {
   if (!v) return {};
@@ -15,8 +16,18 @@ function firstNonEmpty(...values) {
 
 function resolveLayoutKey(themeKey, themeRow) {
   const raw = String(themeRow?.layout_key || themeKey || "classic").trim().toLowerCase();
+  if (!raw) return "classic";
+  if (raw === "default_v1" || raw === "default") return "classic";
   if (raw === "premium_v2") return "premium";
-  return raw || "classic";
+  if (raw === "premiumlight") return "premium_light";
+  return raw;
+}
+
+function isFlatCssVarMap(obj) {
+  if (!obj || typeof obj !== "object" || Array.isArray(obj)) return false;
+  const keys = Object.keys(obj);
+  if (!keys.length) return false;
+  return keys.every((k) => typeof k === "string" && k.startsWith("--bf-"));
 }
 
 function isPremiumFamily(themeKey, layoutKey) {
@@ -112,14 +123,24 @@ async function resolveTenantAppearanceSnapshot(tenantId) {
       ? branding.homeLanding
       : {};
   const brandOverrides = toObj(row.brand_overrides_json);
-  const themeStudioTokens = toObj(row.theme_schema_published_json);
+  const publishedThemeSchema = toObj(row.theme_schema_published_json);
   const platformTokens = toObj(row.tokens_json);
   const premiumFamily = isPremiumFamily(themeKey, layoutKey);
   const isLightTheme = String(layoutKey).toLowerCase() === 'premium_light';
+
+  const schemaResolved = publishedThemeSchema && typeof publishedThemeSchema === 'object'
+    ? schemaToCssVars(publishedThemeSchema)
+    : null;
+  const schemaCssVars = isFlatCssVarMap(schemaResolved?.cssVars) ? schemaResolved.cssVars : {};
+  const platformCssVars = isFlatCssVarMap(platformTokens) ? platformTokens : {};
+  const themeStudioTokens = {
+    ...platformCssVars,
+    ...schemaCssVars,
+  };
   const resolvedCssVars = buildResolvedCssVars({
     branding,
     brandOverrides,
-    themeTokens: platformTokens,
+    themeTokens: themeStudioTokens,
     isPremium: premiumFamily,
     isLightTheme,
   });
@@ -156,7 +177,12 @@ async function resolveTenantAppearanceSnapshot(tenantId) {
   landing: {
     showPattern: premiumFamily,
     patternStyle: premiumFamily ? 'premium-grid-subtle' : 'none',
+    templateKey: homeLanding && typeof homeLanding === 'object' && typeof homeLanding.templateKey === 'string' && homeLanding.templateKey.trim()
+      ? homeLanding.templateKey.trim()
+      : 'default',
+    templateVersion: Number.isFinite(Number(homeLanding?.version)) ? Number(homeLanding.version) : 1,
   },
+  homeLanding,
   assets,
   publishedAt: new Date().toISOString(),
   };
