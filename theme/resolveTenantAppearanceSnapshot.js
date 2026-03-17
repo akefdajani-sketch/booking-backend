@@ -107,6 +107,10 @@ async function resolveTenantAppearanceSnapshot(tenantId) {
   const layoutKey = resolveLayoutKey(themeKey, row);
   const published = String(row.publish_status || '') === 'published';
   const branding = published ? toObj(row.branding_published) : {};
+  const homeLanding =
+    branding && typeof branding.homeLanding === "object"
+      ? branding.homeLanding
+      : {};
   const brandOverrides = toObj(row.brand_overrides_json);
   const themeStudioTokens = toObj(row.theme_schema_published_json);
   const platformTokens = toObj(row.tokens_json);

@@ -163,8 +163,25 @@ router.get("/:slug", async (req, res) => {
       ? snapshotAssets.banners
       : {};
 
+    const snapshotBranding =
+      appearanceSnapshot.branding && typeof appearanceSnapshot.branding === "object"
+        ? appearanceSnapshot.branding
+        : {};
+
+    const snapshotHomeLanding =
+      appearanceSnapshot.homeLanding && typeof appearanceSnapshot.homeLanding === "object"
+        ? appearanceSnapshot.homeLanding
+        : snapshotBranding.homeLanding && typeof snapshotBranding.homeLanding === "object"
+        ? snapshotBranding.homeLanding
+        : null;
+
     appearanceSnapshot = {
       ...appearanceSnapshot,
+      homeLanding: snapshotHomeLanding,
+      branding: {
+        ...snapshotBranding,
+        ...(snapshotHomeLanding ? { homeLanding: snapshotHomeLanding } : {}),
+      },
       assets: {
         ...snapshotAssets,
         logoUrl: snapshotAssets.logoUrl || tenant.logo_url || null,
@@ -176,6 +193,9 @@ router.get("/:slug", async (req, res) => {
       },
     };
   }
+
+module.exports = router;
+
 
   res.json({
     ok: true,
@@ -190,9 +210,7 @@ router.get("/:slug", async (req, res) => {
       slug: tenant.slug,
       logo_url: tenant.logo_url,
       cover_image_url: tenant.cover_image_url || null,
-      // Phase C: lightweight booking policy flags (schema-free, stored in branding json).
       settings: {
-        // default true unless explicitly disabled
         require_phone: (() => {
           const b = effectiveBranding || {};
           const v = b?.require_phone ?? b?.requirePhone ?? b?.phone_required ?? b?.phoneRequired;
@@ -202,8 +220,6 @@ router.get("/:slug", async (req, res) => {
           }
           return true;
         })(),
-
-        // Optional. Used for prefilling customer phone fields.
         default_phone_country_code: (() => {
           const s = String(tenant.default_phone_country_code || "").trim();
           return s || null;
