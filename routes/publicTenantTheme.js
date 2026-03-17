@@ -27,6 +27,17 @@ async function hasTenantColumn(col) {
   return __tenantColCache.has(col);
 }
 
+function snapshotNeedsRefresh(snapshot, tenant) {
+  if (!snapshot || typeof snapshot !== "object") return true;
+  const sourceTheme = String(snapshot.themeKey || "").trim().toLowerCase();
+  const tenantTheme = String(tenant.theme_key || "").trim().toLowerCase();
+  const cssVars = snapshot.resolvedCssVars && typeof snapshot.resolvedCssVars === "object" ? snapshot.resolvedCssVars : null;
+  const hasPremiumCore = !!(cssVars && cssVars["--bf-page-bg"] && cssVars["--bf-card-bg"] && cssVars["--bf-glass-bg"] && cssVars["--bf-menu-bg"] && cssVars["--bf-drawer-bg"]);
+  if (!sourceTheme || sourceTheme !== tenantTheme) return true;
+  if ((tenantTheme === "premium" || tenantTheme === "premium_v2" || snapshot.layoutKey === "premium") && !hasPremiumCore) return true;
+  return false;
+}
+
 // Public, cacheable tenant appearance payload for /book/[slug]
 //
 // IMPORTANT:
@@ -146,11 +157,11 @@ router.get("/:slug", async (req, res) => {
     ? tenant.appearance_snapshot_published_json
     : null;
   let snapshotUsed = !!appearanceSnapshot;
-  if (!appearanceSnapshot && isPublished) {
+  if (isPublished && snapshotNeedsRefresh(appearanceSnapshot, tenant)) {
     try {
       appearanceSnapshot = await resolveTenantAppearanceSnapshot(tenant.id);
     } catch {
-      appearanceSnapshot = null;
+      appearanceSnapshot = appearanceSnapshot && typeof appearanceSnapshot === "object" ? appearanceSnapshot : null;
     }
     snapshotUsed = false;
   }

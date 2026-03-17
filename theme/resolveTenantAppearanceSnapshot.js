@@ -38,48 +38,93 @@ function isPremiumFamily(themeKey, layoutKey) {
 
 function buildResolvedCssVars({ branding, brandOverrides, themeTokens, isPremium, isLightTheme }) {
   const colors = toObj(branding).colors || {};
-  const primary = String(colors.primary || "#22c55e");
-  const background = String(colors.background || (isLightTheme ? "#ffffff" : "#020617"));
-  const surface = String(colors.surface || (isLightTheme ? "#ffffff" : "rgba(2, 6, 23, 0.38)"));
-  const border = String(colors.border || (isLightTheme ? "rgba(15,23,42,0.12)" : "rgba(255,255,255,0.12)"));
-  const text = String(colors.text || (isLightTheme ? "rgba(15,23,42,0.92)" : "rgba(255,255,255,0.92)"));
-  const muted = String(colors.mutedText || (isLightTheme ? "rgba(15,23,42,0.68)" : "rgba(255,255,255,0.72)"));
-
-  const vars = {
-    '--bf-brand-primary': primary,
-    '--bf-page-bg': background,
-    '--bf-card-bg': surface,
-    '--bf-card-border': border,
-    '--bf-text-main': text,
-    '--bf-text-muted': muted,
-    '--bf-text-soft': muted,
-    '--bf-surface': surface,
-    '--bf-border': border,
+  const themeVar = (key) => {
+    const bv = brandOverrides && typeof brandOverrides[key] === "string" ? brandOverrides[key].trim() : "";
+    if (bv) return bv;
+    const tv = themeTokens && typeof themeTokens[key] === "string" ? themeTokens[key].trim() : "";
+    if (tv) return tv;
+    return "";
   };
 
-  if (isPremium) {
-    Object.assign(vars, {
-      '--bf-glass-bg': isLightTheme ? 'rgba(255,255,255,0.26)' : 'rgba(2,6,23,0.42)',
-      '--bf-glass-bg-strong': isLightTheme ? 'rgba(255,255,255,0.38)' : 'rgba(2,6,23,0.56)',
-      '--bf-glass-border': isLightTheme ? 'rgba(255,255,255,0.46)' : 'rgba(255,255,255,0.18)',
-      '--bf-glass-shadow': isLightTheme ? '0 18px 42px rgba(15,23,42,0.12)' : '0 22px 70px rgba(2,6,23,0.30)',
-      '--bf-glass-highlight': isLightTheme ? 'linear-gradient(180deg, rgba(255,255,255,0.38) 0%, rgba(255,255,255,0.10) 100%)' : 'linear-gradient(180deg, rgba(255,255,255,0.16) 0%, rgba(255,255,255,0.04) 100%)',
-      '--bf-glass-blur': isLightTheme ? 'blur(16px)' : 'blur(18px)',
-      '--bf-glass-saturate': isLightTheme ? 'saturate(1.10)' : 'saturate(1.08)',
-      '--bf-menu-bg': isLightTheme ? 'rgba(255,255,255,0.72)' : 'rgba(2,6,23,0.62)',
-      '--bf-drawer-bg': isLightTheme ? 'rgba(255,255,255,0.78)' : 'rgba(2,6,23,0.68)',
-      '--bf-drawer-item-bg': isLightTheme ? 'rgba(255,255,255,0.44)' : 'rgba(255,255,255,0.08)',
-      '--bf-drawer-item-bg-active': isLightTheme ? 'rgba(34,197,94,0.16)' : 'rgba(34,197,94,0.22)',
-      '--bf-drawer-item-text': isLightTheme ? 'rgba(15,23,42,0.92)' : 'rgba(255,255,255,0.92)',
-      '--bf-drawer-item-text-active': isLightTheme ? 'rgba(15,23,42,0.96)' : '#ffffff',
-    });
-  }
+  const premiumDark = !isLightTheme;
+  const defaultPrimary = String(colors.primary || "#22c55e");
+  const defaultPageBg = isPremium
+    ? (premiumDark ? "#020617" : "#ffffff")
+    : String(colors.background || "#f8fafc");
+  const defaultSurface = isPremium
+    ? (premiumDark ? "rgba(2, 6, 23, 0.38)" : "rgba(255,255,255,0.68)")
+    : String(colors.surface || "#ffffff");
+  const defaultBorder = isPremium
+    ? (premiumDark ? "rgba(255,255,255,0.12)" : "rgba(15,23,42,0.10)")
+    : String(colors.border || "rgba(15,23,42,0.12)");
+  const defaultText = isPremium
+    ? (premiumDark ? "rgba(255,255,255,0.92)" : "rgba(15,23,42,0.92)")
+    : String(colors.text || "rgba(15,23,42,0.92)");
+  const defaultMuted = isPremium
+    ? (premiumDark ? "rgba(255,255,255,0.72)" : "rgba(15,23,42,0.68)")
+    : String(colors.mutedText || "rgba(15,23,42,0.68)");
 
-  if (themeTokens && typeof themeTokens === 'object') {
-    for (const [k, v] of Object.entries(themeTokens)) if (typeof v === 'string' && v.trim()) vars[k] = v;
+  const primary = themeVar("--bf-brand-primary") || defaultPrimary;
+  const primaryDark = themeVar("--bf-brand-primary-dark") || primary;
+  const pageBg = themeVar("--bf-page-bg") || defaultPageBg;
+  const surface = themeVar("--bf-surface") || themeVar("--bf-card-bg") || defaultSurface;
+  const border = themeVar("--bf-border") || themeVar("--bf-card-border") || defaultBorder;
+  const text = themeVar("--bf-text-main") || defaultText;
+  const muted = themeVar("--bf-text-muted") || defaultMuted;
+  const controlBg = themeVar("--bf-control-bg") || surface;
+  const controlBorder = themeVar("--bf-control-border") || border;
+  const menuBg = themeVar("--bf-menu-bg") || (isPremium ? (premiumDark ? "rgba(2,6,23,0.62)" : "rgba(255,255,255,0.72)") : surface);
+  const drawerBg = themeVar("--bf-drawer-bg") || (isPremium ? (premiumDark ? "rgba(2,6,23,0.68)" : "rgba(255,255,255,0.78)") : surface);
+  const drawerItemBg = themeVar("--bf-drawer-item-bg") || (isPremium ? (premiumDark ? "rgba(255,255,255,0.08)" : "rgba(255,255,255,0.44)") : surface);
+  const drawerItemActiveBg = themeVar("--bf-drawer-item-bg-active") || (isPremium ? (premiumDark ? "rgba(34,197,94,0.22)" : "rgba(34,197,94,0.16)") : primary);
+  const drawerItemText = themeVar("--bf-drawer-item-text") || text;
+  const drawerItemTextActive = themeVar("--bf-drawer-item-text-active") || (premiumDark ? "#ffffff" : text);
+  const glassBg = themeVar("--bf-glass-bg") || (isPremium ? (premiumDark ? "rgba(2,6,23,0.42)" : "rgba(255,255,255,0.26)") : surface);
+  const glassStrongBg = themeVar("--bf-glass-bg-strong") || (isPremium ? (premiumDark ? "rgba(2,6,23,0.56)" : "rgba(255,255,255,0.38)") : surface);
+  const glassBorder = themeVar("--bf-glass-border") || (isPremium ? (premiumDark ? "rgba(255,255,255,0.18)" : "rgba(255,255,255,0.46)") : border);
+  const glassShadow = themeVar("--bf-glass-shadow") || (isPremium ? (premiumDark ? "0 22px 70px rgba(2,6,23,0.30)" : "0 18px 42px rgba(15,23,42,0.12)") : "0 10px 30px rgba(15,23,42,0.12)");
+  const glassHighlight = themeVar("--bf-glass-highlight") || (isPremium ? (premiumDark ? "linear-gradient(180deg, rgba(255,255,255,0.16) 0%, rgba(255,255,255,0.04) 100%)" : "linear-gradient(180deg, rgba(255,255,255,0.38) 0%, rgba(255,255,255,0.10) 100%)") : "none");
+  const glassBlur = themeVar("--bf-glass-blur") || (isPremium ? (premiumDark ? "blur(18px)" : "blur(16px)") : "blur(0px)");
+  const glassSaturate = themeVar("--bf-glass-saturate") || (isPremium ? (premiumDark ? "saturate(1.08)" : "saturate(1.10)") : "saturate(1)");
+
+  const vars = {
+    "--bf-brand-primary": primary,
+    "--bf-brand-primary-dark": primaryDark,
+    "--bf-page-bg": pageBg,
+    "--bf-text-main": text,
+    "--bf-text-muted": muted,
+    "--bf-text-soft": themeVar("--bf-text-soft") || muted,
+    "--bf-surface": surface,
+    "--bf-border": border,
+    "--bf-card-bg": themeVar("--bf-card-bg") || surface,
+    "--bf-card-border": themeVar("--bf-card-border") || border,
+    "--bf-control-bg": controlBg,
+    "--bf-control-border": controlBorder,
+    "--bf-control-text": themeVar("--bf-control-text") || text,
+    "--bf-control-muted": themeVar("--bf-control-muted") || muted,
+    "--bf-glass-bg": glassBg,
+    "--bf-glass-bg-strong": glassStrongBg,
+    "--bf-glass-border": glassBorder,
+    "--bf-glass-shadow": glassShadow,
+    "--bf-glass-highlight": glassHighlight,
+    "--bf-glass-blur": glassBlur,
+    "--bf-glass-saturate": glassSaturate,
+    "--bf-menu-bg": menuBg,
+    "--bf-menu-border": themeVar("--bf-menu-border") || glassBorder,
+    "--bf-drawer-bg": drawerBg,
+    "--bf-drawer-border": themeVar("--bf-drawer-border") || glassBorder,
+    "--bf-drawer-item-bg": drawerItemBg,
+    "--bf-drawer-item-bg-active": drawerItemActiveBg,
+    "--bf-drawer-item-border": themeVar("--bf-drawer-item-border") || glassBorder,
+    "--bf-drawer-item-text": drawerItemText,
+    "--bf-drawer-item-text-active": drawerItemTextActive,
+  };
+
+  if (themeTokens && typeof themeTokens === "object") {
+    for (const [k, v] of Object.entries(themeTokens)) if (typeof v === "string" && v.trim()) vars[k] = v;
   }
-  if (brandOverrides && typeof brandOverrides === 'object') {
-    for (const [k, v] of Object.entries(brandOverrides)) if (typeof v === 'string' && v.trim()) vars[k] = v;
+  if (brandOverrides && typeof brandOverrides === "object") {
+    for (const [k, v] of Object.entries(brandOverrides)) if (typeof v === "string" && v.trim()) vars[k] = v;
   }
   return vars;
 }
