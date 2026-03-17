@@ -155,7 +155,6 @@ router.get(
   async (req, res) => {
     try {
       const tenantId = Number(req.tenantId);
-      const normalized = normalizeHomeLandingPayload(homeLanding);
 
       const r = await db.query(
         `
@@ -198,6 +197,8 @@ router.put(
       if (homeLanding == null || typeof homeLanding !== "object") {
         return res.status(400).json({ error: "homeLanding must be an object." });
       }
+
+      const normalized = normalizeHomeLandingPayload(homeLanding);
 
       const r = await db.query(
         `
