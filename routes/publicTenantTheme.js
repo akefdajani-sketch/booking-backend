@@ -27,14 +27,54 @@ async function hasTenantColumn(col) {
   return __tenantColCache.has(col);
 }
 
+// Current canonical snapshot marker written by resolveTenantAppearanceSnapshot.
+// Bump this string whenever buildResolvedCssVars changes its output shape so
+// that old snapshots in the DB are automatically invalidated on the next request.
+const CURRENT_SNAPSHOT_MARKER = "plg2-assets-v2";
+
 function snapshotNeedsRefresh(snapshot, tenant) {
   if (!snapshot || typeof snapshot !== "object") return true;
+
   const sourceTheme = String(snapshot.themeKey || "").trim().toLowerCase();
   const tenantTheme = String(tenant.theme_key || "").trim().toLowerCase();
-  const cssVars = snapshot.resolvedCssVars && typeof snapshot.resolvedCssVars === "object" ? snapshot.resolvedCssVars : null;
-  const hasPremiumCore = !!(cssVars && cssVars["--bf-page-bg"] && cssVars["--bf-card-bg"] && cssVars["--bf-glass-bg"] && cssVars["--bf-menu-bg"] && cssVars["--bf-drawer-bg"]);
+
+  // 1) Theme key mismatch — snapshot was built for a different theme
   if (!sourceTheme || sourceTheme !== tenantTheme) return true;
-  if ((tenantTheme === "premium" || tenantTheme === "premium_v2" || snapshot.layoutKey === "premium") && !hasPremiumCore) return true;
+
+  // 2) Marker version mismatch — snapshot predates the current var set
+  if (snapshot.debugSnapshotMarker !== CURRENT_SNAPSHOT_MARKER) return true;
+
+  // 3) Premium families need the full glass/menu/drawer core to be present
+  const cssVars =
+    snapshot.resolvedCssVars && typeof snapshot.resolvedCssVars === "object"
+      ? snapshot.resolvedCssVars
+      : null;
+  const hasPremiumCore = !!(
+    cssVars &&
+    cssVars["--bf-page-bg"] &&
+    cssVars["--bf-card-bg"] &&
+    cssVars["--bf-glass-bg"] &&
+    cssVars["--bf-menu-bg"] &&
+    cssVars["--bf-drawer-bg"] &&
+    cssVars["--bf-font-family"] &&       // new in v2
+    cssVars["--bf-pill-selected-shadow"] // new in v2
+  );
+  if (
+    (tenantTheme === "premium" ||
+      tenantTheme === "premium_v2" ||
+      snapshot.layoutKey === "premium") &&
+    !hasPremiumCore
+  )
+    return true;
+
+  // 4) Branding was published more recently than the snapshot
+  //    (catches color/brand changes that bypass writeTenantAppearanceSnapshot)
+  const snapshotAt = snapshot.publishedAt ? new Date(snapshot.publishedAt).getTime() : 0;
+  const brandingAt = tenant.branding_published_at
+    ? new Date(tenant.branding_published_at).getTime()
+    : 0;
+  if (brandingAt && snapshotAt && brandingAt > snapshotAt) return true;
+
   return false;
 }
 
@@ -61,7 +101,8 @@ router.get("/:slug", async (req, res) => {
             appearance_snapshot_version,
             appearance_snapshot_published_at,
             banner_home_url, banner_book_url, banner_account_url, banner_reservations_url, banner_memberships_url,
-            logo_url, cover_image_url
+            logo_url, cover_image_url,
+            branding_published_at
      FROM tenants
      WHERE slug = $1`,
     [slug]
