@@ -351,7 +351,7 @@ router.put("/prepaid-catalog", requireAdmin, requireTenant, async (req, res) => 
       WHERE id = $1
       RETURNING COALESCE(branding, '{}'::jsonb) #> '{prepaidCatalog}' AS prepaid_catalog
       `,
-      [Number(tenantId), JSON.stringify(payload)]
+      [Number(tenantId), JSON.stringify(normalized)]
     );
 
     return res.json({ prepaidCatalog: normalizePrepaidCatalog(r.rows?.[0]?.prepaid_catalog || payload) });
@@ -465,6 +465,7 @@ router.put("/home-landing", requireAdmin, requireTenant, async (req, res) => {
   try {
     const tenantId = req.tenantId;
     const payload = req.body?.homeLanding;
+    const normalized = payload && typeof payload === "object" ? payload : {};
 
     if (!payload || typeof payload !== "object") {
       return res.status(400).json({ error: "homeLanding object is required." });
