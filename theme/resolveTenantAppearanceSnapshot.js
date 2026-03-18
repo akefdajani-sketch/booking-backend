@@ -549,7 +549,7 @@ async function resolveTenantAppearanceSnapshot(tenantId) {
     layoutKey,
     presetVersion: 1,
     // Bump marker version so the frontend can detect old snapshots during rollout
-    debugSnapshotMarker: "plg2-assets-v2",
+    debugSnapshotMarker: "plg2-assets-v3",
     isPremiumFamily: premiumFamily,
     isLightTheme,
     branding,
