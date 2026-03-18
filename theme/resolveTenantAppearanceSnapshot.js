@@ -133,14 +133,27 @@ function buildResolvedCssVars({ branding, brandOverrides, themeTokens, isPremium
   // Page & card bg -------------------------------------------------------
   const premiumDark = isPremium && !isLightTheme;
 
+  // For premium themes, allow Brand Setup "Background" and "Card surface" to
+  // override the computed defaults. Guard: only accept a surface value whose
+  // luminance matches the theme direction — prevents a stale light-green test
+  // value (#cdfcca) from overriding a dark premium theme's glass base colour.
+  //   premiumDark  → accept only dark surfaces  (luminance < 0.18)
+  //   premiumLight → accept only light surfaces (luminance > 0.55)
+  const _rawSurface = String(colors.surface || "").trim();
+  const _rawBg      = String(colors.background || "").trim();
+  const _surfRgb    = _rawSurface ? parseCssColorToRgb(_rawSurface) : null;
+  const _surfLum    = _surfRgb ? relativeLuminance(_surfRgb) : null;
+
   const defaultPageBg = isPremium
-    ? premiumDark ? "#020617" : "#ffffff"
+    ? (_rawBg || (premiumDark ? "#020617" : "#ffffff"))
     : String(colors.background || "#f8fafc");
   const defaultCardBg = isPremium
-    ? premiumDark ? "rgba(2, 6, 23, 0.38)" : "rgba(255,255,255,0.68)"
+    ? (premiumDark
+        ? (_surfLum !== null && _surfLum < 0.18 ? _rawSurface : "rgba(2, 6, 23, 0.38)")
+        : (_surfLum !== null && _surfLum > 0.55 ? _rawSurface : "rgba(255,255,255,0.68)"))
     : String(colors.surface || "#ffffff");
   const defaultBorder = isPremium
-    ? premiumDark ? "rgba(255,255,255,0.12)" : "rgba(15,23,42,0.10)"
+    ? (String(colors.border || "").trim() || (premiumDark ? "rgba(255,255,255,0.12)" : "rgba(15,23,42,0.10)"))
     : String(colors.border || "rgba(15,23,42,0.12)");
   const defaultText = isPremium
     ? premiumDark ? "rgba(255,255,255,0.92)" : "rgba(15,23,42,0.92)"
