@@ -87,21 +87,23 @@ const { sanitizeBrandOverrides } = require("../theme/validateTokens");
 // branding.brand_overrides. They are derived dynamically from the brand colors
 // by buildResolvedCssVars in resolveTenantAppearanceSnapshot. Storing them
 // hard-wires the appearance and makes Brand Setup color changes have no effect.
+// Vars that are purely computed by the snapshot and have NO user-facing editor.
+// These are stripped from branding.brand_overrides on every save-draft and publish
+// to prevent stale hardcoded values from blocking dynamic computation.
+//
+// NOTE: Glass vars (--bf-glass-*) were previously in this list but are intentionally
+// REMOVED because the "Premium glass controls" UI allows tenants to set them explicitly.
+// branding.brand_overrides is now the correct storage path for those overrides, and
+// resolveTenantAppearanceSnapshot merges them into brandOverrides before computing.
 const SNAPSHOT_COMPUTED_VARS = new Set([
-  "--bf-glass-bg",
-  "--bf-glass-bg-strong",
-  "--bf-glass-blur",
-  "--bf-glass-saturate",
-  "--bf-glass-border",
-  "--bf-glass-shadow",
-  "--bf-glass-highlight",
-  "--bf-glass-menu-blur",
+  // Pattern overlay vars — no UI to set these, always computed from brand primary
   "--bf-premium-pattern-line",
   "--bf-premium-pattern-opacity",
   "--bf-premium-pattern-size",
   "--bf-premium-pattern-sheen-opacity",
   "--bf-premium-light-grid-opacity",
   "--bf-premium-pattern-blend",
+  // Selection highlight — computed from brand primary, no direct UI
   "--bf-selection-bg",
   "--bf-selection-text",
 ]);
