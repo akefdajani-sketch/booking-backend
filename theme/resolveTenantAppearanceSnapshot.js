@@ -517,7 +517,13 @@ async function resolveTenantAppearanceSnapshot(tenantId) {
   const branding = published ? toObj(row.branding_published) : {};
   const homeLanding =
     branding && typeof branding.homeLanding === "object" ? branding.homeLanding : {};
-  const brandOverrides = toObj(row.brand_overrides_json);
+  // brandOverrides: merge brand_overrides_json (legacy) with branding.brand_overrides
+  // (set by the "Premium glass controls" and "Theme Studio" UI).
+  // branding.brand_overrides wins so intentional glass/drawer overrides take effect.
+  // This is what makes the glass controls panel actually influence the booking page.
+  const _legacyOverrides = toObj(row.brand_overrides_json);
+  const _brandingOverrides = toObj(branding.brand_overrides);
+  const brandOverrides = { ..._legacyOverrides, ..._brandingOverrides };
   const publishedThemeSchema = toObj(row.theme_schema_published_json);
   const platformTokens = toObj(row.tokens_json);
   const premiumFamily = isPremiumFamily(themeKey, layoutKey);
