@@ -402,6 +402,32 @@ function buildResolvedCssVars({ branding, brandOverrides, themeTokens, isPremium
 
     // Density-driven layout vars
     ...densityVars,
+
+    // Bottom nav - computed from brand primary so active state matches brand
+    "--bf-bottomnav-bg": lightSurface
+      ? "color-mix(in srgb, var(--bf-page-bg, #ffffff) 88%, transparent)"
+      : "color-mix(in srgb, var(--bf-page-bg, #020617) 82%, transparent)",
+    "--bf-bottomnav-active-bg": `color-mix(in srgb, ${primary} 12%, transparent)`,
+    "--bf-bottomnav-active-border": `color-mix(in srgb, ${primary} 30%, transparent)`,
+    "--bf-bottomnav-active-text": primary,
+
+    // Outline / ghost button — computed from brand primary
+    "--bf-btn-outline-bg": "transparent",
+    "--bf-btn-outline-border": `color-mix(in srgb, ${primary} 45%, transparent)`,
+    "--bf-btn-outline-text": primary,
+    "--bf-btn-border": cardBorder,
+
+    // Semantic warn (alias for warning)
+    "--bf-warn": "#92400e",
+    "--bf-warn-bg": "#fef3c7",
+    "--bf-warn-border": "#fde68a",
+
+    // Link color
+    "--bf-link": primary,
+
+    // Primary contrast (text on primary bg — for accessible button labels)
+    "--bf-primary": primary,
+    "--bf-primary-contrast": lightSurface ? "#0f172a" : "#ffffff",
   };
 
   // Apply theme studio tokens. The BLOCKED set mirrors BLOCKED_THEME_TOKEN_KEYS
