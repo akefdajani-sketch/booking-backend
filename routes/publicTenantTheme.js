@@ -28,11 +28,20 @@ async function hasTenantColumn(col) {
 }
 
 // Current canonical snapshot marker written by resolveTenantAppearanceSnapshot.
-// Bump this string whenever buildResolvedCssVars changes its output shape so
-// that old snapshots in the DB are automatically invalidated on the next request.
-const CURRENT_SNAPSHOT_MARKER = "plg2-assets-v2";
+// Bump this string whenever buildResolvedCssVars changes its output shape OR
+// whenever resolveLayoutKey logic changes, so stale snapshots are auto-invalidated.
+const CURRENT_SNAPSHOT_MARKER = "plg2-assets-v3";
 
-function snapshotNeedsRefresh(snapshot, tenant) {
+// Resolve what layoutKey SHOULD be for this tenant given its theme_key and the
+// resolved platform_themes row. Mirrors resolveLayoutKey in resolveTenantAppearanceSnapshot.
+// Used to detect snapshots baked with a wrong layoutKey (e.g. premium_light for a
+// premium_v2 tenant) without needing to re-JOIN platform_themes in this route.
+function expectedIsLightTheme(themeKey, resolvedLayoutKey) {
+  const layout = String(resolvedLayoutKey || themeKey || "").trim().toLowerCase();
+  return layout === "premium_light";
+}
+
+function snapshotNeedsRefresh(snapshot, tenant, resolvedLayoutKey) {
   if (!snapshot || typeof snapshot !== "object") return true;
 
   const sourceTheme = String(snapshot.themeKey || "").trim().toLowerCase();
@@ -44,7 +53,22 @@ function snapshotNeedsRefresh(snapshot, tenant) {
   // 2) Marker version mismatch — snapshot predates the current var set
   if (snapshot.debugSnapshotMarker !== CURRENT_SNAPSHOT_MARKER) return true;
 
-  // 3) Premium families need the full glass/menu/drawer core to be present
+  // 3) Layout key / isLightTheme consistency check.
+  //    This catches snapshots baked with the wrong layout key (e.g. a premium_v2
+  //    tenant whose snapshot says layoutKey="premium_light" and isLightTheme=true).
+  //    Those snapshots produce white glass cards instead of dark glass.
+  if (resolvedLayoutKey) {
+    const expectedLight = expectedIsLightTheme(tenantTheme, resolvedLayoutKey);
+    const snapshotLight = Boolean(snapshot.isLightTheme);
+    if (expectedLight !== snapshotLight) return true;
+
+    // Also check the layoutKey itself matches
+    const snapshotLayout = String(snapshot.layoutKey || "").trim().toLowerCase();
+    const expectedLayout = String(resolvedLayoutKey || "").trim().toLowerCase();
+    if (snapshotLayout && expectedLayout && snapshotLayout !== expectedLayout) return true;
+  }
+
+  // 4) Premium families need the full glass/menu/drawer core to be present
   const cssVars =
     snapshot.resolvedCssVars && typeof snapshot.resolvedCssVars === "object"
       ? snapshot.resolvedCssVars
@@ -56,18 +80,18 @@ function snapshotNeedsRefresh(snapshot, tenant) {
     cssVars["--bf-glass-bg"] &&
     cssVars["--bf-menu-bg"] &&
     cssVars["--bf-drawer-bg"] &&
-    cssVars["--bf-font-family"] &&       // new in v2
-    cssVars["--bf-pill-selected-shadow"] // new in v2
+    cssVars["--bf-font-family"] &&
+    cssVars["--bf-pill-selected-shadow"]
   );
   if (
     (tenantTheme === "premium" ||
       tenantTheme === "premium_v2" ||
-      snapshot.layoutKey === "premium") &&
+      resolvedLayoutKey === "premium") &&
     !hasPremiumCore
   )
     return true;
 
-  // 4) Branding was published more recently than the snapshot
+  // 5) Branding was published more recently than the snapshot
   //    (catches color/brand changes that bypass writeTenantAppearanceSnapshot)
   const snapshotAt = snapshot.publishedAt ? new Date(snapshot.publishedAt).getTime() : 0;
   const brandingAt = tenant.branding_published_at
@@ -194,11 +218,23 @@ router.get("/:slug", async (req, res) => {
     : null;
   const effectiveThemeSchema = isPublished ? publishedThemeSchema : null;
 
+  // Resolve the canonical layoutKey from the platform_themes row — this is
+  // what the snapshot SHOULD have. Passed to snapshotNeedsRefresh so it can
+  // detect snapshots baked with the wrong layout (e.g. premium_light for a
+  // premium_v2 tenant).
+  const resolvedLayoutKey = (() => {
+    const raw = String(theme.layout_key || themeKey || "classic").trim().toLowerCase();
+    if (!raw || raw === "default_v1" || raw === "default") return "classic";
+    if (raw === "premium_v2") return "premium";
+    if (raw === "premiumlight") return "premium_light";
+    return raw;
+  })();
+
   let appearanceSnapshot = tenant.appearance_snapshot_published_json && typeof tenant.appearance_snapshot_published_json === "object"
     ? tenant.appearance_snapshot_published_json
     : null;
   let snapshotUsed = !!appearanceSnapshot;
-  if (isPublished && snapshotNeedsRefresh(appearanceSnapshot, tenant)) {
+  if (isPublished && snapshotNeedsRefresh(appearanceSnapshot, tenant, resolvedLayoutKey)) {
     try {
       appearanceSnapshot = await resolveTenantAppearanceSnapshot(tenant.id);
     } catch {
