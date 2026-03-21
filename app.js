@@ -59,6 +59,7 @@ const tenantHomeLandingRouter = require("./routes/tenantHomeLanding");
 const tenantBrandingRouter = require("./routes/tenantBranding");
 const tenantMembershipCheckoutRouter = require("./routes/tenantMembershipCheckout");
 const tenantRatesRouter = require("./routes/tenantRates");
+const tenantCategoriesRouter = require("./routes/tenantCategories"); // PR-CAT1
 const tenantBookingsRouter = require("./routes/tenantBookings");
 const sessionsRouter       = require("./routes/sessions");        // PR-SESSIONS
 const tenantPrepaidCatalogRouter = require("./routes/tenantPrepaidCatalog");
@@ -141,6 +142,7 @@ app.use("/api/tenant-blackouts", tenantBlackoutsRouter);
 app.use("/api/services", servicesRouter);
 app.use("/api/staff", staffRouter);
 app.use("/api/resources", resourcesRouter);
+app.use("/api/tenant-categories", tenantCategoriesRouter); // PR-CAT1
 app.use("/api/customers", customersRouter);
 
 // PR-2: bookings — rate limit POST (public booking creation) only.
