@@ -80,7 +80,7 @@ async function getTenantsColumns() {
 // ---------------------------------------------------------------------------
 router.get("/", async (req, res) => {
   try {
-    const { tenantSlug, tenantId, includeInactive } = req.query;
+    const { tenantSlug, tenantId, includeInactive, categoryId } = req.query;
 
     // PR-3: pagination
     const limitRaw  = req.query.limit  ? Number(req.query.limit)  : 100;
@@ -191,7 +191,8 @@ router.get("/", async (req, res) => {
         s.availability_basis                AS availability_basis,
         COALESCE(s.is_active, true)         AS is_active,
         ${imageExpr},
-        ${currencyExpr}
+        ${currencyExpr},
+        s.category_id
       FROM services s
       JOIN tenants t ON t.id = s.tenant_id
       ${softDeleteWhere}
@@ -336,6 +337,10 @@ router.post("/", requireTenant, requireAdminOrTenantRole("manager"), async (req,
     }
     if (svcCols.has("availability_basis")) add("availability_basis", ab);
     if (svcCols.has("is_active")) add("is_active", is_active == null ? true : !!is_active);
+    // PR-CAT1: category assignment
+    if (svcCols.has("category_id") && category_id !== undefined) {
+      add("category_id", category_id == null ? null : Number(category_id));
+    }
 
     const q = `
       INSERT INTO services (${cols.join(", ")})
