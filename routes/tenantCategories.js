@@ -242,4 +242,69 @@ router.delete(
   }
 );
 
+
+// ---------------------------------------------------------------------------
+// POST /api/tenant-categories/:id/services  (owner/manager only)
+// Assigns the given service_ids to this category (sets category_id = id).
+// Services that previously belonged to this category but are NOT in the new
+// list get their category_id cleared (set to NULL).
+// ---------------------------------------------------------------------------
+router.post(
+  "/:id/services",
+  resolveTenantFromCategoryId,
+  requireAdminOrTenantRole("manager"),
+  async (req, res) => {
+    try {
+      const categoryId = Number(req.params.id);
+      const tenantId = req.tenantId;
+      const { service_ids = [] } = req.body;
+
+      const ids = Array.isArray(service_ids)
+        ? service_ids.map((x) => Number(x)).filter((x) => Number.isFinite(x) && x > 0)
+        : [];
+
+      // Run in a transaction: clear old assignments then set new ones
+      const client = await db.connect();
+      try {
+        await client.query("BEGIN");
+
+        // Clear category from services that currently have this category but won't after
+        await client.query(
+          `UPDATE services
+           SET category_id = NULL
+           WHERE tenant_id = $1
+             AND category_id = $2
+             AND deleted_at IS NULL
+             ${ids.length ? `AND id != ALL($3::int[])` : ""}`,
+          ids.length ? [tenantId, categoryId, ids] : [tenantId, categoryId]
+        );
+
+        // Assign selected services to this category
+        if (ids.length > 0) {
+          await client.query(
+            `UPDATE services
+             SET category_id = $1
+             WHERE tenant_id = $2
+               AND id = ANY($3::int[])
+               AND deleted_at IS NULL`,
+            [categoryId, tenantId, ids]
+          );
+        }
+
+        await client.query("COMMIT");
+      } catch (err) {
+        await client.query("ROLLBACK");
+        throw err;
+      } finally {
+        client.release();
+      }
+
+      return res.json({ ok: true, categoryId, serviceIds: ids });
+    } catch (err) {
+      console.error("POST /api/tenant-categories/:id/services error:", err);
+      return res.status(500).json({ error: "Failed to assign services to category" });
+    }
+  }
+);
+
 module.exports = router;
