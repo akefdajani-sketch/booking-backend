@@ -185,41 +185,60 @@ async function syncTenantLegacyFields(db, { tenantId, slot, asset }) {
   return { target: `tenants.${urlCol}`, value: asset.public_url };
 }
 
+function cloneJson(value) {
+  return JSON.parse(JSON.stringify(value || {}));
+}
+
 async function getTenantHomeLandingConfig(db, tenantId) {
-  // TODO: replace with your actual home-landing reader.
-  const { rows } = await db.query('SELECT home_landing_config FROM tenants WHERE id = $1 LIMIT 1', [tenantId]);
-  return rows[0]?.home_landing_config || {};
+  const { rows } = await db.query(
+    `
+    SELECT COALESCE(branding, '{}'::jsonb) #> '{homeLanding}' AS home_landing
+    FROM tenants
+    WHERE id = $1
+    LIMIT 1
+    `,
+    [tenantId]
+  );
+  return rows[0]?.home_landing || {};
 }
 
 async function saveTenantHomeLandingConfig(db, tenantId, config) {
-  // TODO: replace with your actual home-landing writer.
-  await db.query('UPDATE tenants SET home_landing_config = $2 WHERE id = $1', [tenantId, JSON.stringify(config)]);
+  await db.query(
+    `
+    UPDATE tenants
+    SET branding = COALESCE(branding, '{}'::jsonb) || jsonb_build_object('homeLanding', $2::jsonb)
+    WHERE id = $1
+    `,
+    [tenantId, JSON.stringify(config || {})]
+  );
 }
 
 async function syncHomeLandingLegacyFields(db, { tenantId, slot, asset }) {
   const current = await getTenantHomeLandingConfig(db, tenantId);
-  const next = JSON.parse(JSON.stringify(current || {}));
-  next.homeLanding ??= {};
-  next.homeLanding.birdie ??= {};
+  const next = cloneJson(current || {});
+  next.birdie ??= {};
 
   if (slot === 'home_signature') {
-    next.homeLanding.birdie.signatureSection ??= {};
-    next.homeLanding.birdie.signatureSection.imageUrl = asset.public_url;
+    next.birdie.signatureSection ??= {};
+    next.birdie.signatureSection.imageUrl = asset.public_url;
     await saveTenantHomeLandingConfig(db, tenantId, next);
-    return { target: 'homeLanding.birdie.signatureSection.imageUrl', value: asset.public_url };
+    return { target: 'branding.homeLanding.birdie.signatureSection.imageUrl', value: asset.public_url };
   }
+
   if (slot === 'home_visit_map') {
-    next.homeLanding.birdie.visit ??= {};
-    next.homeLanding.birdie.visit.mapImageUrl = asset.public_url;
+    next.birdie.visit ??= {};
+    next.birdie.visit.mapImageUrl = asset.public_url;
     await saveTenantHomeLandingConfig(db, tenantId, next);
-    return { target: 'homeLanding.birdie.visit.mapImageUrl', value: asset.public_url };
+    return { target: 'branding.homeLanding.birdie.visit.mapImageUrl', value: asset.public_url };
   }
+
   if (slot === 'home_hero') {
-    next.homeLanding.birdie.hero ??= {};
-    next.homeLanding.birdie.hero.heroImageUrl = asset.public_url;
+    next.birdie.hero ??= {};
+    next.birdie.hero.heroImageUrl = asset.public_url;
     await saveTenantHomeLandingConfig(db, tenantId, next);
-    return { target: 'homeLanding.birdie.hero.heroImageUrl', value: asset.public_url };
+    return { target: 'branding.homeLanding.birdie.hero.heroImageUrl', value: asset.public_url };
   }
+
   return null;
 }
 
