@@ -67,6 +67,7 @@ const tenantPrepaidAccountingRouter = require("./routes/tenantPrepaidAccounting"
 
 const publicPricingRouter = require("./routes/publicPricing");
 const uploadsRouter = require("./routes/uploads");
+const mediaLibraryRoutes = require("./routes/mediaLibrary");
 
 // theme routers
 const adminThemesRouter = require("./routes/adminThemes");
@@ -186,6 +187,9 @@ app.use("/api/public", publicApiLimiter, publicPricingRouter);
 
 // ─── Uploads ─────────────────────────────────────────────────────────────────
 app.use("/api/uploads", uploadsRouter);
+
+// ─── Media Library ────────────────────────────────────────────────────────────
+app.use("/api/media-library", mediaLibraryRoutes);
 
 // ─── Theme system ─────────────────────────────────────────────────────────────
 app.use("/api/admin/themes", adminThemesRouter);
