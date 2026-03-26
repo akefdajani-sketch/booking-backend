@@ -74,6 +74,19 @@ async function getTenantsColumns() {
   return new Set(rows.map((r) => r.column_name));
 }
 
+// Cache whether the service_hours table exists so we don't re-query
+// information_schema on every request.
+let _serviceHoursTableExists = null;
+async function serviceHoursTableExists() {
+  if (_serviceHoursTableExists !== null) return _serviceHoursTableExists;
+  const { rows } = await db.query(
+    `SELECT 1 FROM information_schema.tables
+     WHERE table_schema = 'public' AND table_name = 'service_hours' LIMIT 1`
+  );
+  _serviceHoursTableExists = rows.length > 0;
+  return _serviceHoursTableExists;
+}
+
 // ---------------------------------------------------------------------------
 // GET /api/services?tenantSlug=&tenantId=&includeInactive=1
 // Public (used by booking UI + owner setup UI)
@@ -108,6 +121,7 @@ router.get("/", async (req, res) => {
 
     const svcCols = await getServicesColumns();
     const tenantCols = await getTenantsColumns();
+    const hasServiceHours = await serviceHoursTableExists();
 
     // PR-10: build soft-delete filter using already-loaded svcCols (no extra DB call)
     const softDeleteWhere = svcCols.has("deleted_at")
@@ -207,6 +221,41 @@ router.get("/", async (req, res) => {
     // Paginated data query
     const paginatedQ = q + `\n      LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
     const { rows } = await db.query(paginatedQ, [...params, limit, offset]);
+
+    // ---------------------------------------------------------------------------
+    // Attach per-service available_hours (from service_hours table, migration 008).
+    // This tells the booking UI which days-of-week each service runs on, so it
+    // can disable the service in the dropdown when the chosen date doesn't match.
+    // If the table doesn't exist yet (pre-migration env), we skip silently.
+    // ---------------------------------------------------------------------------
+    if (hasServiceHours && rows.length > 0) {
+      const serviceIds = rows.map((r) => r.id);
+      const { rows: hoursRows } = await db.query(
+        `SELECT service_id, day_of_week, open_time::text AS open_time, close_time::text AS close_time
+         FROM service_hours
+         WHERE service_id = ANY($1)
+         ORDER BY service_id, day_of_week`,
+        [serviceIds]
+      );
+      // Group by service_id for O(n) attachment
+      const hoursMap = {};
+      for (const h of hoursRows) {
+        if (!hoursMap[h.service_id]) hoursMap[h.service_id] = [];
+        hoursMap[h.service_id].push({
+          day_of_week: h.day_of_week,
+          open_time: h.open_time,
+          close_time: h.close_time,
+        });
+      }
+      for (const row of rows) {
+        row.available_hours = hoursMap[row.id] || [];
+      }
+    } else {
+      // Ensure field is always present so frontend type is consistent
+      for (const row of rows) {
+        row.available_hours = [];
+      }
+    }
 
     return res.json({
       services: rows,
