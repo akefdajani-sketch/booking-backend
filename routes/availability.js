@@ -542,8 +542,34 @@ try {
   serviceHoursWindows = null;
 }
 
-const windowStartLocal = `${date} ${openHHMM}:00`;
-const windowEndLocal = `${addDaysISO(date, isOvernight ? 1 : 0)} ${closeHHMM}:00`;
+// Base generation window comes from tenant hours.
+// When service hours windows exist we override this per-window below so that
+// generate_series starts at the service window boundary rather than the tenant
+// open time.  Without this, a 180-min service set to 17:00-20:00 would never
+// produce a slot: stepping from 10:00 by 180 min gives 10:00/13:00/16:00/19:00,
+// none of which start at ≥17:00 and end at ≤20:00.
+let windowStartLocal = `${date} ${openHHMM}:00`;
+let windowEndLocal = `${addDaysISO(date, isOvernight ? 1 : 0)} ${closeHHMM}:00`;
+
+// Build the list of (startLocal, endLocal) ranges to drive generate_series.
+// When no service-hours restriction: single range = full tenant window.
+// When service-hours exist: one range per window, each starting at the window
+// boundary so slots land exactly on the owner-defined start times.
+const generationWindows = (() => {
+  if (serviceHoursWindows === null || serviceHoursWindows.length === 0) {
+    return [{ startLocal: windowStartLocal, endLocal: windowEndLocal }];
+  }
+  return serviceHoursWindows.map((w) => {
+    const startHH = minutesToHHMM(w.start_minute % (24 * 60));
+    const endTotalMin = w.end_minute;
+    const endDayOffset = endTotalMin >= 24 * 60 ? 1 : (isOvernight ? 1 : 0);
+    const endHH = minutesToHHMM(endTotalMin % (24 * 60));
+    return {
+      startLocal: `${date} ${startHH}:00`,
+      endLocal: `${addDaysISO(date, endDayOffset)} ${endHH}:00`,
+    };
+  });
+})();
 
 function slotFallsWithinServiceHours(startHHMM) {
   if (serviceHoursWindows === null) return true;
@@ -556,6 +582,9 @@ function slotFallsWithinServiceHours(startHHMM) {
 }
 
 if (availabilityBasis === "none") {
+  for (const genWindow of generationWindows) {
+    windowStartLocal = genWindow.startLocal;
+    windowEndLocal = genWindow.endLocal;
   const q = `
     WITH slots AS (
       SELECT
@@ -603,11 +632,32 @@ if (availabilityBasis === "none") {
     allSlots.push(slotObj);
     if (blackoutHits === 0) availableTimes.push(startHHMM);
   }
+  } // end generationWindows loop
 } else {
   let q;
   let params;
 
   const useStaffBlocks = Array.isArray(staffBlocks) && (availabilityBasis === "staff" || availabilityBasis === "both");
+
+  for (const genWindow of generationWindows) {
+    windowStartLocal = genWindow.startLocal;
+    windowEndLocal = genWindow.endLocal;
+
+  // For staff-block paths, intersect each staff block with the current generation
+  // window so slots only appear within the service hours boundary.
+  const effectiveStaffBlocks = useStaffBlocks
+    ? staffBlocks
+        .map((b) => {
+          const genStartMin = toMinutes(genWindow.startLocal.slice(11, 16));
+          const genEndMin   = toMinutes(genWindow.endLocal.slice(11, 16))  || 24 * 60;
+          const clampedStart = Math.max(Number(b.start_minute), genStartMin);
+          const clampedEnd   = Math.min(Number(b.end_minute),   genEndMin);
+          return clampedEnd > clampedStart ? { start_minute: clampedStart, end_minute: clampedEnd } : null;
+        })
+        .filter(Boolean)
+    : staffBlocks;
+
+  if (useStaffBlocks && effectiveStaffBlocks.length === 0) continue;
 
   if (useStaffBlocks) {
     // Build working blocks as local timestamps, then generate slots per block.
@@ -615,7 +665,7 @@ if (availabilityBasis === "none") {
     params = [tenantTz];
     let p = params.length + 1;
 
-    for (const b of staffBlocks) {
+    for (const b of effectiveStaffBlocks) {
       const s = minutesToHHMM(Number(b.start_minute));
       const e = minutesToHHMM(Number(b.end_minute));
       params.push(`${date} ${s}:00`);
@@ -827,7 +877,29 @@ if (availabilityBasis === "none") {
     allSlots.push(slotObj);
     if (isAvailable && blackoutHits === 0) availableTimes.push(startHHMM);
   }
+  } // end generationWindows loop
 }
+
+// Deduplicate: multiple generationWindows could produce the same time if windows
+// overlap. Keep the first occurrence (earliest window wins).
+const seenTimes = new Set();
+const dedupedSlots = [];
+for (const s of allSlots) {
+  if (!seenTimes.has(s.time)) {
+    seenTimes.add(s.time);
+    dedupedSlots.push(s);
+  }
+}
+allSlots.length = 0;
+allSlots.push(...dedupedSlots);
+const seenAvail = new Set();
+const dedupedTimes = availableTimes.filter((t) => {
+  if (seenAvail.has(t)) return false;
+  seenAvail.add(t);
+  return true;
+});
+availableTimes.length = 0;
+availableTimes.push(...dedupedTimes);
 
 
 if (serviceHoursWindows !== null) {
