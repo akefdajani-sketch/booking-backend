@@ -751,6 +751,76 @@ router.post("/:tenantId/branding/rollback", setTenantIdFromParam, requireAdminOr
 });
 
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// PATCH /api/admin/tenants/:tenantId/banner-focal
+// Saves focal point (x/y as percentages 0–100) for a banner slot.
+// Stored in branding.image_settings.banner_{slot} so it travels through
+// the existing publish / snapshot mechanism at zero extra cost.
+//
+// Body: { slot: "home"|"book"|"reservations"|"memberships"|"account", focal_x: number, focal_y: number }
+// ---------------------------------------------------------------------------
+router.patch("/:tenantId/banner-focal", setTenantIdFromParam, requireAdminOrTenantRole("owner"), async (req, res) => {
+  try {
+    const tenantId = Number(req.params.tenantId);
+    if (!Number.isFinite(tenantId) || tenantId <= 0) {
+      return res.status(400).json({ error: "Invalid tenantId" });
+    }
+
+    const VALID_SLOTS = new Set(["home", "book", "reservations", "memberships", "account"]);
+    const { slot, focal_x, focal_y } = req.body || {};
+
+    if (!slot || !VALID_SLOTS.has(slot)) {
+      return res.status(400).json({ error: "slot must be one of: home, book, reservations, memberships, account" });
+    }
+    const x = Number(focal_x);
+    const y = Number(focal_y);
+    if (!Number.isFinite(x) || x < 0 || x > 100 || !Number.isFinite(y) || y < 0 || y > 100) {
+      return res.status(400).json({ error: "focal_x and focal_y must be numbers between 0 and 100" });
+    }
+
+    await ensureBrandingColumns();
+
+    // Read current branding JSONB so we can merge in the new focal point
+    // without clobbering any other branding fields.
+    const existing = await db.query(
+      `SELECT branding FROM tenants WHERE id = $1`,
+      [tenantId]
+    );
+    const currentBranding = (existing.rows[0]?.branding && typeof existing.rows[0].branding === "object")
+      ? existing.rows[0].branding
+      : {};
+
+    const updatedBranding = {
+      ...currentBranding,
+      image_settings: {
+        ...(currentBranding.image_settings || {}),
+        [`banner_${slot}`]: { focal_x: Math.round(x), focal_y: Math.round(y) },
+      },
+    };
+
+    await db.query(
+      `UPDATE tenants
+       SET branding = $1::jsonb,
+           branding_draft_saved_at = NOW(),
+           publish_status = COALESCE(NULLIF(publish_status, ''), 'draft')
+       WHERE id = $2`,
+      [JSON.stringify(updatedBranding), tenantId]
+    );
+
+    await logChange(tenantId, "BANNER_FOCAL_SAVE", getActor(req), { slot, focal_x: Math.round(x), focal_y: Math.round(y) });
+
+    return res.json({
+      ok: true,
+      slot,
+      focal_x: Math.round(x),
+      focal_y: Math.round(y),
+    });
+  } catch (e) {
+    console.error("PATCH /api/admin/tenants/:tenantId/banner-focal error:", e);
+    return res.status(500).json({ error: "Failed to save focal point" });
+  }
+});
+
 // Phase D1: Admin Plan Summary (read-only)
 // GET /api/admin/tenants/:tenantId/plan-summary
 // - Used by Owner/Tenant setup UI to show plan, limits, usage, and trial state.
