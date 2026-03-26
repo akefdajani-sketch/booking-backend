@@ -301,6 +301,7 @@ router.post("/", requireTenant, requireAdminOrTenantRole("manager"), async (req,
       allow_membership,
       availability_basis,
       is_active,
+      category_id,
     } = req.body || {};
 
     const ab = normalizeAvailabilityBasis(availability_basis);
@@ -434,6 +435,7 @@ router.patch("/:id", resolveTenantFromServiceId, requireAdminOrTenantRole("manag
       allow_membership,
       availability_basis,
       is_active,
+      category_id,
     } = req.body || {};
 
     const ab = normalizeAvailabilityBasis(availability_basis);
@@ -488,6 +490,9 @@ router.patch("/:id", resolveTenantFromServiceId, requireAdminOrTenantRole("manag
     }
     if (availability_basis !== undefined && svcCols.has("availability_basis")) add("availability_basis", ab);
     if (is_active !== undefined && svcCols.has("is_active")) add("is_active", !!is_active);
+    if (category_id !== undefined && svcCols.has("category_id")) {
+      add("category_id", category_id == null ? null : Number(category_id));
+    }
 
     if (!sets.length) return res.status(400).json({ error: "No fields to update" });
 
