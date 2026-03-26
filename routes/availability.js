@@ -456,7 +456,41 @@ if (availabilityBasis === "staff" || availabilityBasis === "both") {
 // least one window AND be clipped to business hours (intersection).
 // No rows = unrestricted (preserves all existing behavior).
 let serviceHoursWindows = null; // null = no restriction
+let serviceDayDisabled = false;
 try {
+  try {
+    const closedResult = await pool.query(
+      `SELECT 1
+         FROM service_closed_days
+        WHERE service_id = $1 AND tenant_id = $2 AND day_of_week = $3
+        LIMIT 1`,
+      [serviceId, tenantId, dayOfWeek]
+    );
+    serviceDayDisabled = closedResult.rows.length > 0;
+  } catch (closedErr) {
+    if (!closedErr || closedErr.code !== "42P01") throw closedErr;
+  }
+
+  if (serviceDayDisabled) {
+    return res.json({
+      tenantId,
+      tenantSlug: tenantSlug ?? null,
+      date,
+      times: [],
+      slots: [],
+      meta: {
+        duration_minutes: durationMin,
+        slot_interval_minutes: stepMin,
+        max_parallel_bookings: maxParallel,
+        requires_staff: reqStaff,
+        requires_resource: reqResource,
+        availability_basis: availabilityBasis,
+        derived_basis: derivedBasis,
+        reason: "service_day_disabled",
+      },
+    });
+  }
+
   const shResult = await pool.query(
     `SELECT
        (EXTRACT(HOUR FROM open_time)::int  * 60 + EXTRACT(MINUTE FROM open_time)::int)  AS start_minute,
