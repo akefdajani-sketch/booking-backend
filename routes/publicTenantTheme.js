@@ -196,6 +196,14 @@ router.get("/:slug", async (req, res) => {
     packages: publishedAssetBanners.packages || null,
   };
 
+  // Focal point settings live in the draft branding JSONB (image_settings).
+  // They are always served from the live branding row (not just published),
+  // because focal point edits should show immediately — same as banner URL uploads.
+  const draftBranding = tenant.branding && typeof tenant.branding === "object" ? tenant.branding : {};
+  const tenantImageSettings = draftBranding.image_settings && typeof draftBranding.image_settings === "object"
+    ? draftBranding.image_settings
+    : {};
+
   const effectiveBrandingWithBanners = effectiveBranding
     ? {
         ...effectiveBranding,
@@ -207,6 +215,11 @@ router.get("/:slug", async (req, res) => {
             ...((effectiveBranding.assets && effectiveBranding.assets.banners) || {}),
             ...tenantBanners,
           },
+        },
+        // Always overlay live focal point settings so they update without a publish step.
+        image_settings: {
+          ...(effectiveBranding.image_settings || {}),
+          ...tenantImageSettings,
         },
       }
     : null;
@@ -314,6 +327,7 @@ module.exports = router;
         })(),
       },
       banners: tenantBanners,
+      image_settings: tenantImageSettings,
       brand_overrides: tenant.brand_overrides_json || {},
       branding: effectiveBrandingWithBanners,
       theme_schema: effectiveThemeSchema,
