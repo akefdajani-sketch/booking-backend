@@ -109,7 +109,7 @@ router.get(
         return res.status(404).json({ error: "Service not found." });
       }
 
-      const result = await pool.query(
+      const windowsResult = await pool.query(
         `SELECT day_of_week,
                 to_char(open_time,  'HH24:MI') AS open_time,
                 to_char(close_time, 'HH24:MI') AS close_time
@@ -120,11 +120,26 @@ router.get(
         [serviceId, req.tenantId]
       );
 
-      return res.json({ windows: result.rows });
+      let disabledDays = [];
+      try {
+        const disabledResult = await pool.query(
+          `SELECT day_of_week
+             FROM service_closed_days
+            WHERE service_id = $1
+              AND tenant_id  = $2
+            ORDER BY day_of_week ASC`,
+          [serviceId, req.tenantId]
+        );
+        disabledDays = disabledResult.rows.map((r) => Number(r.day_of_week)).filter((n) => Number.isInteger(n) && n >= 0 && n <= 6);
+      } catch (disabledErr) {
+        if (!disabledErr || disabledErr.code !== "42P01") throw disabledErr;
+      }
+
+      return res.json({ windows: windowsResult.rows, disabled_days: disabledDays });
     } catch (err) {
       // If the table hasn't been migrated yet, return empty (graceful degradation)
       if (err && err.code === "42P01") {
-        return res.json({ windows: [] });
+        return res.json({ windows: [], disabled_days: [] });
       }
       console.error("GET service hours error:", err);
       return res.status(500).json({ error: "Failed to load service hours." });
@@ -154,8 +169,19 @@ router.put(
       }
 
       const rawWindows = req.body?.windows;
+      const rawDisabledDays = req.body?.disabled_days;
       if (!Array.isArray(rawWindows)) {
         return res.status(400).json({ error: "Body must contain { windows: [] }." });
+      }
+      if (rawDisabledDays != null && !Array.isArray(rawDisabledDays)) {
+        return res.status(400).json({ error: "disabled_days must be an array when provided." });
+      }
+
+      const disabledDays = Array.from(new Set((rawDisabledDays ?? []).map((v) => Number(v))));
+      for (const dow of disabledDays) {
+        if (!Number.isInteger(dow) || dow < 0 || dow > 6) {
+          return res.status(400).json({ error: `Invalid disabled day_of_week: ${dow}` });
+        }
       }
 
       // Validate each window
@@ -197,6 +223,27 @@ router.put(
           [serviceId, req.tenantId]
         );
 
+        try {
+          await client.query(
+            "DELETE FROM service_closed_days WHERE service_id = $1 AND tenant_id = $2",
+            [serviceId, req.tenantId]
+          );
+        } catch (closedErr) {
+          if (!closedErr || closedErr.code !== "42P01") throw closedErr;
+        }
+
+        for (const dow of disabledDays) {
+          try {
+            await client.query(
+              `INSERT INTO service_closed_days (service_id, tenant_id, day_of_week)
+               VALUES ($1, $2, $3)`,
+              [serviceId, req.tenantId, dow]
+            );
+          } catch (closedInsertErr) {
+            if (!closedInsertErr || closedInsertErr.code !== "42P01") throw closedInsertErr;
+          }
+        }
+
         for (const w of windows) {
           await client.query(
             `INSERT INTO service_hours (service_id, tenant_id, day_of_week, open_time, close_time)
@@ -213,11 +260,11 @@ router.put(
         client.release();
       }
 
-      return res.json({ ok: true, windows });
+      return res.json({ ok: true, windows, disabled_days: disabledDays });
     } catch (err) {
       if (err && err.code === "42P01") {
         // Table not yet migrated — return OK so the UI doesn't break
-        return res.json({ ok: true, windows: [], note: "migration_pending" });
+        return res.json({ ok: true, windows: [], disabled_days: [], note: "migration_pending" });
       }
       console.error("PUT service hours error:", err);
       return res.status(500).json({ error: "Failed to save service hours." });
