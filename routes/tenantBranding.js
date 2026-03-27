@@ -32,7 +32,7 @@ async function resolveTenantIdFromParam(req, res, next) {
 router.get("/:slug/branding", resolveTenantIdFromParam, async (req, res) => {
   try {
     const { rows } = await db.query(
-      `SELECT id, slug, branding
+      `SELECT id, slug, branding, brand_overrides_json
        FROM tenants
        WHERE id = $1`,
       [req.tenantId]
@@ -59,14 +59,29 @@ router.patch(
         return res.status(400).json({ error: "Missing patch object" });
       }
 
-      // Merge patch into existing branding JSONB
-      const { rows } = await db.query(
-        `UPDATE tenants
-         SET branding = COALESCE(branding, '{}'::jsonb) || $1::jsonb
-         WHERE id = $2
-         RETURNING id, slug, branding`,
-        [JSON.stringify(patch), req.tenantId]
-      );
+      // If the patch contains brand_overrides, write them to the dedicated
+      // brand_overrides_json column (the source the tenant dashboard reads from)
+      // in addition to merging into the branding blob for backward compatibility.
+      const hasBrandOverrides =
+        patch.brand_overrides !== undefined && typeof patch.brand_overrides === "object";
+
+      // Merge patch into existing branding JSONB and optionally update brand_overrides_json
+      const { rows } = hasBrandOverrides
+        ? await db.query(
+            `UPDATE tenants
+             SET branding = COALESCE(branding, '{}'::jsonb) || $1::jsonb,
+                 brand_overrides_json = $3::jsonb
+             WHERE id = $2
+             RETURNING id, slug, branding, brand_overrides_json`,
+            [JSON.stringify(patch), req.tenantId, JSON.stringify(patch.brand_overrides)]
+          )
+        : await db.query(
+            `UPDATE tenants
+             SET branding = COALESCE(branding, '{}'::jsonb) || $1::jsonb
+             WHERE id = $2
+             RETURNING id, slug, branding, brand_overrides_json`,
+            [JSON.stringify(patch), req.tenantId]
+          );
 
       return res.json({ ok: true, tenant: rows[0] });
     } catch (err) {
