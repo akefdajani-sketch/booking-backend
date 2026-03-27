@@ -898,6 +898,7 @@ router.get("/", requireAdmin, async (req, res) => {
           : "NULL::text AS banner_memberships_url",
       cols.has("theme_key") ? "theme_key" : "NULL::text AS theme_key",
       cols.has("layout_key") ? "layout_key" : "NULL::text AS layout_key",
+      cols.has("brand_overrides_json") ? "brand_overrides_json" : "NULL::jsonb AS brand_overrides_json",
       cols.has("currency_code") ? "currency_code" : "NULL::text AS currency_code",
       cols.has("default_phone_country_code") ? "default_phone_country_code" : "NULL::text AS default_phone_country_code",
       cols.has("address_line1") ? "address_line1" : "NULL::text AS address_line1",
@@ -1054,6 +1055,7 @@ router.get("/by-slug/:slug", async (req, res) => {
           : "NULL::text AS banner_memberships_url",
       cols.has("theme_key") ? "theme_key" : "NULL::text AS theme_key",
       cols.has("layout_key") ? "layout_key" : "NULL::text AS layout_key",
+      cols.has("brand_overrides_json") ? "brand_overrides_json" : "NULL::jsonb AS brand_overrides_json",
       cols.has("currency_code") ? "currency_code" : "NULL::text AS currency_code",
       // General settings (optional columns; schema-compat)
       cols.has("default_phone_country_code")
