@@ -210,7 +210,7 @@ router.get('/:slug/payment-methods', resolveTenant, async (req, res) => {
     return res.json({
       allow_card:  settings.allow_card  !== false,
       allow_cliq:  settings.allow_cliq  !== false,
-      allow_cash:  settings.allow_cash  === true,
+      allow_cash:  settings.allow_cash  !== false, // PAY-2: cash on by default, off only if explicitly disabled
     });
   } catch (err) {
     logger.error({ err }, 'GET payment-methods error');
@@ -227,7 +227,7 @@ router.put('/:slug/payment-methods', resolveTenant, requireOwnerOrAdmin, async (
     const settings = {
       allow_card:  req.body?.allow_card  !== false,
       allow_cliq:  req.body?.allow_cliq  !== false,
-      allow_cash:  req.body?.allow_cash  === true,
+      allow_cash:  req.body?.allow_cash  !== false, // PAY-2: cash on by default
     };
 
     await db.query(
