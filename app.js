@@ -65,6 +65,10 @@ const sessionsRouter       = require("./routes/sessions");        // PR-SESSIONS
 const tenantPrepaidCatalogRouter = require("./routes/tenantPrepaidCatalog");
 const tenantPrepaidAccountingRouter = require("./routes/tenantPrepaidAccounting");
 
+// PAY-1: Network payment routes
+const networkPaymentsRouter       = require("./routes/networkPayments");
+const tenantPaymentSettingsRouter = require("./routes/tenantPaymentSettings");
+
 const publicPricingRouter = require("./routes/publicPricing");
 const uploadsRouter = require("./routes/uploads");
 const mediaLibraryRoutes = require("./routes/mediaLibrary");
@@ -175,7 +179,11 @@ app.use("/api/tenant", tenantRatesRouter);
 app.use("/api/tenant", tenantBookingsRouter);
 app.use("/api/tenant", tenantPrepaidCatalogRouter);
 app.use("/api/tenant", tenantPrepaidAccountingRouter);
+app.use("/api/tenant", tenantPaymentSettingsRouter); // PAY-1: /:slug/payment-settings
 app.use("/api/invites", invitesRouter);
+
+// ─── PAY-1: Network payment flow (public — customer checkout) ─────────────────
+app.use("/api/network-payment", networkPaymentsRouter);
 
 // ─── PR-4: Billing REST endpoints (checkout, portal, status) ─────────────────
 app.use("/api/billing", billingRouter);
