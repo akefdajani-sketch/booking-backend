@@ -1591,37 +1591,38 @@ const charge_amount = (finalCustomerMembershipId || prepaidApplied) ? 0 : price_
         let insertSql;
         let insertParams = baseVals;
 
+        // Build INSERT dynamically so parameter indices are always correct
+        // regardless of how many columns are in baseCols (14 or 15 with payment_method).
+        function makePlaceholders(params) {
+          return params.map((_, i) => `$${i + 1}`).join(', ');
+        }
+
         if (hasMoneyCols && hasRateCols) {
+          insertParams = [...baseVals, price_amount, charge_amount, tenantCurrencyCode, applied_rate_rule_id, applied_rate_snapshot];
           insertSql = `
           INSERT INTO bookings
             (${baseCols}, price_amount, charge_amount, currency_code, applied_rate_rule_id, applied_rate_snapshot)
           VALUES
-            ($1, $2, $3, $4, $5, $6,
-             $7, $8, $9, $10, $11, $12, $13, $14,
-             $15, $16, $17, $18, $19)
+            (${makePlaceholders(insertParams)})
           RETURNING id;
           `;
-          insertParams = [...baseVals, price_amount, charge_amount, tenantCurrencyCode, applied_rate_rule_id, applied_rate_snapshot];
         } else if (hasMoneyCols) {
+          insertParams = [...baseVals, price_amount, charge_amount, tenantCurrencyCode];
           insertSql = `
           INSERT INTO bookings
             (${baseCols}, price_amount, charge_amount, currency_code)
           VALUES
-            ($1, $2, $3, $4, $5, $6,
-             $7, $8, $9, $10, $11, $12, $13, $14,
-             $15, $16, $17)
+            (${makePlaceholders(insertParams)})
           RETURNING id;
           `;
-          insertParams = [...baseVals, price_amount, charge_amount, tenantCurrencyCode];
         } else {
           // Backwards-compatible: DB does not yet have money columns.
-          // Apply the migration to enable revenue reporting.
+          insertParams = baseVals;
           insertSql = `
           INSERT INTO bookings
             (${baseCols})
           VALUES
-            ($1, $2, $3, $4, $5, $6,
-             $7, $8, $9, $10, $11, $12, $13, $14)
+            (${makePlaceholders(insertParams)})
           RETURNING id;
           `;
         }
