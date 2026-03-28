@@ -1525,6 +1525,17 @@ router.post("/", requireGoogleAuth, requireTenant, async (req, res) => {
 
 const charge_amount = (finalCustomerMembershipId || prepaidApplied) ? 0 : price_amount;
 
+      // Derive payment_method for this booking
+      // This is set here for free/membership/package cases.
+      // Card/Cliq/Cash are set after payment confirmation via networkPayments route.
+      const payment_method = finalCustomerMembershipId
+        ? 'membership'
+        : prepaidApplied
+          ? 'package'
+          : (price_amount == null || price_amount === 0)
+            ? 'free'
+            : null; // will be set by payment gateway callback
+
       const hasMoneyCols = await ensureBookingMoneyColumns();
       const hasRateCols = await ensureBookingRateColumns();
 
@@ -1558,7 +1569,7 @@ const charge_amount = (finalCustomerMembershipId || prepaidApplied) ? 0 : price_
         }
 
         const baseCols = `tenant_id, service_id, staff_id, resource_id, start_time, duration_minutes,
-             customer_id, customer_name, customer_phone, customer_email, status, idempotency_key, customer_membership_id, session_id`;
+             customer_id, customer_name, customer_phone, customer_email, status, idempotency_key, customer_membership_id, session_id, payment_method`;
 
         const baseVals = [
             resolvedTenantId,
@@ -1575,6 +1586,7 @@ const charge_amount = (finalCustomerMembershipId || prepaidApplied) ? 0 : price_
             idemKey,
             finalCustomerMembershipId,
             resolvedSessionId,
+            payment_method,
         ];
 
         let insertSql;

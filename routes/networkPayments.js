@@ -187,6 +187,18 @@ router.get('/:slug/result', async (req, res) => {
 
     logger.info({ orderId, paymentId: payment.id, verifiedSuccess, mpgsResult }, 'MPGS payment result processed');
 
+    // Update booking payment_method after confirmed payment
+    if (verifiedSuccess && payment.booking_id) {
+      try {
+        await db.query(
+          `UPDATE bookings SET payment_method = 'card' WHERE id = $1`,
+          [payment.booking_id]
+        );
+      } catch (pmErr) {
+        logger.warn({ pmErr }, 'Could not update booking payment_method (non-fatal)');
+      }
+    }
+
     if (!verifiedSuccess) {
       return res.json({ success: false, orderId, paymentId: payment.id, reason: mpgsResult });
     }
