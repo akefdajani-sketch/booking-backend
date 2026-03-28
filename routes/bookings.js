@@ -1001,6 +1001,7 @@ router.post("/", requireGoogleAuth, requireTenant, async (req, res) => {
       prepaidEntitlementId,
       autoConsumePrepaid,
       requirePrepaid,
+      paymentMethod: requestedPaymentMethod, // PAY-2: cash | card | cliq from client
     } = req.body || {};
 
     const slug = (req.tenantSlug || tenantSlug || "").toString().trim();
@@ -1527,15 +1528,16 @@ router.post("/", requireGoogleAuth, requireTenant, async (req, res) => {
 const charge_amount = (finalCustomerMembershipId || prepaidApplied) ? 0 : price_amount;
 
       // Derive payment_method for this booking
-      // This is set here for free/membership/package cases.
-      // Card/Cliq/Cash are set after payment confirmation via networkPayments route.
+      // Cash is sent from client and trusted directly.
+      // Card/Cliq are set after payment gateway callback.
+      // Membership/package/free are derived server-side.
       const payment_method = finalCustomerMembershipId
         ? 'membership'
         : prepaidApplied
           ? 'package'
           : (price_amount == null || price_amount === 0)
             ? 'free'
-            : null; // will be set by payment gateway callback
+            : (requestedPaymentMethod === 'cash' ? 'cash' : null); // cash set by client; card/cliq set after gateway
 
       const hasMoneyCols = await ensureBookingMoneyColumns();
       const hasRateCols = await ensureBookingRateColumns();
