@@ -116,6 +116,8 @@ async function createCheckoutSession(tenantId, {
       operation: 'PURCHASE',
       returnUrl,
       merchant: { name: merchantName || 'Flexrz' },
+      // PAY-1: tell MPGS to use Hosted Payment Page (not embedded/inline)
+      displayControl: { billingAddress: 'HIDE', customerEmail: 'OPTIONAL' },
     },
   };
 

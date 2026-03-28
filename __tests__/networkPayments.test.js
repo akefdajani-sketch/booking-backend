@@ -80,7 +80,10 @@ describe('PAY-1: Network Payments — POST /:slug/initiate', () => {
     expect(res.body.orderId).toMatch(/^FRZ-/);
     expect(res.body.paymentId).toBe(42);
     expect(res.body.checkoutConfig).toBeDefined();
-    expect(res.body.checkoutConfig.merchant).toBe('test12122024');
+    // PAY-1: v63+ checkoutConfig no longer includes top-level merchant;
+    //        session.id and interaction are the only required fields
+    expect(res.body.checkoutConfig.session.id).toBe('SESSION_MOCK_ABC123');
+    expect(res.body.checkoutConfig.interaction.operation).toBe('PURCHASE');
   });
 
   it('returns 400 when amount is missing', async () => {
