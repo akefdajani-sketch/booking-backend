@@ -115,7 +115,7 @@ router.post('/:slug/initiate', async (req, res) => {
       paymentId,
       sessionId:     session.sessionId,
       merchantId:    session.merchantId,
-      checkoutJsUrl: `${session.gatewayUrl}/checkout/version/100/checkout.js`,
+      checkoutJsUrl: `${session.gatewayUrl}/static/checkout/checkout.min.js`, // PAY-1: updated URL for MPGS v63+
       checkoutConfig: {
         merchant: session.merchantId,
         session:  { id: session.sessionId },
