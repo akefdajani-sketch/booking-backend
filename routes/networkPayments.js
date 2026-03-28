@@ -120,7 +120,11 @@ router.post('/:slug/initiate', async (req, res) => {
         merchant: session.merchantId,
         session:  { id: session.sessionId },
         order:    { description, amount: parseFloat(amount).toFixed(3), currency },
-        interaction: { operation: 'PURCHASE', merchant: { name: tenant.name || 'Flexrz' } },
+        interaction: {
+          operation: 'PURCHASE',
+          returnUrl,        // PAY-1 fix: MPGS needs this to redirect back after payment
+          merchant: { name: tenant.name || 'Flexrz' },
+        },
       },
     });
   } catch (err) {
