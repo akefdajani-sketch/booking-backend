@@ -676,13 +676,30 @@ router.get("/", requireTenant, requireAdminOrTenantRole("staff"), async (req, re
         b.price_amount,
         b.charge_amount,
         b.currency_code,
+        b.payment_method,
         b.applied_rate_rule_id,
         b.applied_rate_snapshot,
+        rr.name AS applied_rate_rule_name,
 
         b.customer_id,
+        b.customer_membership_id,
         COALESCE(c.name, b.customer_name)   AS customer_name,
         COALESCE(c.phone, b.customer_phone) AS customer_phone,
         COALESCE(c.email, b.customer_email) AS customer_email,
+
+        -- Membership details
+        mp.name AS membership_plan_name,
+        cm.minutes_remaining AS membership_minutes_remaining,
+        cm.uses_remaining    AS membership_uses_remaining,
+        mu.minutes_used      AS membership_minutes_used_for_booking,
+        mu.uses_used         AS membership_uses_used_for_booking,
+
+        -- Prepaid/package details
+        COALESCE(pr.prepaid_applied, false) AS prepaid_applied,
+        pr.prepaid_product_name,
+        pr.prepaid_redemption_mode,
+        pr.prepaid_quantity_used,
+        pr.prepaid_quantity_remaining,
 
         b.status,
         b.booking_code,
@@ -697,6 +714,31 @@ router.get("/", requireTenant, requireAdminOrTenantRole("staff"), async (req, re
         ON st.tenant_id = b.tenant_id AND st.id = b.staff_id
       LEFT JOIN resources r
         ON r.tenant_id = b.tenant_id AND r.id = b.resource_id
+      LEFT JOIN rate_rules rr
+        ON rr.tenant_id = b.tenant_id AND rr.id = b.applied_rate_rule_id
+      LEFT JOIN customer_memberships cm ON cm.id = b.customer_membership_id
+      LEFT JOIN membership_plans mp ON mp.id = cm.plan_id
+      LEFT JOIN LATERAL (
+        SELECT
+          SUM(CASE WHEN ml.minutes_delta < 0 THEN -ml.minutes_delta ELSE 0 END)::int AS minutes_used,
+          SUM(CASE WHEN ml.uses_delta < 0 THEN -ml.uses_delta ELSE 0 END)::int AS uses_used
+        FROM membership_ledger ml
+        WHERE ml.booking_id = b.id
+          AND (b.customer_membership_id IS NULL OR ml.customer_membership_id = b.customer_membership_id)
+      ) mu ON true
+      LEFT JOIN LATERAL (
+        SELECT
+          true AS prepaid_applied,
+          pp.name AS prepaid_product_name,
+          pr.redemption_mode AS prepaid_redemption_mode,
+          pr.redeemed_quantity AS prepaid_quantity_used,
+          e.remaining_quantity AS prepaid_quantity_remaining
+        FROM prepaid_redemptions pr
+        LEFT JOIN customer_prepaid_entitlements e ON e.id = pr.entitlement_id AND e.tenant_id = pr.tenant_id
+        LEFT JOIN prepaid_products pp ON pp.id = pr.prepaid_product_id AND pp.tenant_id = pr.tenant_id
+        WHERE pr.booking_id = b.id
+        ORDER BY pr.id DESC LIMIT 1
+      ) pr ON true
       WHERE ${where.join(" AND ")}
       ORDER BY ${orderBy}
       LIMIT $${params.length + 1}
