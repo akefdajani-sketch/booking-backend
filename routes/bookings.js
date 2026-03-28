@@ -9,6 +9,7 @@ const requireGoogleAuth = require("../middleware/requireGoogleAuth");
 const { requireTenant } = require("../middleware/requireTenant");
 const { ensureBookingMoneyColumns } = require("../utils/ensureBookingMoneyColumns");
 const { ensureBookingRateColumns } = require("../utils/ensureBookingRateColumns");
+const { ensurePaymentMethodColumn } = require("../utils/ensurePaymentMethodColumn"); // PAY-2
 const { computeRateForBookingLike } = require("../utils/ratesEngine");
 const { checkConflicts, loadJoinedBookingById, findOrCreateSession, incrementSessionCount, decrementSessionCount } = require("../utils/bookings");
 
@@ -1538,6 +1539,7 @@ const charge_amount = (finalCustomerMembershipId || prepaidApplied) ? 0 : price_
 
       const hasMoneyCols = await ensureBookingMoneyColumns();
       const hasRateCols = await ensureBookingRateColumns();
+      const hasPaymentMethodCol = await ensurePaymentMethodColumn(); // PAY-2
 
       let bookingId;
       let created = true;
@@ -1568,26 +1570,23 @@ const charge_amount = (finalCustomerMembershipId || prepaidApplied) ? 0 : price_
           resolvedSessionId = sessionResult.sessionId;
         }
 
-        const baseCols = `tenant_id, service_id, staff_id, resource_id, start_time, duration_minutes,
-             customer_id, customer_name, customer_phone, customer_email, status, idempotency_key, customer_membership_id, session_id, payment_method`;
+        // PAY-2: include payment_method only if column exists (defensive — see ensurePaymentMethodColumn)
+        const baseCols = hasPaymentMethodCol
+          ? `tenant_id, service_id, staff_id, resource_id, start_time, duration_minutes,
+             customer_id, customer_name, customer_phone, customer_email, status, idempotency_key, customer_membership_id, session_id, payment_method`
+          : `tenant_id, service_id, staff_id, resource_id, start_time, duration_minutes,
+             customer_id, customer_name, customer_phone, customer_email, status, idempotency_key, customer_membership_id, session_id`;
 
-        const baseVals = [
-            resolvedTenantId,
-            resolvedServiceId,
-            staff_id,
-            resource_id,
-            start.toISOString(),
-            duration,
-            finalCustomerId,
-            cleanName,
-            cleanPhone,
-            cleanEmail,
-            initialStatus,
-            idemKey,
-            finalCustomerMembershipId,
-            resolvedSessionId,
-            payment_method,
-        ];
+        const baseVals = hasPaymentMethodCol
+          ? [resolvedTenantId, resolvedServiceId, staff_id, resource_id,
+             start.toISOString(), duration,
+             finalCustomerId, cleanName, cleanPhone, cleanEmail,
+             initialStatus, idemKey, finalCustomerMembershipId, resolvedSessionId,
+             payment_method]
+          : [resolvedTenantId, resolvedServiceId, staff_id, resource_id,
+             start.toISOString(), duration,
+             finalCustomerId, cleanName, cleanPhone, cleanEmail,
+             initialStatus, idemKey, finalCustomerMembershipId, resolvedSessionId];
 
         let insertSql;
         let insertParams = baseVals;
