@@ -1494,10 +1494,15 @@ router.post("/", requireGoogleAuth, requireTenant, async (req, res) => {
       
       // Apply dynamic Rates rules (if configured).
       // Non-fatal: if rate_rules table is not present yet, bookings still succeed.
+      //
+      // FIX: Always call the rates engine regardless of whether the service has
+      // a base price. Fixed-price rate rules set the price directly and do not
+      // require a base price. Previously, services with rate rules but no base
+      // price (e.g. Golf Simulator) would never have rates applied to bookings.
       let applied_rate_rule_id = null;
       let applied_rate_snapshot = null;
       try {
-        if (price_amount != null && Number.isFinite(Number(price_amount))) {
+        if (resolvedServiceId) {
           const computed = await computeRateForBookingLike({
             tenantId: resolvedTenantId,
             serviceId: resolvedServiceId,
@@ -1505,7 +1510,7 @@ router.post("/", requireGoogleAuth, requireTenant, async (req, res) => {
             resourceId: resource_id,
             start,
             durationMinutes: Number(duration),
-            basePriceAmount: Number(price_amount),
+            basePriceAmount: price_amount != null ? Number(price_amount) : null,
             serviceSlotMinutes: Number(serviceDurationMinutes) || Number(duration),
           });
           if (computed && computed.adjusted_price_amount != null) {
