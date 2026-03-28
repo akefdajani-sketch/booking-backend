@@ -192,3 +192,57 @@ router.delete('/:slug/payment-settings', resolveTenant, requireOwnerOrAdmin, asy
 });
 
 module.exports = router;
+
+// ─── GET /api/tenant/:slug/payment-methods ────────────────────────────────────
+// Returns which payment methods the tenant allows.
+// Public — called by booking frontend to know what to offer customers.
+
+router.get('/:slug/payment-methods', resolveTenant, async (req, res) => {
+  try {
+    const { rows } = await db.query(
+      `SELECT branding FROM tenants WHERE id = $1 LIMIT 1`,
+      [req.tenantId]
+    );
+    const branding = rows[0]?.branding || {};
+    const settings = branding?.paymentSettings || {};
+
+    // Defaults: card and Cliq on, cash off
+    return res.json({
+      allow_card:  settings.allow_card  !== false,
+      allow_cliq:  settings.allow_cliq  !== false,
+      allow_cash:  settings.allow_cash  === true,
+    });
+  } catch (err) {
+    logger.error({ err }, 'GET payment-methods error');
+    return res.status(500).json({ error: 'Failed to load payment methods.' });
+  }
+});
+
+// ─── PUT /api/tenant/:slug/payment-methods ────────────────────────────────────
+// Owner: update which payment methods are allowed.
+// Body: { allow_card?, allow_cliq?, allow_cash? }
+
+router.put('/:slug/payment-methods', resolveTenant, requireOwnerOrAdmin, async (req, res) => {
+  try {
+    const settings = {
+      allow_card:  req.body?.allow_card  !== false,
+      allow_cliq:  req.body?.allow_cliq  !== false,
+      allow_cash:  req.body?.allow_cash  === true,
+    };
+
+    await db.query(
+      `UPDATE tenants
+       SET branding = COALESCE(branding, '{}'::jsonb) ||
+                      jsonb_build_object('paymentSettings', $1::jsonb)
+       WHERE id = $2`,
+      [JSON.stringify(settings), req.tenantId]
+    );
+
+    logger.info({ tenantId: req.tenantId, settings }, 'Payment methods updated');
+    return res.json({ ok: true, ...settings });
+  } catch (err) {
+    logger.error({ err }, 'PUT payment-methods error');
+    return res.status(500).json({ error: 'Failed to update payment methods.' });
+  }
+});
+

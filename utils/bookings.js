@@ -316,6 +316,7 @@ async function loadJoinedBookingById(bookingId, tenantId) {
       b.price_amount,
       b.charge_amount,
       b.currency_code,
+      b.payment_method,
       b.applied_rate_rule_id,
       b.applied_rate_snapshot,
       rr.name AS applied_rate_rule_name,
