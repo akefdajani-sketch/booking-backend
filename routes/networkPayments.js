@@ -116,14 +116,18 @@ router.post('/:slug/initiate', async (req, res) => {
       sessionId:     session.sessionId,
       merchantId:    session.merchantId,
       checkoutJsUrl: `${session.gatewayUrl}/static/checkout/checkout.min.js`, // PAY-1: updated URL for MPGS v63+
+      // For MPGS Hosted Checkout v63+, configure() only needs session.id
+      // and interaction display settings. All payment details (amount, currency,
+      // returnUrl) are already stored in the session server-side.
       checkoutConfig: {
-        merchant: session.merchantId,
         session:  { id: session.sessionId },
-        order:    { description, amount: parseFloat(amount).toFixed(3), currency },
         interaction: {
           operation: 'PURCHASE',
-          returnUrl,        // PAY-1 fix: MPGS needs this to redirect back after payment
-          merchant: { name: tenant.name || 'Flexrz' },
+          merchant:  { name: tenant.name || 'Flexrz' },
+          displayControl: {
+            billingAddress: 'HIDE',
+            customerEmail:  'OPTIONAL',
+          },
         },
       },
     });
