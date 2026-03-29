@@ -22,6 +22,7 @@ const crypto = require("crypto");
 
 const db = require("../db");
 const requireGoogleAuth = require("../middleware/requireGoogleAuth");
+const requireAppAuth = require("../middleware/requireAppAuth"); // AUTH-FIX: swap Google token for long-lived Flexrz JWT
 const requireAdmin = require("../middleware/requireAdmin");
 const ensureUser = require("../middleware/ensureUser");
 const { getTenantIdFromSlug } = require("../utils/tenants");
@@ -50,7 +51,7 @@ function isAdminRequest(req) {
 // For GET /me only: allow either Google (tenant staff) OR ADMIN_API_KEY (owner proxy-admin).
 function requireTenantMeAuth(req, res, next) {
   if (isAdminRequest(req)) return requireAdmin(req, res, next);
-  return requireGoogleAuth(req, res, next);
+  return requireAppAuth(req, res, next);
 }
 
 function maybeEnsureUser(req, res, next) {
@@ -208,7 +209,7 @@ router.get(
 // -----------------------------------------------------------------------------
 router.get(
   "/:slug/users",
-  requireGoogleAuth,
+  requireAppAuth,
   ensureUser,
   resolveTenantIdFromParam,
   requireTenantRole("viewer"),
@@ -258,7 +259,7 @@ router.get(
 // -----------------------------------------------------------------------------
 router.post(
   "/:slug/users/invite",
-  requireGoogleAuth,
+  requireAppAuth,
   ensureUser,
   resolveTenantIdFromParam,
   requireTenantRole("owner"),
@@ -356,7 +357,7 @@ router.post(
 // -----------------------------------------------------------------------------
 router.post(
   "/:slug/users/manual-add",
-  requireGoogleAuth,
+  requireAppAuth,
   ensureUser,
   resolveTenantIdFromParam,
   requireTenantRole("owner"),
@@ -428,7 +429,7 @@ router.post(
 // -----------------------------------------------------------------------------
 router.get(
   "/:slug/users/invites",
-  requireGoogleAuth,
+  requireAppAuth,
   ensureUser,
   resolveTenantIdFromParam,
   requireTenantRole("owner"),
@@ -511,7 +512,7 @@ router.get(
 // -----------------------------------------------------------------------------
 router.post(
   "/:slug/users/invites/:inviteId/resend",
-  requireGoogleAuth,
+  requireAppAuth,
   ensureUser,
   resolveTenantIdFromParam,
   requireTenantRole("owner"),
@@ -595,7 +596,7 @@ router.post(
 // -----------------------------------------------------------------------------
 router.delete(
   "/:slug/users/invites/:inviteId",
-  requireGoogleAuth,
+  requireAppAuth,
   ensureUser,
   resolveTenantIdFromParam,
   requireTenantRole("owner"),
@@ -629,7 +630,7 @@ router.delete(
 // -----------------------------------------------------------------------------
 router.patch(
   "/:slug/users/:userId",
-  requireGoogleAuth,
+  requireAppAuth,
   ensureUser,
   resolveTenantIdFromParam,
   requireTenantRole("owner"),
@@ -686,7 +687,7 @@ router.patch(
 // -----------------------------------------------------------------------------
 router.delete(
   "/:slug/users/:userId",
-  requireGoogleAuth,
+  requireAppAuth,
   ensureUser,
   resolveTenantIdFromParam,
   requireTenantRole("owner"),

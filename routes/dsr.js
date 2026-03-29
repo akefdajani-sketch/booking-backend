@@ -23,6 +23,7 @@ const express  = require('express');
 const router   = express.Router();
 const { pool } = require('../db');
 const requireGoogleAuth           = require('../middleware/requireGoogleAuth');
+const requireAppAuth = require('../middleware/requireAppAuth'); // AUTH-FIX
 const { requireTenant }           = require('../middleware/requireTenant');
 const requireAdminOrTenantRole    = require('../middleware/requireAdminOrTenantRole');
 const { writeAuditEvent, EVENT_TYPES } = require('../utils/auditLog');
@@ -136,7 +137,7 @@ router.post('/request', requireTenant, async (req, res) => {
 
 router.get(
   '/',
-  requireGoogleAuth,
+  requireAppAuth,
   requireTenant,
   requireAdminOrTenantRole('owner'),
   async (req, res) => {
@@ -191,7 +192,7 @@ router.get(
 
 router.patch(
   '/:id/status',
-  requireGoogleAuth,
+  requireAppAuth,
   requireTenant,
   requireAdminOrTenantRole('owner'),
   async (req, res) => {
@@ -276,7 +277,7 @@ router.patch(
 
 router.get(
   '/:id/export',
-  requireGoogleAuth,
+  requireAppAuth,
   requireTenant,
   requireAdminOrTenantRole('owner'),
   async (req, res) => {

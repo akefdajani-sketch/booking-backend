@@ -13,6 +13,7 @@ const { pool } = require("../db");
 const db = pool;
 
 const requireGoogleAuth            = require("../middleware/requireGoogleAuth");
+const requireAppAuth = require("../middleware/requireAppAuth"); // AUTH-FIX
 const requireAdminOrTenantRole     = require("../middleware/requireAdminOrTenantRole");
 const { requireTenant }            = require("../middleware/requireTenant");
 
@@ -25,7 +26,7 @@ function injectTenantSlug(req, _res, next) {
 }
 
 const baseMiddleware = [
-  requireGoogleAuth,
+  requireAppAuth,
   injectTenantSlug,
   requireTenant,
   requireAdminOrTenantRole("staff"),
@@ -186,7 +187,7 @@ router.get("/:slug/sessions/:id", ...baseMiddleware, async (req, res) => {
 // Cancel the session and all its active bookings.
 router.post(
   "/:slug/sessions/:id/cancel",
-  requireGoogleAuth,
+  requireAppAuth,
   injectTenantSlug,
   requireTenant,
   requireAdminOrTenantRole("owner"),

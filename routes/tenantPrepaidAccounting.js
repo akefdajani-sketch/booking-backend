@@ -3,6 +3,7 @@ const router = express.Router();
 
 const db = require("../db");
 const requireGoogleAuth = require("../middleware/requireGoogleAuth");
+const requireAppAuth = require("../middleware/requireAppAuth"); // AUTH-FIX: swap Google token for long-lived Flexrz JWT
 const requireAdmin = require("../middleware/requireAdmin");
 const ensureUser = require("../middleware/ensureUser");
 const { getTenantIdFromSlug } = require("../utils/tenants");
@@ -67,7 +68,7 @@ function isAdminRequest(req) {
 
 function requireTenantMeAuth(req, res, next) {
   if (isAdminRequest(req)) return requireAdmin(req, res, next);
-  return requireGoogleAuth(req, res, next);
+  return requireAppAuth(req, res, next);
 }
 
 function maybeEnsureUser(req, res, next) {
