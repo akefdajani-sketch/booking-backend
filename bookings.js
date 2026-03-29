@@ -73,28 +73,83 @@ async function servicesHasColumn(client, columnName) {
   return rows.length > 0;
 }
 
-async function getServiceAllowMembership(client, tenantId, serviceId) {
+async function getServiceMembershipPolicy(client, tenantId, serviceId) {
   const tid = Number(tenantId);
   const sid = Number(serviceId);
-  if (!Number.isFinite(tid) || tid <= 0) return { supported: false, allowed: false };
-  if (!Number.isFinite(sid) || sid <= 0) return { supported: false, allowed: false };
-
-  const supported = await servicesHasColumn(client, "allow_membership");
-  if (!supported) {
-    // Backward compatible: if the schema hasn't been patched yet,
-    // we treat the rule as "not configured" (allowed=false) so we never silently debit.
-    return { supported: false, allowed: false };
+  if (!Number.isFinite(tid) || tid <= 0) {
+    return { supported: false, allowed: false, mode: 'auto', minutesPerBooking: null, usesPerBooking: null, notes: null };
+  }
+  if (!Number.isFinite(sid) || sid <= 0) {
+    return { supported: false, allowed: false, mode: 'auto', minutesPerBooking: null, usesPerBooking: null, notes: null };
   }
 
+  const allowSupported = await servicesHasColumn(client, 'allow_membership');
+  if (!allowSupported) {
+    return { supported: false, allowed: false, mode: 'auto', minutesPerBooking: null, usesPerBooking: null, notes: null };
+  }
+
+  const hasMode = await servicesHasColumn(client, 'membership_redemption_mode');
+  const hasMinutes = await servicesHasColumn(client, 'membership_minutes_per_booking');
+  const hasUses = await servicesHasColumn(client, 'membership_uses_per_booking');
+  const hasNotes = await servicesHasColumn(client, 'membership_redemption_notes');
+
   const r = await client.query(
-    `SELECT COALESCE(allow_membership,false) AS allow_membership
+    `SELECT
+       COALESCE(allow_membership,false) AS allow_membership,
+       ${hasMode ? "COALESCE(NULLIF(TRIM(membership_redemption_mode), ''), 'auto')" : "'auto'"} AS membership_redemption_mode,
+       ${hasMinutes ? 'membership_minutes_per_booking' : 'NULL::int'} AS membership_minutes_per_booking,
+       ${hasUses ? 'membership_uses_per_booking' : 'NULL::int'} AS membership_uses_per_booking,
+       ${hasNotes ? 'membership_redemption_notes' : 'NULL::text'} AS membership_redemption_notes
      FROM services
      WHERE id=$1 AND tenant_id=$2
      LIMIT 1`,
     [sid, tid]
   );
-  if (!r.rows.length) return { supported: true, allowed: false };
-  return { supported: true, allowed: !!r.rows[0].allow_membership };
+  if (!r.rows.length) {
+    return { supported: true, allowed: false, mode: 'auto', minutesPerBooking: null, usesPerBooking: null, notes: null };
+  }
+  const row = r.rows[0] || {};
+  return {
+    supported: true,
+    allowed: !!row.allow_membership,
+    mode: String(row.membership_redemption_mode || 'auto').toLowerCase(),
+    minutesPerBooking: row.membership_minutes_per_booking == null ? null : Number(row.membership_minutes_per_booking),
+    usesPerBooking: row.membership_uses_per_booking == null ? null : Number(row.membership_uses_per_booking),
+    notes: row.membership_redemption_notes == null ? null : String(row.membership_redemption_notes),
+  };
+}
+
+function computeMembershipDebit(policy, membershipRow, durationMinutes) {
+  const mode = String(policy?.mode || 'auto').toLowerCase();
+  const minsRemaining = Number(membershipRow?.minutes_remaining || 0);
+  const usesRemaining = Number(membershipRow?.uses_remaining || 0);
+  const bookingDuration = Math.max(0, Number(durationMinutes || 0));
+  const configuredMinutes = policy?.minutesPerBooking == null ? null : Math.max(0, Number(policy.minutesPerBooking || 0));
+  const configuredUses = policy?.usesPerBooking == null ? null : Math.max(0, Number(policy.usesPerBooking || 0));
+
+  if (mode === 'minutes') {
+    const debitMinutes = configuredMinutes && configuredMinutes > 0 ? configuredMinutes : bookingDuration;
+    if (debitMinutes > 0 && minsRemaining >= debitMinutes) {
+      return { ok: true, minutesDelta: -debitMinutes, usesDelta: 0, appliedMode: 'minutes' };
+    }
+    return { ok: false, code: 'insufficient_balance', message: 'Insufficient membership minutes for this service rule.' };
+  }
+
+  if (mode === 'uses') {
+    const debitUses = configuredUses && configuredUses > 0 ? configuredUses : 1;
+    if (debitUses > 0 && usesRemaining >= debitUses) {
+      return { ok: true, minutesDelta: 0, usesDelta: -debitUses, appliedMode: 'uses' };
+    }
+    return { ok: false, code: 'insufficient_balance', message: 'Insufficient membership uses for this service rule.' };
+  }
+
+  if (bookingDuration > 0 && minsRemaining >= bookingDuration) {
+    return { ok: true, minutesDelta: -bookingDuration, usesDelta: 0, appliedMode: 'auto_minutes' };
+  }
+  if (usesRemaining >= 1) {
+    return { ok: true, minutesDelta: 0, usesDelta: -1, appliedMode: 'auto_uses' };
+  }
+  return { ok: false, code: 'insufficient_balance', message: 'Insufficient membership balance.' };
 }
 
 // ---------------------------------------------------------------------------
@@ -1001,22 +1056,17 @@ router.post("/", requireGoogleAuth, requireTenant, async (req, res) => {
           // soft mode: proceed without membership
         } else {
           const cm = eligible.rows[0];
-          const minsRemaining = Number(cm.minutes_remaining || 0);
-          const usesRemaining = Number(cm.uses_remaining || 0);
-
-          // Debit policy mirrors the explicit membership path:
-          if (minsRemaining >= Number(duration)) {
-            debitMinutes = -Number(duration);
-            debitUses = 0;
-          } else if (usesRemaining >= 1) {
-            debitMinutes = 0;
-            debitUses = -1;
-          } else if (wantRequireMembership) {
-            await client.query("ROLLBACK");
-            return res.status(409).json({ error: "Insufficient membership balance." });
+          const debitDecision = computeMembershipDebit(serviceMembershipRule, cm, Number(duration));
+          if (!debitDecision.ok) {
+            if (wantRequireMembership) {
+              await client.query("ROLLBACK");
+              return res.status(409).json({ error: debitDecision.message || "Insufficient membership balance." });
+            }
+          } else {
+            debitMinutes = Number(debitDecision.minutesDelta || 0);
+            debitUses = Number(debitDecision.usesDelta || 0);
+            finalCustomerMembershipId = cm.id;
           }
-
-          finalCustomerMembershipId = cm.id;
         }
       }
 
@@ -1058,24 +1108,14 @@ router.post("/", requireGoogleAuth, requireTenant, async (req, res) => {
           return res.status(400).json({ error: "Membership is not active or is expired." });
         }
 
-        const minsRemaining = Number(cm.minutes_remaining || 0);
-        const usesRemaining = Number(cm.uses_remaining || 0);
-
-        // Default debit policy:
-        // - If membership has enough minutes, debit booking duration minutes.
-        // - Otherwise, if it has uses, debit 1 use.
-        // (You can make this service-specific later.)
-        if (minsRemaining >= Number(duration)) {
-          debitMinutes = -Number(duration);
-          debitUses = 0;
-        } else if (usesRemaining >= 1) {
-          debitMinutes = 0;
-          debitUses = -1;
-        } else {
+        const debitDecision = computeMembershipDebit(serviceMembershipRule, cm, Number(duration));
+        if (!debitDecision.ok) {
           await client.query("ROLLBACK");
-          return res.status(409).json({ error: "Insufficient membership balance." });
+          return res.status(409).json({ error: debitDecision.message || "Insufficient membership balance." });
         }
 
+        debitMinutes = Number(debitDecision.minutesDelta || 0);
+        debitUses = Number(debitDecision.usesDelta || 0);
         finalCustomerMembershipId = cm.id;
       }
 
@@ -1191,7 +1231,7 @@ router.post("/", requireGoogleAuth, requireTenant, async (req, res) => {
           `SELECT minutes_remaining, uses_remaining
            FROM customer_memberships
            WHERE id = $1 AND tenant_id = $2`,
-          [membership.id, tenantId]
+          [finalCustomerMembershipId, resolvedTenantId]
         );
         const cmAfter = cmAfterRes.rows[0] || { minutes_remaining: 0, uses_remaining: 0 };
         const mins = Number(cmAfter.minutes_remaining || 0);
@@ -1203,7 +1243,7 @@ router.post("/", requireGoogleAuth, requireTenant, async (req, res) => {
             `UPDATE customer_memberships
              SET status = 'expired', end_at = COALESCE(end_at, NOW())
              WHERE id = $1 AND tenant_id = $2`,
-            [membership.id, tenantId]
+            [finalCustomerMembershipId, resolvedTenantId]
           );
         }
       }
