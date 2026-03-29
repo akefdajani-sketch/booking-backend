@@ -6,6 +6,7 @@ const db = pool;
 
 const requireAdminOrTenantRole = require("../middleware/requireAdminOrTenantRole");
 const requireGoogleAuth = require("../middleware/requireGoogleAuth");
+const requireAppAuth = require("../middleware/requireAppAuth"); // AUTH-FIX: long-lived token for customer booking routes
 const { requireTenant } = require("../middleware/requireTenant");
 const { ensureBookingMoneyColumns } = require("../utils/ensureBookingMoneyColumns");
 const { ensureBookingRateColumns } = require("../utils/ensureBookingRateColumns");
@@ -444,12 +445,12 @@ router.get(
     if (shouldUseCustomerHistory(req)) return next();
     return next("route");
   },
-  requireGoogleAuth,
+  requireAppAuth,
   requireTenant,
   async (req, res) => {
     try {
       const tenantId = req.tenantId;
-      const googleEmail = String(req.googleUser?.email || "").trim().toLowerCase();
+      const googleEmail = String(req.auth?.email || req.googleUser?.email || "").trim().toLowerCase();
 
       const qEmailRaw =
         (req.query.customerEmail ? String(req.query.customerEmail) : "") ||
@@ -1018,7 +1019,7 @@ router.delete("/:id", requireTenant, requireAdminOrTenantRole("staff"), async (r
 // Public booking creation (tenantSlug required)
 // ---------------------------------------------------------------------------
 // Phase C: booking creation is authenticated (prevents ghost bookings after session expiry).
-router.post("/", requireGoogleAuth, requireTenant, async (req, res) => {
+router.post("/", requireAppAuth, requireTenant, async (req, res) => {
   try {
     // Ensure revenue/price columns exist in older DBs.
     // (No-op if already applied.)
@@ -1057,8 +1058,8 @@ router.post("/", requireGoogleAuth, requireTenant, async (req, res) => {
 
     const isAdminBypass = !!req.adminBypass;
 
-    const googleEmail = (req.googleUser?.email || "").toString().trim().toLowerCase();
-    const googleName = (req.googleUser?.name || req.googleUser?.given_name || "").toString().trim();
+    const googleEmail = (req.auth?.email || req.googleUser?.email || "").toString().trim().toLowerCase();
+    const googleName = (req.auth?.name || req.googleUser?.name || req.googleUser?.given_name || "").toString().trim();
 
     // Public booking requires the *customer* Google identity.
     // Owner/tenant dashboards may create bookings on behalf of customers via ADMIN_API_KEY proxy.

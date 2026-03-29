@@ -4,6 +4,7 @@ const request = require('supertest');
 jest.mock('../db', () => ({ pool: { query: jest.fn() } }));
 jest.mock('../middleware/requireTenant', () => ({ requireTenant: (req, res, next) => next() }));
 jest.mock('../middleware/requireGoogleAuth', () => (req, _res, next) => next());
+jest.mock('../middleware/requireAppAuth', () => (req, _res, next) => next());
 jest.mock('../utils/bookings', () => ({ checkConflicts: jest.fn(), loadJoinedBookingById: jest.fn() }));
 
 const { pool } = require('../db');
