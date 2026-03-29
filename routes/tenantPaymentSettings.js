@@ -27,6 +27,7 @@ const {
 const { testCredentials }   = require('../utils/network');
 const { getTenantIdFromSlug } = require('../utils/tenants');
 const requireGoogleAuth     = require('../middleware/requireGoogleAuth');
+const requireAppAuth = require('../middleware/requireAppAuth'); // AUTH-FIX
 const ensureUser            = require('../middleware/ensureUser');
 const { requireTenantRole } = require('../middleware/requireTenantRole');
 
@@ -43,7 +44,7 @@ function isAdminRequest(req) {
 
 function requireOwnerOrAdmin(req, res, next) {
   if (isAdminRequest(req)) return next();
-  return requireGoogleAuth(req, res, () =>
+  return requireAppAuth(req, res, () =>
     ensureUser(req, res, () =>
       requireTenantRole(['owner'])(req, res, next)
     )

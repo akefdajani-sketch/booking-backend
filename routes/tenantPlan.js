@@ -18,6 +18,7 @@ const router = express.Router();
 
 const db = require("../db");
 const requireGoogleAuth = require("../middleware/requireGoogleAuth");
+const requireAppAuth = require("../middleware/requireAppAuth"); // AUTH-FIX: swap Google token for long-lived Flexrz JWT
 const ensureUser = require("../middleware/ensureUser");
 const { getTenantIdFromSlug } = require("../utils/tenants");
 const { requireTenantRole } = require("../middleware/requireTenantRole");
@@ -111,7 +112,7 @@ async function resolveTenantIdFromParam(req, res, next) {
 
 router.get(
   "/:slug/plan",
-  requireGoogleAuth,
+  requireAppAuth,
   ensureUser,
   resolveTenantIdFromParam,
   requireTenantRole("viewer"),

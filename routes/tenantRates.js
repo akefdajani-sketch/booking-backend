@@ -14,6 +14,7 @@
 const express = require("express");
 
 const requireGoogleAuth = require("../middleware/requireGoogleAuth");
+const requireAppAuth = require("../middleware/requireAppAuth"); // AUTH-FIX: swap Google token for long-lived Flexrz JWT
 const ensureUser = require("../middleware/ensureUser");
 const { requireTenant } = require("../middleware/requireTenant");
 const { requireTenantRole } = require("../middleware/requireTenantRole");
@@ -91,7 +92,7 @@ function normalizeDate(v) {
 // ---------------------------------------------------------------------------
 router.get(
   "/:slug/rates",
-  requireGoogleAuth,
+  requireAppAuth,
   ensureUser,
   injectTenantSlug,
   requireTenant,
@@ -134,7 +135,7 @@ router.get(
 // ---------------------------------------------------------------------------
 router.post(
   "/:slug/rates",
-  requireGoogleAuth,
+  requireAppAuth,
   ensureUser,
   injectTenantSlug,
   requireTenant,
@@ -225,7 +226,7 @@ router.post(
 // ---------------------------------------------------------------------------
 router.patch(
   "/:slug/rates/:id",
-  requireGoogleAuth,
+  requireAppAuth,
   ensureUser,
   injectTenantSlug,
   requireTenant,
@@ -293,7 +294,7 @@ router.patch(
 // ---------------------------------------------------------------------------
 router.delete(
   "/:slug/rates/:id",
-  requireGoogleAuth,
+  requireAppAuth,
   ensureUser,
   injectTenantSlug,
   requireTenant,
@@ -319,7 +320,7 @@ router.delete(
 // ---------------------------------------------------------------------------
 router.post(
   "/:slug/rates/preview",
-  requireGoogleAuth,
+  requireAppAuth,
   ensureUser,
   injectTenantSlug,
   requireTenant,

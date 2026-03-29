@@ -20,6 +20,7 @@ const router = express.Router();
 
 const db = require("../db");
 const requireGoogleAuth = require("../middleware/requireGoogleAuth");
+const requireAppAuth = require("../middleware/requireAppAuth"); // AUTH-FIX: swap Google token for long-lived Flexrz JWT
 const requireAdmin = require("../middleware/requireAdmin");
 const ensureUser = require("../middleware/ensureUser");
 const { getTenantIdFromSlug } = require("../utils/tenants");
@@ -48,7 +49,7 @@ function isAdminRequest(req) {
 // Tenant dashboard calls via Google auth.
 function staffScheduleAuth(req, res, next) {
   if (isAdminRequest(req)) return requireAdmin(req, res, next);
-  return requireGoogleAuth(req, res, next);
+  return requireAppAuth(req, res, next);
 }
 
 function staffScheduleUser(req, res, next) {
@@ -145,7 +146,7 @@ function normalizePgConflict(err) {
 // Auth wrappers: allow either Google (tenant staff) OR ADMIN_API_KEY (owner proxy-admin).
 function requireStaffScheduleAuth(req, res, next) {
   if (isAdminRequest(req)) return requireAdmin(req, res, next);
-  return requireGoogleAuth(req, res, next);
+  return requireAppAuth(req, res, next);
 }
 
 function maybeEnsureUser(req, res, next) {

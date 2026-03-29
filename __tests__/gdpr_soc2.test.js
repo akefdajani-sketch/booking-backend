@@ -30,6 +30,11 @@ jest.mock('../middleware/requireGoogleAuth', () => (req, res, next) => {
   req.googleUser = { sub: 'sub-1', email: 'owner@test.com' };
   next();
 });
+jest.mock('../middleware/requireAppAuth', () => (req, res, next) => {
+  req.googleUser = { sub: 'sub-1', email: 'owner@test.com' };
+  req.auth = { sub: 'sub-1', email: 'owner@test.com' };
+  next();
+});
 jest.mock('../middleware/ensureUser', () => (req, res, next) => {
   req.user = { id: 1, email: 'owner@test.com' };
   next();
