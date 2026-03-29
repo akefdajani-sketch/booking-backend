@@ -6,6 +6,7 @@ const db = pool;
 
 const requireAdminOrTenantRole = require("../middleware/requireAdminOrTenantRole");
 const requireGoogleAuth = require("../middleware/requireGoogleAuth");
+const requireAppAuth = require("../middleware/requireAppAuth"); // AUTH-FIX: long-lived token for /me/* customer routes
 const { requireTenant } = require("../middleware/requireTenant");
 
 // -----------------------------------------------------------------------------
@@ -183,7 +184,7 @@ router.get("/", requireTenant, requireAdminOrTenantRole("staff"), async (req, re
 // Body: { tenantSlug, name, phone?, email? }
 // P1: tenant resolved by slug; upsert is scoped by tenant_id.
 // ------------------------------------------------------------
-router.post("/me", requireGoogleAuth, async (req, res) => {
+router.post("/me", requireAppAuth, async (req, res) => {
   try {
     const { tenantSlug, name, phone, email } = req.body || {};
 
@@ -243,7 +244,7 @@ router.post("/me", requireGoogleAuth, async (req, res) => {
 // Returns the signed-in customer's profile for this tenant.
 // If the customer does not exist yet, returns { customer: null }.
 // ------------------------------------------------------------
-router.get("/me", requireGoogleAuth, requireTenant, async (req, res) => {
+router.get("/me", requireAppAuth, requireTenant, async (req, res) => {
   try {
     const tenantId = req.tenantId || req.tenant?.id;
     const email = (req.googleUser?.email || "").toLowerCase();
@@ -269,7 +270,7 @@ router.get("/me", requireGoogleAuth, requireTenant, async (req, res) => {
 // GET /api/customers/me/session
 // Lightweight auth check for the booking UI.
 // ------------------------------------------------------------
-router.get("/me/session", requireGoogleAuth, requireTenant, async (req, res) => {
+router.get("/me/session", requireAppAuth, requireTenant, async (req, res) => {
   try {
     return res.json({ ok: true, email: req.googleUser?.email || null });
   } catch (e) {
@@ -289,7 +290,7 @@ router.get("/me/session", requireGoogleAuth, requireTenant, async (req, res) => 
 // The booking UI can poll this cheaply and only refetch heavy payloads
 // (history/memberships) when a version changes.
 // ------------------------------------------------------------
-router.get("/me/versions", requireGoogleAuth, requireTenant, async (req, res) => {
+router.get("/me/versions", requireAppAuth, requireTenant, async (req, res) => {
   try {
     const tenantId = req.tenantId || req.tenant?.id;
     const email = (req.googleUser?.email || "").toLowerCase();
@@ -360,7 +361,7 @@ router.get("/me/versions", requireGoogleAuth, requireTenant, async (req, res) =>
   }
 });
 
-router.get("/me/prepaid-entitlements", requireGoogleAuth, requireTenant, async (req, res) => {
+router.get("/me/prepaid-entitlements", requireAppAuth, requireTenant, async (req, res) => {
   try {
     const tenantId = req.tenantId || req.tenant?.id;
     const email = (req.googleUser?.email || "").toLowerCase();
@@ -425,7 +426,7 @@ router.get("/me/prepaid-entitlements", requireGoogleAuth, requireTenant, async (
   }
 });
 
-router.get("/me/prepaid-summary", requireGoogleAuth, requireTenant, async (req, res) => {
+router.get("/me/prepaid-summary", requireAppAuth, requireTenant, async (req, res) => {
   try {
     const tenantId = req.tenantId || req.tenant?.id;
     const email = (req.googleUser?.email || "").toLowerCase();
@@ -466,7 +467,7 @@ router.get("/me/prepaid-summary", requireGoogleAuth, requireTenant, async (req, 
 });
 
 // Get my booking history for a tenant
-router.get("/me/bookings", requireGoogleAuth, requireTenant, async (req, res) => {
+router.get("/me/bookings", requireAppAuth, requireTenant, async (req, res) => {
   try {
     const tenantId = req.tenantId || req.tenant?.id;
     const email = (req.googleUser?.email || "").toLowerCase();
@@ -624,7 +625,7 @@ router.get("/me/bookings", requireGoogleAuth, requireTenant, async (req, res) =>
 // (it only selects columns that exist). We intentionally keep ONLY that route.
 
 // Cancel one of my bookings (soft-cancel)
-router.delete("/me/bookings/:id", requireGoogleAuth, requireTenant, async (req, res) => {
+router.delete("/me/bookings/:id", requireAppAuth, requireTenant, async (req, res) => {
   try {
     const tenantId = req.tenant?.id;
     const email = (req.googleUser?.email || "").toLowerCase();
@@ -664,7 +665,7 @@ router.delete("/me/bookings/:id", requireGoogleAuth, requireTenant, async (req, 
 });
 
 // Get my memberships for a tenant
-router.get("/me/memberships", requireGoogleAuth, requireTenant, async (req, res) => {
+router.get("/me/memberships", requireAppAuth, requireTenant, async (req, res) => {
   try {
     const tenantId = req.tenantId || req.tenant?.id;
     const email = (req.googleUser?.email || "").toLowerCase();
@@ -831,7 +832,7 @@ router.get("/me/memberships", requireGoogleAuth, requireTenant, async (req, res)
 // -----------------------------------------------------------------------------
 router.get(
   "/me/memberships/:id/ledger",
-  requireGoogleAuth,
+  requireAppAuth,
   requireTenant,
   async (req, res) => {
     try {
@@ -886,7 +887,7 @@ router.get(
 );
 
 // Subscribe/purchase a membership plan as the signed-in customer
-router.post("/me/memberships/subscribe", requireGoogleAuth, requireTenant, async (req, res) => {
+router.post("/me/memberships/subscribe", requireAppAuth, requireTenant, async (req, res) => {
   try {
     const tenantId = req.tenant?.id;
     const email = (req.googleUser?.email || "").toLowerCase();
@@ -1242,7 +1243,7 @@ function normalizeLedgerRow(r) {
   };
 }
 
-router.get("/me/packages", requireGoogleAuth, requireTenant, async (req, res) => {
+router.get("/me/packages", requireAppAuth, requireTenant, async (req, res) => {
   try {
     const tenantId = req.tenantId || req.tenant?.id;
     const email = (req.googleUser?.email || "").toLowerCase();
@@ -1306,7 +1307,7 @@ router.get("/me/packages", requireGoogleAuth, requireTenant, async (req, res) =>
   }
 });
 
-router.get("/me/packages/:entitlementId/ledger", requireGoogleAuth, requireTenant, async (req, res) => {
+router.get("/me/packages/:entitlementId/ledger", requireAppAuth, requireTenant, async (req, res) => {
   try {
     const tenantId = req.tenantId || req.tenant?.id;
     const email = (req.googleUser?.email || "").toLowerCase();
@@ -1365,7 +1366,7 @@ router.get("/me/packages/:entitlementId/ledger", requireGoogleAuth, requireTenan
   }
 });
 
-router.post("/me/packages/:prepaidProductId/purchase", requireGoogleAuth, requireTenant, async (req, res) => {
+router.post("/me/packages/:prepaidProductId/purchase", requireAppAuth, requireTenant, async (req, res) => {
   const client = await pool.connect();
   try {
     const tenantId = req.tenantId || req.tenant?.id;

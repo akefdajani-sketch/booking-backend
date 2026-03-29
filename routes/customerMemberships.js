@@ -6,6 +6,7 @@ const db = pool;
 
 const requireAdminOrTenantRole = require("../middleware/requireAdminOrTenantRole");
 const requireGoogleAuth = require("../middleware/requireGoogleAuth");
+const requireAppAuth = require("../middleware/requireAppAuth"); // AUTH-FIX: long-lived token for customer membership routes
 const { requireTenant } = require("../middleware/requireTenant");
 
 
@@ -72,12 +73,12 @@ router.get(
     if (shouldUseCustomerView(req)) return next();
     return next("route");
   },
-  requireGoogleAuth,
+  requireAppAuth,
   requireTenant,
   async (req, res) => {
     try {
       const tenantId = req.tenantId;
-      const googleEmail = String(req.googleUser?.email || "").toLowerCase();
+      const googleEmail = String(req.auth?.email || req.googleUser?.email || "").toLowerCase();
       const customerEmail = String(req.query.customerEmail || "").toLowerCase();
 
       // If the caller provided customerEmail, ensure it matches the signed-in user
@@ -1055,12 +1056,12 @@ async function applyMembershipTopUp({
 // Body: { minutesToAdd?: number, usesToAdd?: number, note?: string }
 //
 // Requires Google auth + tenant, and policy must allow self-serve top-ups.
-router.post("/:id/top-up", requireGoogleAuth, requireTenant, async (req, res) => {
+router.post("/:id/top-up", requireAppAuth, requireTenant, async (req, res) => {
   try {
     const tenantId = req.tenantId;
     const membershipId = Number(req.params.id);
 
-    const googleEmail = String(req.googleUser?.email || "").toLowerCase().trim();
+    const googleEmail = String(req.auth?.email || req.googleUser?.email || "").toLowerCase().trim();
     if (!googleEmail) return res.status(401).json({ error: "Unauthorized" });
 
     const policy = await loadMembershipCheckoutPolicy(db, tenantId);
