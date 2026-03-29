@@ -116,6 +116,8 @@ router.get(
           min_duration_mins, max_duration_mins,
           priority,
           COALESCE(metadata, '{}'::jsonb) AS metadata,
+          membership_plan_id,
+          prepaid_product_id,
           created_at, updated_at
         FROM rate_rules
         WHERE ${where.join(" AND ")}
@@ -162,6 +164,8 @@ router.post(
       const max_duration_mins = toInt(req.body?.max_duration_mins);
       const priority = toInt(req.body?.priority) ?? 100;
       const metadata = req.body?.metadata && typeof req.body.metadata === "object" ? req.body.metadata : {};
+      const membership_plan_id = toInt(req.body?.membership_plan_id);
+      const prepaid_product_id = toInt(req.body?.prepaid_product_id);
 
       if (!name) return res.status(400).json({ error: "Name is required." });
       if (!service_id && !staff_id && !resource_id) {
@@ -179,7 +183,8 @@ router.post(
           days_of_week, time_start, time_end,
           date_start, date_end,
           min_duration_mins, max_duration_mins,
-          priority, metadata
+          priority, metadata,
+          membership_plan_id, prepaid_product_id
         )
         VALUES (
           $1,$2,$3,
@@ -188,7 +193,8 @@ router.post(
           $10,$11,$12,
           $13,$14,
           $15,$16,
-          $17,$18
+          $17,$18,
+          $19,$20
         )
         RETURNING *
         `,
@@ -211,6 +217,8 @@ router.post(
           max_duration_mins,
           priority,
           metadata,
+          membership_plan_id,
+          prepaid_product_id,
         ]
       );
       return res.json({ item: insert.rows[0] });
@@ -256,6 +264,8 @@ router.patch(
       if (req.body?.max_duration_mins !== undefined) patch.max_duration_mins = toInt(req.body.max_duration_mins);
       if (req.body?.priority !== undefined) patch.priority = toInt(req.body.priority);
       if (req.body?.metadata !== undefined) patch.metadata = req.body.metadata && typeof req.body.metadata === "object" ? req.body.metadata : {};
+      if (req.body?.membership_plan_id !== undefined) patch.membership_plan_id = toInt(req.body.membership_plan_id);
+      if (req.body?.prepaid_product_id !== undefined) patch.prepaid_product_id = toInt(req.body.prepaid_product_id);
 
       if (patch.price_type === null) return res.status(400).json({ error: "Invalid price_type." });
 
@@ -343,6 +353,34 @@ router.post(
       const start = new Date(start_time);
       if (!Number.isFinite(start.getTime())) return res.status(400).json({ error: "Invalid start_time" });
 
+      // Optional: resolve customer membership/prepaid context for preview
+      let previewMembershipPlanIds = null;
+      let previewPrepaidProductIds = null;
+      const preview_customer_id = toInt(req.body?.customer_id);
+      if (preview_customer_id) {
+        try {
+          const [memQ, prepQ] = await Promise.all([
+            db.query(
+              `SELECT DISTINCT plan_id FROM customer_memberships
+               WHERE customer_id = $1
+                 AND COALESCE(status,'active') = 'active'
+                 AND (expires_at IS NULL OR expires_at > NOW())`,
+              [preview_customer_id]
+            ),
+            db.query(
+              `SELECT DISTINCT prepaid_product_id FROM customer_prepaid_entitlements
+               WHERE customer_id = $1
+                 AND COALESCE(status,'active') = 'active'
+                 AND COALESCE(remaining_quantity, 0) > 0
+                 AND (expires_at IS NULL OR expires_at > NOW())`,
+              [preview_customer_id]
+            ),
+          ]);
+          previewMembershipPlanIds = memQ.rows.map((r) => Number(r.plan_id));
+          previewPrepaidProductIds = prepQ.rows.map((r) => Number(r.prepaid_product_id));
+        } catch (_e) {}
+      }
+
       const payload = await computeRateForBookingLike({
         tenantId,
         serviceId: service_id,
@@ -351,6 +389,8 @@ router.post(
         start,
         durationMinutes: duration_minutes,
         basePriceAmount: base_price_amount,
+        customerMembershipPlanIds: previewMembershipPlanIds,
+        customerPrepaidProductIds: previewPrepaidProductIds,
       });
 
       return res.json(payload);
