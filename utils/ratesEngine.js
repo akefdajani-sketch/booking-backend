@@ -49,6 +49,8 @@ async function loadRules({ tenantId, serviceId, staffId, resourceId }) {
       max_duration_mins,
       priority,
       metadata,
+      membership_plan_id,
+      prepaid_product_id,
       created_at,
       updated_at
     FROM rate_rules
@@ -242,9 +244,12 @@ function matchesDuration(durationMinutes, minDur, maxDur) {
 
 function specificityScore(rule) {
   let s = 0;
-  if (rule.service_id  != null) s += 10;
-  if (rule.staff_id    != null) s += 5;
-  if (rule.resource_id != null) s += 3;
+  if (rule.service_id         != null) s += 10;
+  if (rule.staff_id           != null) s +=  5;
+  if (rule.resource_id        != null) s +=  3;
+  // Membership/package-scoped rules are more specific than generic time rules
+  if (rule.membership_plan_id != null) s +=  8;
+  if (rule.prepaid_product_id != null) s +=  6;
   return s;
 }
 
@@ -292,7 +297,24 @@ async function computeRateForBookingLike({
   durationMinutes,
   basePriceAmount,
   serviceSlotMinutes,
+  // Optional: customer context for membership/package-scoped rules.
+  // Pass arrays of IDs the customer currently holds (active, non-expired).
+  // Rules scoped to a membership_plan_id or prepaid_product_id will only
+  // fire when the customer holds the relevant plan/product.
+  customerMembershipPlanIds,   // number[] | null | undefined
+  customerPrepaidProductIds,   // number[] | null | undefined
 }) {
+  // Normalise to Sets for O(1) lookup
+  const membershipPlanSet = new Set(
+    Array.isArray(customerMembershipPlanIds)
+      ? customerMembershipPlanIds.map(Number).filter(Number.isFinite)
+      : []
+  );
+  const prepaidProductSet = new Set(
+    Array.isArray(customerPrepaidProductIds)
+      ? customerPrepaidProductIds.map(Number).filter(Number.isFinite)
+      : []
+  );
   const base = basePriceAmount == null ? null : round2(basePriceAmount);
 
   const slotUnit = Number(serviceSlotMinutes) > 0 ? Number(serviceSlotMinutes) : Number(durationMinutes) || 0;
@@ -327,6 +349,19 @@ async function computeRateForBookingLike({
     }
     if (!isWithinDateRange(dateStr, rule.date_start, rule.date_end)) return false;
     if (!isWithinTimeWindow(timeStr, rule.time_start, rule.time_end)) return false;
+
+    // Membership scope: if the rule targets a specific plan, the customer must hold it.
+    // If no customer context was provided (anonymous booking), membership-scoped rules
+    // are skipped so pricing remains correct for walk-in customers.
+    if (rule.membership_plan_id != null) {
+      if (!membershipPlanSet.has(Number(rule.membership_plan_id))) return false;
+    }
+
+    // Package scope: same logic for prepaid product entitlements.
+    if (rule.prepaid_product_id != null) {
+      if (!prepaidProductSet.has(Number(rule.prepaid_product_id))) return false;
+    }
+
     return true;
   }
 
@@ -453,6 +488,8 @@ async function computeRateForBookingLike({
         duration_minutes: totalMins,
         service_slot_minutes: slotUnit,
         base_price_amount: base,
+        customer_membership_plan_ids: membershipPlanSet.size ? Array.from(membershipPlanSet) : null,
+        customer_prepaid_product_ids: prepaidProductSet.size ? Array.from(prepaidProductSet) : null,
       },
       segments,
       result: { adjusted_price_amount: adjusted },

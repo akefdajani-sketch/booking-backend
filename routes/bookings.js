@@ -1548,6 +1548,39 @@ router.post("/", requireAppAuth, requireTenant, async (req, res) => {
       let applied_rate_snapshot = null;
       try {
         if (resolvedServiceId) {
+          // Resolve the customer's active membership plan IDs and prepaid product IDs
+          // so membership/package-scoped rate rules fire correctly.
+          // These queries are lightweight (indexed on customer_id + status) and non-fatal.
+          let customerMembershipPlanIds = null;
+          let customerPrepaidProductIds = null;
+          if (finalCustomerId) {
+            try {
+              const [memQ, prepQ] = await Promise.all([
+                db.query(
+                  `SELECT DISTINCT plan_id
+                   FROM customer_memberships
+                   WHERE customer_id = $1
+                     AND COALESCE(status, 'active') = 'active'
+                     AND (expires_at IS NULL OR expires_at > NOW())`,
+                  [finalCustomerId]
+                ),
+                db.query(
+                  `SELECT DISTINCT prepaid_product_id
+                   FROM customer_prepaid_entitlements
+                   WHERE customer_id = $1
+                     AND COALESCE(status, 'active') = 'active'
+                     AND COALESCE(remaining_quantity, 0) > 0
+                     AND (expires_at IS NULL OR expires_at > NOW())`,
+                  [finalCustomerId]
+                ),
+              ]);
+              customerMembershipPlanIds = memQ.rows.map((r) => Number(r.plan_id));
+              customerPrepaidProductIds = prepQ.rows.map((r) => Number(r.prepaid_product_id));
+            } catch (_e) {
+              // Non-fatal: if these queries fail, fall back to anonymous pricing
+            }
+          }
+
           const computed = await computeRateForBookingLike({
             tenantId: resolvedTenantId,
             serviceId: resolvedServiceId,
@@ -1557,6 +1590,8 @@ router.post("/", requireAppAuth, requireTenant, async (req, res) => {
             durationMinutes: Number(duration),
             basePriceAmount: price_amount != null ? Number(price_amount) : null,
             serviceSlotMinutes: Number(serviceDurationMinutes) || Number(duration),
+            customerMembershipPlanIds,
+            customerPrepaidProductIds,
           });
           if (computed && computed.adjusted_price_amount != null) {
             price_amount = Number(computed.adjusted_price_amount);
