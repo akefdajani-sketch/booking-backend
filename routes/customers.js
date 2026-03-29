@@ -514,6 +514,15 @@ router.get("/me/bookings", requireGoogleAuth, requireTenant, async (req, res) =>
     const customerPhone = await pickCol("bookings", "b", ["customer_phone"], "NULL");
     const staffName = await pickCol("bookings", "b", ["staff_name"], "NULL");
 
+    // Financial fields — schema-tolerant (added in v1 hardened schema; may not
+    // exist on older DB instances, so we use pickCol with NULL fallbacks).
+    const priceAmount   = await pickCol("bookings", "b", ["price_amount"],          "NULL");
+    const chargeAmount  = await pickCol("bookings", "b", ["charge_amount"],         "NULL");
+    const currencyCode  = await pickCol("bookings", "b", ["currency_code"],         "NULL");
+    const paymentMethod = await pickCol("bookings", "b", ["payment_method"],        "NULL");
+    const rateRuleId    = await pickCol("bookings", "b", ["applied_rate_rule_id"],  "NULL");
+    const rateSnapshot  = await pickCol("bookings", "b", ["applied_rate_snapshot"], "NULL");
+
     const q = await pool.query(
       `
       SELECT
@@ -529,6 +538,13 @@ router.get("/me/bookings", requireGoogleAuth, requireTenant, async (req, res) =>
         ${notes} AS notes,
         ${createdAt} AS created_at,
         ${bookingCode} AS booking_code,
+        ${priceAmount}   AS price_amount,
+        ${chargeAmount}  AS charge_amount,
+        ${currencyCode}  AS currency_code,
+        ${paymentMethod} AS payment_method,
+        ${rateRuleId}    AS applied_rate_rule_id,
+        ${rateSnapshot}  AS applied_rate_snapshot,
+        rr.name          AS applied_rate_rule_name,
         b.customer_membership_id,
         mp.name AS membership_plan_name,
         cmem.minutes_remaining AS membership_minutes_remaining,
@@ -556,6 +572,9 @@ router.get("/me/bookings", requireGoogleAuth, requireTenant, async (req, res) =>
       LEFT JOIN resources r ON r.id = b.resource_id
       LEFT JOIN customer_memberships cmem ON cmem.id = b.customer_membership_id
       LEFT JOIN membership_plans mp ON mp.id = cmem.plan_id
+      LEFT JOIN rate_rules rr
+        ON rr.tenant_id = b.tenant_id
+       AND rr.id = b.applied_rate_rule_id
       LEFT JOIN LATERAL (
         SELECT
           SUM(CASE WHEN ml.minutes_delta < 0 THEN -ml.minutes_delta ELSE 0 END)::int AS minutes_used,
