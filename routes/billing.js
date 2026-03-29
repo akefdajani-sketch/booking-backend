@@ -18,6 +18,7 @@ const db = require('../db');
 const logger = require('../utils/logger');
 const { getStripe, isStripeEnabled, getPriceIdForPlan } = require('../utils/stripe');
 const requireGoogleAuth = require('../middleware/requireGoogleAuth');
+const requireAppAuth = require('../middleware/requireAppAuth'); // AUTH-FIX
 const ensureUser = require('../middleware/ensureUser');
 const { getTenantIdFromSlug } = require('../utils/tenants');
 const { requireTenantRole } = require('../middleware/requireTenantRole');
@@ -84,7 +85,7 @@ async function ensureStripeCustomer(stripe, tenantId, tenantSlug) {
  */
 router.post(
   '/checkout',
-  requireGoogleAuth,
+  requireAppAuth,
   ensureUser,
   async (req, res) => {
     try {
@@ -151,7 +152,7 @@ router.post(
  */
 router.post(
   '/portal',
-  requireGoogleAuth,
+  requireAppAuth,
   ensureUser,
   async (req, res) => {
     try {
@@ -188,7 +189,7 @@ router.post(
  */
 router.get(
   '/status',
-  requireGoogleAuth,
+  requireAppAuth,
   ensureUser,
   async (req, res) => {
     try {
@@ -217,7 +218,7 @@ router.get(
  */
 router.get(
   '/invoices',
-  requireGoogleAuth,
+  requireAppAuth,
   ensureUser,
   async (req, res) => {
     try {

@@ -14,6 +14,7 @@
 const express = require("express");
 
 const requireGoogleAuth = require("../middleware/requireGoogleAuth");
+const requireAppAuth = require("../middleware/requireAppAuth"); // AUTH-FIX: swap Google token for long-lived Flexrz JWT
 const ensureUser = require("../middleware/ensureUser");
 const { requireTenant } = require("../middleware/requireTenant");
 const { requireTenantRole } = require("../middleware/requireTenantRole");
@@ -24,7 +25,7 @@ const router = express.Router();
 
 router.get(
   "/:slug/dashboard-summary",
-  requireGoogleAuth,
+  requireAppAuth,
   ensureUser,
   // inject tenantSlug for requireTenant() resolver
   (req, _res, next) => {

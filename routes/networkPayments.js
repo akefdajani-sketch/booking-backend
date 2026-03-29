@@ -17,6 +17,7 @@ const {
 } = require('../utils/network');
 const { getTenantIdFromSlug, getTenantBySlug } = require('../utils/tenants');
 const requireGoogleAuth = require('../middleware/requireGoogleAuth');
+const requireAppAuth = require('../middleware/requireAppAuth'); // AUTH-FIX
 const ensureUser        = require('../middleware/ensureUser');
 const { requireTenantRole } = require('../middleware/requireTenantRole');
 
@@ -219,7 +220,7 @@ router.get('/:slug/result', async (req, res) => {
 
 // ─── GET /api/network-payment/:slug/payments ──────────────────────────────────
 
-router.get('/:slug/payments', requireGoogleAuth, ensureUser, async (req, res) => {
+router.get('/:slug/payments', requireAppAuth, ensureUser, async (req, res) => {
   try {
     const tenantId = await getTenantIdFromSlug(String(req.params.slug || '').trim());
     const limit    = Math.min(Number(req.query?.limit ?? 25), 100);
@@ -247,7 +248,7 @@ router.get('/:slug/payments', requireGoogleAuth, ensureUser, async (req, res) =>
 
 // ─── GET /api/network-payment/:slug/payments/:orderId ────────────────────────
 
-router.get('/:slug/payments/:orderId', requireGoogleAuth, ensureUser, async (req, res) => {
+router.get('/:slug/payments/:orderId', requireAppAuth, ensureUser, async (req, res) => {
   try {
     const tenantId = await getTenantIdFromSlug(String(req.params.slug || '').trim());
     const result   = await db.query(
@@ -264,7 +265,7 @@ router.get('/:slug/payments/:orderId', requireGoogleAuth, ensureUser, async (req
 
 // ─── POST /api/network-payment/:slug/payments/:orderId/refund ─────────────────
 
-router.post('/:slug/payments/:orderId/refund', requireGoogleAuth, ensureUser, async (req, res) => {
+router.post('/:slug/payments/:orderId/refund', requireAppAuth, ensureUser, async (req, res) => {
   try {
     const tenantId  = await getTenantIdFromSlug(String(req.params.slug || '').trim());
     const orderId   = String(req.params.orderId || '').trim();

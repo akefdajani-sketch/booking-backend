@@ -12,6 +12,7 @@ const crypto = require("crypto");
 
 const db = require("../db");
 const requireGoogleAuth = require("../middleware/requireGoogleAuth");
+const requireAppAuth = require("../middleware/requireAppAuth"); // AUTH-FIX: swap Google token for long-lived Flexrz JWT
 const ensureUser = require("../middleware/ensureUser");
 const { ensureRbacTables } = require("../utils/rbac");
 
@@ -22,7 +23,7 @@ function sha256Hex(input) {
 // -----------------------------------------------------------------------------
 // POST /api/invites/accept
 // -----------------------------------------------------------------------------
-router.post("/accept", requireGoogleAuth, ensureUser, async (req, res) => {
+router.post("/accept", requireAppAuth, ensureUser, async (req, res) => {
   try {
     await ensureRbacTables();
     const token = String(req.body?.token || req.query?.token || "").trim();

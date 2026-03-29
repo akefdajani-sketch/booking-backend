@@ -4,6 +4,7 @@ const router = express.Router();
 const db = require("../db");
 
 const requireGoogleAuth = require("../middleware/requireGoogleAuth");
+const requireAppAuth = require("../middleware/requireAppAuth"); // AUTH-FIX: swap Google token for long-lived Flexrz JWT
 const ensureUser = require("../middleware/ensureUser");
 const { requireTenantRole } = require("../middleware/requireTenantRole");
 const { getTenantIdFromSlug } = require("../utils/tenants");
@@ -48,7 +49,7 @@ router.get("/:slug/branding", resolveTenantIdFromParam, async (req, res) => {
 // PATCH branding for tenant (tenant owner/manager)
 router.patch(
   "/:slug/branding",
-  requireGoogleAuth,
+  requireAppAuth,
   ensureUser,
   resolveTenantIdFromParam,
   requireTenantRole(["owner", "manager"]),
@@ -95,7 +96,7 @@ router.patch(
 // Body: { theme_key: "default_v1" }
 router.patch(
   "/:slug/theme-key",
-  requireGoogleAuth,
+  requireAppAuth,
   ensureUser,
   resolveTenantIdFromParam,
   requireTenantRole(["owner"]),
