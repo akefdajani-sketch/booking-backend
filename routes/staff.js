@@ -53,6 +53,9 @@ router.get("/", async (req, res) => {
       where += where ? " AND st.is_active = true" : " WHERE st.is_active = true";
     }
 
+    // SELECT * already picks up the new profile columns (title_prefix, display_name,
+    // headline, bio, certifications, languages, years_experience) once the
+    // migration has run — no query change needed.
     const q = `
       SELECT
         st.*,
@@ -118,25 +121,42 @@ router.post("/", requireTenant, requireAdminOrTenantRole("manager"), async (req,
 
 // ---------------------------------------------------------------------------
 // PATCH /api/staff/:id (admin-only update)
-// Accepts any subset of: { name, role, title, is_active }
+// Accepts any subset of: { name, role, is_active } plus the new profile fields:
+//   title_prefix, display_name, headline, bio, certifications, languages,
+//   years_experience
+// Legacy: `title` is treated as `role` for backward compat.
 // ---------------------------------------------------------------------------
 router.patch("/:id", resolveTenantFromStaffId, requireAdminOrTenantRole("manager"), async (req, res) => {
   try {
     const id = Number(req.params.id);
 
-    // Build a dynamic SET clause from whitelisted fields only
-    const allowed = ["name", "role", "title", "is_active"];
+    // Whitelist of fields that can be updated via PATCH.
+    // New profile fields are included here — they map 1:1 to DB columns.
+    const allowed = [
+      "name",
+      "role",
+      "is_active",
+      // Profile fields (migration 020)
+      "title_prefix",
+      "display_name",
+      "headline",
+      "bio",
+      "certifications",
+      "languages",
+      "years_experience",
+    ];
+
     const updates = [];
     const values = [];
 
     for (const field of allowed) {
-      if (field in req.body && field !== "title") {
+      if (field in req.body) {
         values.push(req.body[field]);
         updates.push(`${field} = $${values.length}`);
       }
     }
 
-    // Legacy: treat `title` as `role`
+    // Legacy: treat `title` as `role` for older clients
     if ("title" in req.body && !("role" in req.body)) {
       values.push(req.body.title);
       updates.push(`role = $${values.length}`);
@@ -145,6 +165,9 @@ router.patch("/:id", resolveTenantFromStaffId, requireAdminOrTenantRole("manager
     if (updates.length === 0) {
       return res.status(400).json({ error: "No valid fields provided for update" });
     }
+
+    // Always bump updated_at
+    updates.push(`updated_at = NOW()`);
 
     values.push(id);
     const q = `UPDATE staff SET ${updates.join(", ")} WHERE id = $${values.length} RETURNING *`;
