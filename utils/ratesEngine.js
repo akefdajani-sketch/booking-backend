@@ -51,6 +51,8 @@ async function loadRules({ tenantId, serviceId, staffId, resourceId }) {
       metadata,
       membership_plan_id,
       prepaid_product_id,
+      COALESCE(require_any_membership, false) AS require_any_membership,
+      COALESCE(require_any_prepaid,    false) AS require_any_prepaid,
       created_at,
       updated_at
     FROM rate_rules
@@ -350,15 +352,25 @@ async function computeRateForBookingLike({
     if (!isWithinDateRange(dateStr, rule.date_start, rule.date_end)) return false;
     if (!isWithinTimeWindow(timeStr, rule.time_start, rule.time_end)) return false;
 
-    // Membership scope: if the rule targets a specific plan, the customer must hold it.
-    // If no customer context was provided (anonymous booking), membership-scoped rules
-    // are skipped so pricing remains correct for walk-in customers.
-    if (rule.membership_plan_id != null) {
+    // Membership scope checks (in priority order):
+    //   1. require_any_membership → customer must hold ANY active membership
+    //   2. membership_plan_id     → customer must hold THAT specific plan
+    //   3. neither                → no membership restriction (all customers)
+    if (rule.require_any_membership) {
+      // Fires only when customer has at least one active membership.
+      // Anonymous / walk-in customers (empty set) are excluded.
+      if (membershipPlanSet.size === 0) return false;
+    } else if (rule.membership_plan_id != null) {
       if (!membershipPlanSet.has(Number(rule.membership_plan_id))) return false;
     }
 
-    // Package scope: same logic for prepaid product entitlements.
-    if (rule.prepaid_product_id != null) {
+    // Package scope checks (same pattern):
+    //   1. require_any_prepaid  → customer must hold ANY active package entitlement
+    //   2. prepaid_product_id   → customer must hold THAT specific package
+    //   3. neither              → no package restriction
+    if (rule.require_any_prepaid) {
+      if (prepaidProductSet.size === 0) return false;
+    } else if (rule.prepaid_product_id != null) {
       if (!prepaidProductSet.has(Number(rule.prepaid_product_id))) return false;
     }
 

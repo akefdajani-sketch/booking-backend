@@ -118,6 +118,8 @@ router.get(
           COALESCE(metadata, '{}'::jsonb) AS metadata,
           membership_plan_id,
           prepaid_product_id,
+          COALESCE(require_any_membership, false) AS require_any_membership,
+          COALESCE(require_any_prepaid,    false) AS require_any_prepaid,
           created_at, updated_at
         FROM rate_rules
         WHERE ${where.join(" AND ")}
@@ -166,6 +168,8 @@ router.post(
       const metadata = req.body?.metadata && typeof req.body.metadata === "object" ? req.body.metadata : {};
       const membership_plan_id = toInt(req.body?.membership_plan_id);
       const prepaid_product_id = toInt(req.body?.prepaid_product_id);
+      const require_any_membership = Boolean(req.body?.require_any_membership);
+      const require_any_prepaid    = Boolean(req.body?.require_any_prepaid);
 
       if (!name) return res.status(400).json({ error: "Name is required." });
       if (!service_id && !staff_id && !resource_id) {
@@ -184,7 +188,8 @@ router.post(
           date_start, date_end,
           min_duration_mins, max_duration_mins,
           priority, metadata,
-          membership_plan_id, prepaid_product_id
+          membership_plan_id, prepaid_product_id,
+          require_any_membership, require_any_prepaid
         )
         VALUES (
           $1,$2,$3,
@@ -194,7 +199,8 @@ router.post(
           $13,$14,
           $15,$16,
           $17,$18,
-          $19,$20
+          $19,$20,
+          $21,$22
         )
         RETURNING *
         `,
@@ -219,6 +225,8 @@ router.post(
           metadata,
           membership_plan_id,
           prepaid_product_id,
+          require_any_membership,
+          require_any_prepaid,
         ]
       );
       return res.json({ item: insert.rows[0] });
@@ -266,6 +274,8 @@ router.patch(
       if (req.body?.metadata !== undefined) patch.metadata = req.body.metadata && typeof req.body.metadata === "object" ? req.body.metadata : {};
       if (req.body?.membership_plan_id !== undefined) patch.membership_plan_id = toInt(req.body.membership_plan_id);
       if (req.body?.prepaid_product_id !== undefined) patch.prepaid_product_id = toInt(req.body.prepaid_product_id);
+      if (req.body?.require_any_membership !== undefined) patch.require_any_membership = Boolean(req.body.require_any_membership);
+      if (req.body?.require_any_prepaid    !== undefined) patch.require_any_prepaid    = Boolean(req.body.require_any_prepaid);
 
       if (patch.price_type === null) return res.status(400).json({ error: "Invalid price_type." });
 
