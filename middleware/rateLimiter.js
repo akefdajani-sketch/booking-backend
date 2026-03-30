@@ -38,6 +38,7 @@ const publicApiLimiter = rateLimit({
   standardHeaders: true,         // RateLimit-* headers (RFC 6585)
   legacyHeaders: false,          // no X-RateLimit-* headers
   skip: skipInTest,
+  validate: { xForwardedForHeader: false }, // trust proxy set on app; suppress warning
   message: makeMessage('Too many requests, please try again shortly.'),
 });
 
@@ -52,6 +53,7 @@ const availabilityLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   skip: skipInTest,
+  validate: { xForwardedForHeader: false },
   message: makeMessage('Too many availability requests, please try again shortly.'),
 });
 
@@ -66,6 +68,7 @@ const bookingCreateLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   skip: skipInTest,
+  validate: { xForwardedForHeader: false },
   message: makeMessage('Too many booking attempts, please slow down and try again.'),
 });
 
@@ -80,6 +83,7 @@ const tenantLookupLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   skip: skipInTest,
+  validate: { xForwardedForHeader: false },
   message: makeMessage('Too many tenant requests, please try again shortly.'),
 });
 
