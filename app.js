@@ -93,6 +93,12 @@ const app = express();
 const ENABLE_DEBUG_ROUTES =
   String(process.env.ENABLE_DEBUG_ROUTES || "").toLowerCase() === "true";
 
+// ─── Trust proxy (Render sits behind a load balancer) ────────────────────────
+// Without this, express-rate-limit throws ERR_ERL_UNEXPECTED_X_FORWARDED_FOR
+// which disrupts the request pipeline and causes auth middleware to fail,
+// producing random 401s on the tenant dashboard and booking app.
+app.set("trust proxy", 1);
+
 // ─── Observability (must be first) ───────────────────────────────────────────
 app.use(correlationId);   // attaches req.requestId + X-Request-ID header
 app.use(securityHeaders); // PR-8: X-Content-Type-Options, X-Frame-Options, HSTS etc.
