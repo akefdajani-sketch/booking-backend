@@ -44,7 +44,7 @@ function isAdminRequest(req) {
 }
 
 function shAuth(req, res, next) {
-  return isAdminRequest(req) ? requireAdmin(req, res, next) : requireAppAuth(req, res, next);
+  return isAdminRequest(req) ? requireAdmin(req, res, next) : requireGoogleAuth(req, res, next);
 }
 function shUser(req, res, next) {
   return isAdminRequest(req) ? next() : ensureUser(req, res, next);
