@@ -18,6 +18,7 @@ const router  = express.Router();
 const pool    = require("../db");
 
 const requireGoogleAuth = require("../middleware/requireGoogleAuth");
+const requireAppAuth    = require("../middleware/requireAppAuth"); // AUTH-FIX: Flexrz JWT + Google fallback + admin bypass
 const requireAdmin      = require("../middleware/requireAdmin");
 const ensureUser        = require("../middleware/ensureUser");
 const { getTenantIdFromSlug } = require("../utils/tenants");
