@@ -1219,15 +1219,25 @@ router.patch(
 
       const body = req.body && typeof req.body === "object" ? req.body : {};
 
+      const currentTenantResult = await db.query(
+        `SELECT id, name, slug, kind, timezone FROM tenants WHERE id = $1 LIMIT 1`,
+        [id]
+      );
+      const currentTenant = currentTenantResult.rows?.[0] || null;
+      if (!currentTenant) return res.status(404).json({ error: "Tenant not found" });
+
       // Canonical tenant columns (always exist)
-      const name = String(body.name ?? "").trim();
-      const slug = String(body.slug ?? "").trim();
-      const kind = String(body.kind ?? "").trim();
-      const timezone = String(body.timezone ?? "").trim();
+      const name = String(body.name ?? currentTenant.name ?? "").trim();
+      const slug = String(body.slug ?? currentTenant.slug ?? "").trim();
+      const incomingKind = body.kind != null ? String(body.kind).trim() : "";
+      const fallbackKind = String(currentTenant.kind ?? body.type ?? "").trim();
+      const kind = incomingKind || fallbackKind;
+      const timezone = String(body.timezone ?? currentTenant.timezone ?? "").trim();
 
       if (!name) return res.status(400).json({ error: "name is required" });
       if (!slug) return res.status(400).json({ error: "slug is required" });
       if (!timezone) return res.status(400).json({ error: "timezone is required" });
+      if (!kind) return res.status(400).json({ error: "kind is required" });
 
       const cols = await getTenantColumnSet();
 
@@ -1245,7 +1255,7 @@ router.patch(
       };
 
       const sets = ["name = $1", "slug = $2", "kind = $3", "timezone = $4"]; // stable order
-      const vals = [name, slug, kind || null, timezone];
+      const vals = [name, slug, kind, timezone];
 
       // Append optional columns safely
       const appendOptional = (colName, value) => {
