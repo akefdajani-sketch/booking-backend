@@ -198,8 +198,10 @@ router.patch("/:id", resolveTenantFromStaffId, requireAdminOrTenantRole("manager
       return res.status(400).json({ error: "No valid fields provided for update" });
     }
 
-    // Always bump updated_at
-    updates.push(`updated_at = NOW()`);
+    // Bump updated_at only when the column exists in the current production schema
+    if (profileColumns.has("updated_at")) {
+      updates.push(`updated_at = NOW()`);
+    }
 
     values.push(id);
     const q = `UPDATE staff SET ${updates.join(", ")} WHERE id = $${values.length} RETURNING *`;
