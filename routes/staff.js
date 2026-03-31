@@ -31,6 +31,32 @@ const { uploadFileToR2, safeName } = require("../utils/r2");
 
 const fs = require("fs/promises");
 
+let __staffColsCache = null;
+async function getStaffColumnSet() {
+  if (__staffColsCache) return __staffColsCache;
+  const cols = [
+    "title_prefix",
+    "display_name",
+    "headline",
+    "bio",
+    "certifications",
+    "languages",
+    "years_experience",
+  ];
+  const r = await db.query(
+    `
+      SELECT column_name
+      FROM information_schema.columns
+      WHERE table_schema = 'public'
+        AND table_name = 'staff'
+        AND column_name = ANY($1::text[])
+    `,
+    [cols]
+  );
+  __staffColsCache = new Set(r.rows.map((x) => x.column_name));
+  return __staffColsCache;
+}
+
 // ---------------------------------------------------------------------------
 // GET /api/staff?tenantSlug=&tenantId=&includeInactive=
 // ---------------------------------------------------------------------------
@@ -132,11 +158,9 @@ router.patch("/:id", resolveTenantFromStaffId, requireAdminOrTenantRole("manager
 
     // Whitelist of fields that can be updated via PATCH.
     // New profile fields are included here — they map 1:1 to DB columns.
-    const allowed = [
-      "name",
-      "role",
-      "is_active",
-      // Profile fields (migration 020)
+    const profileColumns = await getStaffColumnSet();
+    const allowed = ["name", "role", "is_active"];
+    const optionalProfileFields = [
       "title_prefix",
       "display_name",
       "headline",
@@ -150,6 +174,14 @@ router.patch("/:id", resolveTenantFromStaffId, requireAdminOrTenantRole("manager
     const values = [];
 
     for (const field of allowed) {
+      if (field in req.body) {
+        values.push(req.body[field]);
+        updates.push(`${field} = $${values.length}`);
+      }
+    }
+
+    for (const field of optionalProfileFields) {
+      if (!profileColumns.has(field)) continue;
       if (field in req.body) {
         values.push(req.body[field]);
         updates.push(`${field} = $${values.length}`);
