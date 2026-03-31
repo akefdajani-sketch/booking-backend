@@ -1,4 +1,6 @@
-const requireGoogleAuth = require('./requireGoogleAuth');
+// AUTH-FIX: requireAppAuth accepts app_jwt (30-day HS256) AND Google tokens
+// so owner sessions survive beyond the ~1hr Google token expiry.
+const requireAppAuth = require('./requireAppAuth');
 const ensureUser = require('./ensureUser');
 const { requireTenantRole } = require('./requireTenantRole');
 
@@ -38,7 +40,7 @@ module.exports = function requireAdminOrTenantRole(minRole) {
         return next();
       }
 
-      await run(requireGoogleAuth, req, res);
+      await run(requireAppAuth, req, res);
       if (res.headersSent) return;
       await run(ensureUser, req, res);
       if (res.headersSent) return;

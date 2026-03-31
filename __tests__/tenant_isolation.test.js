@@ -28,6 +28,13 @@ jest.mock('../middleware/requireGoogleAuth', () => (req, res, next) => {
   req.googleUser = { sub: 'test-sub', email: 'test@test.com' };
   next();
 });
+// AUTH-FIX: requireAdminOrTenantRole now calls requireAppAuth instead of requireGoogleAuth
+jest.mock('../middleware/requireAppAuth', () => (req, res, next) => {
+  req.googleUser = { sub: 'test-sub', email: 'test@test.com' };
+  req.auth = req.googleUser;
+  req.user = req.googleUser;
+  next();
+});
 jest.mock('../middleware/ensureUser', () => (req, res, next) => {
   if (req.headers['x-user-id']) {
     req.user = { id: Number(req.headers['x-user-id']) };
