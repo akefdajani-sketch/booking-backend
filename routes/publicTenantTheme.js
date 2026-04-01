@@ -1,7 +1,7 @@
 const express = require("express");
 const router = express.Router();
 const db = require("../db");
-const { resolveTenantAppearanceSnapshot } = require("../theme/resolveTenantAppearanceSnapshot");
+const { resolveTenantAppearanceSnapshot, writeTenantAppearanceSnapshot } = require("../theme/resolveTenantAppearanceSnapshot");
 
 // Schema-compat: public endpoints must not crash if a newer optional column
 // doesn't exist yet in an environment.
@@ -49,6 +49,11 @@ function snapshotNeedsRefresh(snapshot, tenant, resolvedLayoutKey) {
 
   // 1) Theme key mismatch — snapshot was built for a different theme
   if (!sourceTheme || sourceTheme !== tenantTheme) return true;
+
+  // 1b) Persisted source theme key mismatch — guards old snapshots that were written
+  // with the wrong source_theme_key even when the tenant row has since moved to premium_v2.
+  const snapshotSourceTheme = String(tenant.appearance_snapshot_source_theme_key || "").trim().toLowerCase();
+  if (snapshotSourceTheme && snapshotSourceTheme !== tenantTheme) return true;
 
   // 2) Marker version mismatch — snapshot predates the current var set
   if (snapshot.debugSnapshotMarker !== CURRENT_SNAPSHOT_MARKER) return true;
@@ -249,7 +254,7 @@ router.get("/:slug", async (req, res) => {
   let snapshotUsed = !!appearanceSnapshot;
   if (isPublished && snapshotNeedsRefresh(appearanceSnapshot, tenant, resolvedLayoutKey)) {
     try {
-      appearanceSnapshot = await resolveTenantAppearanceSnapshot(tenant.id);
+      appearanceSnapshot = await writeTenantAppearanceSnapshot(tenant.id);
     } catch {
       appearanceSnapshot = appearanceSnapshot && typeof appearanceSnapshot === "object" ? appearanceSnapshot : null;
     }

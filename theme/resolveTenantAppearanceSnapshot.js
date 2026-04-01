@@ -108,7 +108,7 @@ function extractVarFallback(value) {
 // Mirrors computeTenantCssVars.ts exactly so SSR snapshot and client compute
 // identical values — eliminating the first-paint flash and per-tab flicker.
 // ---------------------------------------------------------------------------
-function buildResolvedCssVars({ branding, brandOverrides, themeTokens, isPremium, isLightTheme }) {
+function buildResolvedCssVars({ branding, brandOverrides, themeTokens, isPremium, isLightTheme, preservePremiumGlass = false }) {
   const colors = toObj(branding).colors || {};
   const typography = toObj(branding).typography || {};
   const buttons = toObj(branding).buttons || {};
@@ -149,7 +149,9 @@ function buildResolvedCssVars({ branding, brandOverrides, themeTokens, isPremium
     : String(colors.background || "#f8fafc");
   const defaultCardBg = isPremium
     ? (premiumDark
-        ? (_surfLum !== null && _surfLum < 0.18 ? _rawSurface : "rgba(2, 6, 23, 0.38)")
+        ? (preservePremiumGlass
+            ? "rgba(2, 6, 23, 0.38)"
+            : (_surfLum !== null && _surfLum < 0.18 ? _rawSurface : "rgba(2, 6, 23, 0.38)"))
         : (_surfLum !== null && _surfLum > 0.55 ? _rawSurface : "rgba(255,255,255,0.68)"))
     : String(colors.surface || "#ffffff");
   const defaultBorder = isPremium
@@ -543,6 +545,7 @@ async function resolveTenantAppearanceSnapshot(tenantId) {
     themeTokens: themeStudioTokens,
     isPremium: premiumFamily,
     isLightTheme,
+    preservePremiumGlass: String(themeKey).toLowerCase() === "premium_v2",
   });
 
   const brandingAssets = toObj(branding.assets);
