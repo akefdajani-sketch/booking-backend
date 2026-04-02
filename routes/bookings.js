@@ -13,6 +13,7 @@ const { ensureBookingRateColumns } = require("../utils/ensureBookingRateColumns"
 const { ensurePaymentMethodColumn } = require("../utils/ensurePaymentMethodColumn"); // PAY-2
 const { computeRateForBookingLike } = require("../utils/ratesEngine");
 const { checkConflicts, loadJoinedBookingById, findOrCreateSession, incrementSessionCount, decrementSessionCount } = require("../utils/bookings");
+const { parseBookingListParams, buildBookingListWhere } = require("../utils/bookingQueryBuilder");
 
 function shouldUseCustomerHistory(req) {
   // Frontend booking page currently calls /api/bookings with customerId/customerEmail.
@@ -518,145 +519,11 @@ router.get("/", requireTenant, requireAdminOrTenantRole("staff"), async (req, re
   try {
     const tenantId = req.tenantId;
 
-    // ---- parse params ----
-    const scopeRaw =
-      (req.query.scope ? String(req.query.scope) : "") ||
-      (req.query.view ? String(req.query.view) : "");
-    const scope = (scopeRaw || "upcoming").toLowerCase(); // upcoming|past|range|all
+    const parsed = parseBookingListParams(req.query);
+    if (parsed.error) return res.status(400).json({ error: parsed.error });
 
-    const status = req.query.status ? String(req.query.status).trim() : null;
-
-    const serviceId = req.query.serviceId ? Number(req.query.serviceId) : null;
-    const staffId = req.query.staffId ? Number(req.query.staffId) : null;
-    const resourceId = req.query.resourceId ? Number(req.query.resourceId) : null;
-    const customerId = req.query.customerId ? Number(req.query.customerId) : null;
-
-    const query = req.query.query ? String(req.query.query).trim() : "";
-
-    const limitRaw = req.query.limit ? Number(req.query.limit) : 50;
-    const limit = Math.max(1, Math.min(200, Number.isFinite(limitRaw) ? limitRaw : 50));
-
-    const cursorStartTime = req.query.cursorStartTime
-      ? new Date(String(req.query.cursorStartTime))
-      : null;
-    const cursorId = req.query.cursorId ? Number(req.query.cursorId) : null;
-
-    const cursorCreatedAt = req.query.cursorCreatedAt
-      ? new Date(String(req.query.cursorCreatedAt))
-      : null;
-
-    if (cursorStartTime && Number.isNaN(cursorStartTime.getTime())) {
-      return res.status(400).json({ error: "Invalid cursorStartTime." });
-    }
-
-    if (cursorCreatedAt && Number.isNaN(cursorCreatedAt.getTime())) {
-      return res.status(400).json({ error: "Invalid cursorCreatedAt." });
-    }
-    if (cursorId != null && (!Number.isFinite(cursorId) || cursorId <= 0)) {
-      return res.status(400).json({ error: "Invalid cursorId." });
-    }
-
-    // from/to
-    const fromTs = req.query.from ? new Date(String(req.query.from)) : null;
-    const toTs = req.query.to ? new Date(String(req.query.to)) : null;
-
-    if (fromTs && Number.isNaN(fromTs.getTime())) return res.status(400).json({ error: "Invalid from." });
-    if (toTs && Number.isNaN(toTs.getTime())) return res.status(400).json({ error: "Invalid to." });
-
-    // ---- build WHERE ----
-    const params = [tenantId];
-    const where = ["b.tenant_id = $1", "b.deleted_at IS NULL"]; // PR-19: exclude soft-deleted
-
-    // scope defaults
-    if (scope === "upcoming") {
-      where.push(`b.start_time >= NOW()`);
-    } else if (scope === "past") {
-      where.push(`b.start_time < NOW()`);
-    } else if (scope === "range") {
-      // rely on from/to
-    } else if (scope === "all" || scope === "latest") {
-      // no implicit time filter
-    } else {
-      // treat unknown scope as upcoming
-      where.push(`b.start_time >= NOW()`);
-    }
-
-    if (fromTs) {
-      params.push(fromTs.toISOString());
-      where.push(`b.start_time >= $${params.length}`);
-    }
-    if (toTs) {
-      params.push(toTs.toISOString());
-      where.push(`b.start_time < $${params.length}`);
-    }
-
-    if (status && status !== "all") {
-      params.push(status);
-      where.push(`b.status = $${params.length}`);
-    }
-
-    if (Number.isFinite(serviceId) && serviceId > 0) {
-      params.push(serviceId);
-      where.push(`b.service_id = $${params.length}`);
-    }
-    if (Number.isFinite(staffId) && staffId > 0) {
-      params.push(staffId);
-      where.push(`b.staff_id = $${params.length}`);
-    }
-    if (Number.isFinite(resourceId) && resourceId > 0) {
-      params.push(resourceId);
-      where.push(`b.resource_id = $${params.length}`);
-    }
-    if (Number.isFinite(customerId) && customerId > 0) {
-      params.push(customerId);
-      where.push(`b.customer_id = $${params.length}`);
-    }
-
-    // Search (booking_code + customer fields). Uses LEFT JOIN customers.
-    if (query) {
-      params.push(`%${query}%`);
-      const p = `$${params.length}`;
-      where.push(
-        `(
-          b.booking_code ILIKE ${p}
-          OR b.customer_name ILIKE ${p}
-          OR b.customer_phone ILIKE ${p}
-          OR b.customer_email ILIKE ${p}
-          OR c.name ILIKE ${p}
-          OR c.phone ILIKE ${p}
-          OR c.email ILIKE ${p}
-        )`
-      );
-    }
-
-    // ---- order + keyset cursor ----
-    const isPast = scope === "past";
-    const isLatest = scope === "latest";
-
-    const orderDir = (isPast || isLatest) ? "DESC" : "ASC";
-    const comparator = (isPast || isLatest) ? "<" : ">";
-
-    if (isLatest) {
-      if (cursorCreatedAt && cursorId) {
-        params.push(cursorCreatedAt.toISOString());
-        const pCreated = `$${params.length}`;
-        params.push(cursorId);
-        const pId = `$${params.length}`;
-        where.push(`(b.created_at, b.id) ${comparator} (${pCreated}, ${pId})`);
-      }
-    } else {
-      if (cursorStartTime && cursorId) {
-        params.push(cursorStartTime.toISOString());
-        const pStart = `$${params.length}`;
-        params.push(cursorId);
-        const pId = `$${params.length}`;
-        where.push(`(b.start_time, b.id) ${comparator} (${pStart}, ${pId})`);
-      }
-    }
-
-    const orderBy = isLatest
-      ? `b.created_at ${orderDir}, b.id ${orderDir}`
-      : `b.start_time ${orderDir}, b.id ${orderDir}`;
+    const { where, params, orderBy, isLatest } = buildBookingListWhere(parsed, tenantId);
+    const { limit } = parsed;
 
     const sql = `
       SELECT
@@ -746,7 +613,6 @@ router.get("/", requireTenant, requireAdminOrTenantRole("staff"), async (req, re
     `;
 
     const result = await db.query(sql, [...params, limit]);
-
     const rows = result.rows || [];
     const last = rows.length ? rows[rows.length - 1] : null;
 
@@ -763,7 +629,6 @@ router.get("/", requireTenant, requireAdminOrTenantRole("staff"), async (req, re
     return res.status(500).json({ error: "Failed to load bookings" });
   }
 });
-
 // ---------------------------------------------------------------------------
 // GET /api/bookings/count?tenantSlug|tenantId=...
 // (unchanged)
@@ -773,87 +638,16 @@ router.get("/count", requireTenant, requireAdminOrTenantRole("staff"), async (re
   try {
     const tenantId = req.tenantId;
 
-    const scopeRaw =
-      (req.query.scope ? String(req.query.scope) : "") ||
-      (req.query.view ? String(req.query.view) : "");
-    const scope = (scopeRaw || "upcoming").toLowerCase();
+    const parsed = parseBookingListParams(req.query);
+    if (parsed.error) return res.status(400).json({ error: parsed.error });
 
-    const status = req.query.status ? String(req.query.status).trim() : null;
-
-    const serviceId = req.query.serviceId ? Number(req.query.serviceId) : null;
-    const staffId = req.query.staffId ? Number(req.query.staffId) : null;
-    const resourceId = req.query.resourceId ? Number(req.query.resourceId) : null;
-    const customerId = req.query.customerId ? Number(req.query.customerId) : null;
-
-    const query = req.query.query ? String(req.query.query).trim() : "";
-
-    const fromTs = req.query.from ? new Date(String(req.query.from)) : null;
-    const toTs = req.query.to ? new Date(String(req.query.to)) : null;
-
-    if (fromTs && Number.isNaN(fromTs.getTime())) return res.status(400).json({ error: "Invalid from." });
-    if (toTs && Number.isNaN(toTs.getTime())) return res.status(400).json({ error: "Invalid to." });
-
-    const params = [tenantId];
-    const where = ["b.tenant_id = $1", "b.deleted_at IS NULL"]; // PR-19: exclude soft-deleted
-
-    if (scope === "upcoming") where.push("b.start_time >= NOW()");
-    else if (scope === "past") where.push("b.start_time < NOW()");
-    else if (scope === "range") { /* rely on from/to */ }
-    else if (scope === "all") { /* no implicit time filter */ }
-    else where.push("b.start_time >= NOW()");
-
-    if (fromTs) {
-      params.push(fromTs.toISOString());
-      where.push(`b.start_time >= $${params.length}`);
-    }
-    if (toTs) {
-      params.push(toTs.toISOString());
-      where.push(`b.start_time < $${params.length}`);
-    }
-
-    if (status && status !== "all") {
-      params.push(status);
-      where.push(`b.status = $${params.length}`);
-    }
-
-    if (Number.isFinite(serviceId) && serviceId > 0) {
-      params.push(serviceId);
-      where.push(`b.service_id = $${params.length}`);
-    }
-    if (Number.isFinite(staffId) && staffId > 0) {
-      params.push(staffId);
-      where.push(`b.staff_id = $${params.length}`);
-    }
-    if (Number.isFinite(resourceId) && resourceId > 0) {
-      params.push(resourceId);
-      where.push(`b.resource_id = $${params.length}`);
-    }
-    if (Number.isFinite(customerId) && customerId > 0) {
-      params.push(customerId);
-      where.push(`b.customer_id = $${params.length}`);
-    }
-
-    const joinCustomers = Boolean(query);
-    if (query) {
-      params.push(`%${query}%`);
-      const p = `$${params.length}`;
-      where.push(
-        `(
-          b.booking_code ILIKE ${p}
-          OR b.customer_name ILIKE ${p}
-          OR b.customer_phone ILIKE ${p}
-          OR b.customer_email ILIKE ${p}
-          OR c.name ILIKE ${p}
-          OR c.phone ILIKE ${p}
-          OR c.email ILIKE ${p}
-        )`
-      );
-    }
+    const { where, params } = buildBookingListWhere(parsed, tenantId);
+    const needsCustomerJoin = Boolean(parsed.searchQuery);
 
     const sql = `
       SELECT COUNT(*)::int AS total
       FROM bookings b
-      ${joinCustomers ? "LEFT JOIN customers c ON c.tenant_id=b.tenant_id AND c.id=b.customer_id" : ""}
+      ${needsCustomerJoin ? "LEFT JOIN customers c ON c.tenant_id = b.tenant_id AND c.id = b.customer_id" : ""}
       WHERE ${where.join(" AND ")}
     `;
 
@@ -864,7 +658,6 @@ router.get("/count", requireTenant, requireAdminOrTenantRole("staff"), async (re
     return res.status(500).json({ error: "Failed to count bookings" });
   }
 });
-
 // ---------------------------------------------------------------------------
 // GET /api/bookings/:id?tenantSlug|tenantId=
 // Tenant-scoped read (used by dashboards / detail views)
