@@ -96,27 +96,46 @@ const BRAND_OVERRIDE_KEYS = new Set([
   "--bf-card-border",
   "--bf-card-shadow",
 
+  // Glass / elevated surfaces
+  "--bf-glass-bg",
+  "--bf-glass-bg-strong",
+  "--bf-glass-border",
+  "--bf-menu-bg",
+  "--bf-menu-border",
+  "--bf-drawer-bg",
+  "--bf-drawer-border",
+
   // Controls
   "--bf-control-bg",
   "--bf-control-text",
   "--bf-control-border",
   "--bf-control-focus-border",
   "--bf-control-focus-bg",
+  "--bf-control-muted",
   "--bf-label-weight",
   "--bf-value-weight",
   "--bf-rich-select",
 
   // Pills
   "--bf-pill-bg",
+  "--bf-pill-bg-image",
   "--bf-pill-hover-bg",
   "--bf-pill-border",
   "--bf-pill-text",
+  "--bf-pill-shadow",
   "--bf-pill-selected-bg",
+  "--bf-pill-selected-bg-image",
   "--bf-pill-selected-border",
   "--bf-pill-selected-text",
   "--bf-pill-selected-shadow",
-  // Selected pill glow/shadow
-  "--bf-pill-selected-shadow",
+
+  // 3D pill gradients
+  "--bf-pill-3d-top",
+  "--bf-pill-3d-mid",
+  "--bf-pill-3d-bottom",
+  "--bf-pill-selected-3d-top",
+  "--bf-pill-selected-3d-mid",
+  "--bf-pill-selected-3d-bottom",
 
   // Disabled pill tokens (Premium theme)
   "--bf-pill-disabled-bg",

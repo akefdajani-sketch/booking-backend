@@ -8,7 +8,20 @@
 const { THEME_TOKEN_KEYS, BRAND_OVERRIDE_KEYS } = require("./tokens");
 
 const RX_PX = /^\d+(\.\d+)?px$/;
+const RX_LENGTH = /^-?\d+(\.\d+)?(px|rem|em|vw|vh|%)$/;
 const RX_COLOR = /^(#([0-9a-fA-F]{3}){1,2}|rgba?\([^)]+\))$/;
+const RX_NUMBER = /^-?\d+(\.\d+)?$/;
+
+function isSafeCssFunctionExpr(value) {
+  const v = String(value || "").trim();
+  if (!v || v.length > 120) return false;
+  if (/[;{}]/.test(v)) return false;
+  if (!/^[a-zA-Z0-9(),.%\-\s]+$/.test(v)) return false;
+  const opens = (v.match(/\(/g) || []).length;
+  const closes = (v.match(/\)/g) || []).length;
+  if (opens !== closes) return false;
+  return /^(min|max|clamp)\(/.test(v);
+}
 
 function isSafeValue(key, val) {
   if (typeof val !== "string") return false;
@@ -23,7 +36,6 @@ function isSafeValue(key, val) {
     key.includes("height") ||
     key.includes("translate") ||
     key.includes("maxh") ||
-    key.includes("maxw") ||
     key.includes("blur") ||
     key.includes("mt") ||
     key.includes("mb") ||
@@ -35,14 +47,17 @@ function isSafeValue(key, val) {
     return RX_PX.test(v);
   }
 
-  // Modal sizing tokens (explicit)
-  if (key === "--bf-modal-max-w" || key === "--bf-modal-blur") {
+  // Modal sizing tokens (allow px and conservative CSS sizing expressions used by the UI)
+  if (key === "--bf-modal-max-w") {
+    return RX_PX.test(v) || RX_LENGTH.test(v) || isSafeCssFunctionExpr(v);
+  }
+  if (key === "--bf-modal-blur") {
     return RX_PX.test(v);
   }
 
   // Scale tokens (unitless)
   if (key.endsWith("-scale")) {
-    if (!/^\d+(\.\d+)?$/.test(v)) return false;
+    if (!RX_NUMBER.test(v)) return false;
     const n = Number(v);
     return Number.isFinite(n) && n >= 0.8 && n <= 1.2;
   }
@@ -52,9 +67,9 @@ function isSafeValue(key, val) {
     return v.length <= 80 && !/[;{}]/.test(v);
   }
 
-  // Shadow tokens (conservative: block braces/semicolons)
-  if (key.endsWith("-shadow")) {
-    return v.length <= 200 && !/[;{}]/.test(v);
+  // Shadow/background image tokens (conservative: block braces/semicolons)
+  if (key.endsWith("-shadow") || key.endsWith("-bg-image")) {
+    return v.length <= 240 && !/[;{}]/.test(v);
   }
 
   // Colors
@@ -64,6 +79,8 @@ function isSafeValue(key, val) {
     key.includes("brand") ||
     key.includes("text") ||
     key.includes("ring") ||
+    key.includes("muted") ||
+    key.includes("3d") ||
     key === "--bf-page-bg" ||
     key === "--bf-modal-backdrop"
   ) {
