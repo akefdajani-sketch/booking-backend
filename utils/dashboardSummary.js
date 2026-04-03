@@ -10,6 +10,7 @@
 // - Revenue is derived from bookings.charge_amount (stored at booking creation).
 
 const db = require("../db");
+const { computeDashboardInsights } = require("./dashboardInsights");
 const { ensureBookingMoneyColumns, bookingMoneyColsAvailable } = require("./ensureBookingMoneyColumns");
 const { buildDashboardAlerts } = require("./buildDashboardAlerts");
 
