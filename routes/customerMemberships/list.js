@@ -381,7 +381,7 @@ router.get("/ledger", requireTenant, requireAdminOrTenantRole("staff"), async (r
         ON cm.id = ml.customer_membership_id
        AND cm.tenant_id = ml.tenant_id
       LEFT JOIN membership_plans mp
-        ON mp.id = cm.plan_id
+        ON mp.id = COALESCE(cm.membership_plan_id, cm.plan_id)
        AND mp.tenant_id = ml.tenant_id
       LEFT JOIN customers c
         ON c.id = cm.customer_id
@@ -432,7 +432,7 @@ router.get("/ledger", requireTenant, requireAdminOrTenantRole("staff"), async (r
         ON cm.id = ml.customer_membership_id
        AND cm.tenant_id = ml.tenant_id
       LEFT JOIN membership_plans mp
-        ON mp.id = cm.plan_id
+        ON mp.id = COALESCE(cm.membership_plan_id, cm.plan_id)
        AND mp.tenant_id = ml.tenant_id
       LEFT JOIN customers c
         ON c.id = cm.customer_id
