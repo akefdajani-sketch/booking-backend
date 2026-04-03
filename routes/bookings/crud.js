@@ -8,7 +8,8 @@ const requireAppAuth = require("../../middleware/requireAppAuth");
 const { requireTenant } = require("../../middleware/requireTenant");
 const requireAdminOrTenantRole = require("../../middleware/requireAdminOrTenantRole");
 const { ensureBookingMoneyColumns } = require("../../utils/ensureBookingMoneyColumns");
-const { bookingQueryBuilder } = require("../../utils/bookingQueryBuilder");
+const { parseBookingListParams, buildBookingListWhere } = require("../../utils/bookingQueryBuilder");
+const { loadJoinedBookingById, decrementSessionCount } = require("../../utils/bookings");
 const {
   shouldUseCustomerHistory, checkBlackoutOverlap, servicesHasColumn, getServiceAllowMembership,
   getIdempotencyKey, mustHaveTenantSlug, canTransitionStatus, bumpTenantBookingChange,
