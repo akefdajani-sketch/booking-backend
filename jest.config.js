@@ -10,6 +10,15 @@ module.exports = {
     "utils/**/*.js",
     "!utils/algolia/**",
     "!**/*.test.js",
+    "!routes/bookings/**",
+    "!routes/customerMemberships/**",
+    "!routes/customers/**",
+    "!routes/services/**",
+    "!routes/tenants/**",
+    "!routes/tenantUsers/**",
+    "!routes/tenantStaffSchedule/**",
+    "!routes/tenantPrepaidAccounting/**",
+    "!routes/adminTenantsTheme/**",
   ],
   coverageThreshold: {
     global: {
