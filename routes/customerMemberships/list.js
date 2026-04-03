@@ -10,6 +10,38 @@ const { requireTenant } = require("../../middleware/requireTenant");
 const { getExistingColumns, firstExisting, pickCol, safeIntExpr } = require("../../utils/customerQueryHelpers");
 
 
+function isValidAdminKey(req) {
+  const rawAuth = String(req.headers.authorization || "");
+  const bearer = rawAuth.toLowerCase().startsWith("bearer ")
+    ? rawAuth.slice(7).trim()
+    : null;
+  const key =
+    bearer ||
+    String(req.headers["x-admin-key"] || "").trim() ||
+    String(req.headers["x-api-key"] || "").trim();
+  const expected = String(process.env.ADMIN_API_KEY || "").trim();
+  if (!expected || !key) return false;
+  return key === expected;
+}
+
+function shouldUseCustomerView(req) {
+  if (isValidAdminKey(req)) return false;
+
+  const hasAdminFilters = [
+    req.query.customerId,
+    req.query.q,
+    req.query.status,
+    req.query.limit,
+    req.query.offset,
+    req.query.includeExpired,
+    req.query.includeArchived,
+  ].some((value) => value !== undefined && value !== null && String(value).trim() !== "");
+
+  if (hasAdminFilters) return false;
+
+  return true;
+}
+
 module.exports = function mount(router) {
 router.get(
   "/",
