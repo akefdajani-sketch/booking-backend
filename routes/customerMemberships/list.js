@@ -111,7 +111,7 @@ router.get(
           cm.created_at,
           mp.name AS plan_name,
           mp.price AS plan_price,
-          mp.valid_days AS plan_valid_days
+          NULL AS plan_valid_days
         FROM customer_memberships cm
         LEFT JOIN membership_plans mp ON mp.id = cm.plan_id
         WHERE ${where.join(" AND ")}
