@@ -102,7 +102,7 @@ router.get(
         SELECT
           cm.id,
           cm.customer_id,
-          COALESCE(cm.membership_plan_id, cm.plan_id) AS membership_plan_id,
+          cm.plan_id AS membership_plan_id,
           cm.status,
           cm.start_at,
           cm.end_at,
@@ -113,7 +113,7 @@ router.get(
           mp.price AS plan_price,
           mp.valid_days AS plan_valid_days
         FROM customer_memberships cm
-        LEFT JOIN membership_plans mp ON mp.id = COALESCE(cm.membership_plan_id, cm.plan_id)
+        LEFT JOIN membership_plans mp ON mp.id = cm.plan_id
         WHERE ${where.join(" AND ")}
         ORDER BY cm.created_at DESC
         LIMIT 100
@@ -381,7 +381,7 @@ router.get("/ledger", requireTenant, requireAdminOrTenantRole("staff"), async (r
         ON cm.id = ml.customer_membership_id
        AND cm.tenant_id = ml.tenant_id
       LEFT JOIN membership_plans mp
-        ON mp.id = COALESCE(cm.membership_plan_id, cm.plan_id)
+        ON mp.id = cm.plan_id
        AND mp.tenant_id = ml.tenant_id
       LEFT JOIN customers c
         ON c.id = cm.customer_id
@@ -432,7 +432,7 @@ router.get("/ledger", requireTenant, requireAdminOrTenantRole("staff"), async (r
         ON cm.id = ml.customer_membership_id
        AND cm.tenant_id = ml.tenant_id
       LEFT JOIN membership_plans mp
-        ON mp.id = COALESCE(cm.membership_plan_id, cm.plan_id)
+        ON mp.id = cm.plan_id
        AND mp.tenant_id = ml.tenant_id
       LEFT JOIN customers c
         ON c.id = cm.customer_id
