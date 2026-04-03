@@ -10,7 +10,6 @@
 // - Revenue is derived from bookings.charge_amount (stored at booking creation).
 
 const db = require("../db");
-const { computeDashboardInsights } = require("./dashboardInsights");
 const { ensureBookingMoneyColumns, bookingMoneyColsAvailable } = require("./ensureBookingMoneyColumns");
 const { buildDashboardAlerts } = require("./buildDashboardAlerts");
 
@@ -513,25 +512,231 @@ async function getDashboardSummary({ tenantId, tenantSlug, mode, dateStr }) {
   }
 
   // ---------------------------------------------------------------------------
-  // PR-TD5: Smart insights — delegated to computeDashboardInsights()
-  // (extracted to utils/dashboardInsights.js; runs queries concurrently)
+  // PR-TD5: Smart insights (peak time, top service, customer pulse, utilization)
   // ---------------------------------------------------------------------------
-  const {
-    topReturningDetailed,
-    topReturning,
-    atRisk,
-    customerMixOverTime,
-    staffUtilization,
-    hourlyHeatmap,
-    peakHours,
-    deadZones,
-    byService,
-  } = await computeDashboardInsights({
-    tenantId, rangeStart, rangeEnd, safeMode, startCol,
-    hasMoneyCols, revenueSelect, staffCount, resourceCount,
-    capacityUnits, currencyCode,
-    series,   // passed so dashboardInsights can read + mutate it
-  });
+
+// ---------------------------------------------------------------------------
+  // PR-TD5: Smart insights (peak time, top service)
+  // ---------------------------------------------------------------------------
+
+  // Peak bucket (hour/day) based on bookings volume
+  try {
+    let peak = null;
+    for (const r of series.bookings_over_time || []) {
+      const b = Number(r.bookings || 0);
+      if (!peak || b > peak.bookings) peak = { bucket: r.bucket, bookings: b };
+    }
+    if (peak && peak.bookings > 0 && peak.bucket) {
+      const d = new Date(peak.bucket);
+      const hh = String(d.getUTCHours()).padStart(2, "0");
+      const mm = String(d.getUTCMinutes()).padStart(2, "0");
+      const label = truncUnit === "hour" ? `${hh}:${mm}` : d.toISOString().slice(0, 10);
+      insights.push({ id: "ins_peak", title: `Peak ${truncUnit}`, value: `${label} (${peak.bookings} bookings)`, tone: "neutral" });
+    }
+  } catch {}
+
+  // Top service (prefer revenue if money cols exist; fallback to bookings count)
+  try {
+    let top = null;
+    if (hasMoneyCols && (series.revenue_by_service || []).length > 0) {
+      const first = series.revenue_by_service[0];
+      if (first) top = { name: first.service_name, revenue_amount: first.revenue_amount, bookings: null };
+    }
+
+    if (!top) {
+      const topSvc = await db.query(
+        `
+        SELECT COALESCE(s.name,'Service') AS service_name, COUNT(*)::int AS bookings
+        FROM bookings b
+        LEFT JOIN services s ON s.id=b.service_id
+        WHERE b.tenant_id=$1
+          AND ${startCol} >= $2
+          AND ${startCol} < $3
+          AND b.status='confirmed'
+        GROUP BY 1
+        ORDER BY bookings DESC
+        LIMIT 1
+        `,
+        [tenantId, rangeStart.toISOString(), rangeEnd.toISOString()]
+      );
+      const row = topSvc.rows?.[0];
+      if (row) top = { name: String(row.service_name || "Service"), revenue_amount: null, bookings: row.bookings || 0 };
+    }
+
+    if (top) {
+      if (top.revenue_amount != null && String(top.revenue_amount) !== "0") {
+                insights.push({ id: "ins_top_service", title: "Top service", value: `${top.name} (${top.revenue_amount}${currencyCode ? " " + currencyCode : ""})`, tone: "good" });
+      } else {
+        insights.push({ id: "ins_top_service", title: "Top service", value: `${top.name} (${top.bookings || 0} bookings)`, tone: "neutral" });
+      }
+    }
+  } catch {}
+
+  // Top returning customers in the selected range.
+  let topReturning = [];
+  let topReturningDetailed = [];
+  try {
+    const topRet = await db.query(
+      `
+      WITH first_seen AS (
+        SELECT customer_id, MIN(${startCol}) AS first_booking_at, COUNT(*)::int AS lifetime_bookings
+        FROM bookings b
+        WHERE b.tenant_id=$1
+          AND b.customer_id IS NOT NULL
+        GROUP BY customer_id
+      )
+      SELECT
+        b.customer_id,
+        COALESCE(NULLIF(TRIM(COALESCE(c.name, MAX(b.customer_name))), ''), 'Customer') AS customer_name,
+        COUNT(*)::int AS range_bookings,
+        MAX(${startCol}) AS last_booking_at,
+        COALESCE(SUM(b.charge_amount) FILTER (WHERE b.status='confirmed'), 0)::numeric AS spend_total,
+        MAX(fs.lifetime_bookings)::int AS lifetime_bookings
+      FROM bookings b
+      LEFT JOIN customers c ON c.tenant_id=b.tenant_id AND c.id=b.customer_id
+      JOIN first_seen fs ON fs.customer_id=b.customer_id
+      WHERE b.tenant_id=$1
+        AND ${startCol} >= $2
+        AND ${startCol} < $3
+        AND b.customer_id IS NOT NULL
+        AND fs.first_booking_at < $2
+      GROUP BY b.customer_id
+      ORDER BY range_bookings DESC, last_booking_at DESC, spend_total DESC, lifetime_bookings DESC, customer_name ASC
+      LIMIT 8
+      `,
+      [tenantId, rangeStart.toISOString(), rangeEnd.toISOString()]
+    );
+    topReturningDetailed = (topRet.rows || []).map((r) => ({
+      customerId: Number(r.customer_id),
+      name: String(r.customer_name || 'Customer'),
+      bookingsCount: Number(r.range_bookings || 0),
+      count: Number(r.range_bookings || 0),
+      lastBookingAt: r.last_booking_at,
+      spendTotal: Number(r.spend_total || 0),
+      lifetimeBookings: Number(r.lifetime_bookings || 0),
+    }));
+    topReturning = topReturningDetailed.map((r) => ({ name: r.name, count: r.bookingsCount }));
+  } catch {}
+
+  // Customer mix over time: distinct active customers by bucket, split into new vs returning.
+  let customerMixOverTime = [];
+  try {
+    const cm = await db.query(
+      `
+      WITH first_seen AS (
+        SELECT customer_id, MIN(${startCol}) AS first_booking_at
+        FROM bookings b
+        WHERE b.tenant_id=$1 AND b.customer_id IS NOT NULL
+        GROUP BY customer_id
+      ), bucketed AS (
+        SELECT
+          date_trunc('${truncUnit}', ${startCol}) AS bucket,
+          b.customer_id,
+          MIN(fs.first_booking_at) AS first_booking_at
+        FROM bookings b
+        JOIN first_seen fs ON fs.customer_id=b.customer_id
+        WHERE b.tenant_id=$1
+          AND ${startCol} >= $2
+          AND ${startCol} < $3
+          AND b.customer_id IS NOT NULL
+        GROUP BY 1, 2
+      )
+      SELECT
+        bucket,
+        COUNT(*) FILTER (WHERE first_booking_at >= bucket AND first_booking_at < bucket + interval '1 ${truncUnit}')::int AS new_customers,
+        COUNT(*) FILTER (WHERE first_booking_at < bucket)::int AS returning_customers
+      FROM bucketed
+      GROUP BY 1
+      ORDER BY 1 ASC
+      `,
+      [tenantId, rangeStart.toISOString(), rangeEnd.toISOString()]
+    );
+    customerMixOverTime = (cm.rows || []).map((r) => ({
+      bucket: r.bucket,
+      new_customers: Number(r.new_customers || 0),
+      returning_customers: Number(r.returning_customers || 0),
+    }));
+  } catch {}
+
+  // Staff utilization / load in the selected range.
+  let staffUtilization = [];
+  try {
+    if (staffCount > 0) {
+      const staffHoursReg = await db.query(`SELECT to_regclass('public.staff_weekly_schedule') AS reg`);
+      let openMinutesPerStaff = 0;
+      if (staffHoursReg.rows?.[0]?.reg) {
+        const staffHours = await db.query(
+          `SELECT day_of_week, start_time, end_time, is_off FROM staff_weekly_schedule WHERE tenant_id=$1`,
+          [tenantId]
+        );
+        const rows = staffHours.rows || [];
+        const cursor = new Date(rangeStart.getTime());
+        while (cursor.getTime() < rangeEnd.getTime()) {
+          const dow = cursor.getUTCDay();
+          const todays = rows.filter((r) => Number(r.day_of_week) === dow);
+          for (const r of todays) {
+            if (r.is_off === true) continue;
+            const st = String(r.start_time || '').slice(0, 5);
+            const et = String(r.end_time || '').slice(0, 5);
+            if (!/^\d{2}:\d{2}$/.test(st) || !/^\d{2}:\d{2}$/.test(et)) continue;
+            const [sh, sm] = st.split(':').map(Number);
+            const [eh, em] = et.split(':').map(Number);
+            const startMin = sh * 60 + sm;
+            let endMin = eh * 60 + em;
+            if (endMin <= startMin) endMin += 24 * 60;
+            const mins = endMin - startMin;
+            if (mins > 0) openMinutesPerStaff += mins;
+          }
+          cursor.setUTCDate(cursor.getUTCDate() + 1);
+        }
+      }
+
+      if (!openMinutesPerStaff) {
+        const hoursReg2 = await db.query(`SELECT to_regclass('public.tenant_hours') AS reg`);
+        if (hoursReg2.rows?.[0]?.reg) {
+          const hours = await db.query(`SELECT day_of_week, open_time, close_time, is_closed FROM tenant_hours WHERE tenant_id=$1`, [tenantId]);
+          const rows = hours.rows || [];
+          const cursor = new Date(rangeStart.getTime());
+          while (cursor.getTime() < rangeEnd.getTime()) {
+            const dow = cursor.getUTCDay();
+            const todays = rows.filter((r) => Number(r.day_of_week) === dow);
+            for (const r of todays) {
+              if (r.is_closed === true) continue;
+              const st = String(r.open_time || '').slice(0, 5);
+              const et = String(r.close_time || '').slice(0, 5);
+              if (!/^\d{2}:\d{2}$/.test(st) || !/^\d{2}:\d{2}$/.test(et)) continue;
+              const [sh, sm] = st.split(':').map(Number);
+              const [eh, em] = et.split(':').map(Number);
+              const startMin = sh * 60 + sm;
+              let endMin = eh * 60 + em;
+              if (endMin <= startMin) endMin += 24 * 60;
+              const mins = endMin - startMin;
+              if (mins > 0) openMinutesPerStaff += mins;
+            }
+            cursor.setUTCDate(cursor.getUTCDate() + 1);
+          }
+        }
+      }
+
+      const staffLoad = await db.query(
+        `
+        SELECT
+          st.id AS staff_id,
+          COALESCE(NULLIF(TRIM(st.name), ''), 'Staff') AS staff_name,
+          COALESCE(SUM(b.duration_minutes) FILTER (WHERE b.status='confirmed' AND ${startCol} >= $2 AND ${startCol} < $3), 0)::int AS booked_minutes
+        FROM staff st
+        LEFT JOIN bookings b
+          ON b.tenant_id=st.tenant_id
+         AND b.staff_id=st.id
+        WHERE st.tenant_id=$1
+        GROUP BY st.id, st.name
+        ORDER BY booked_minutes DESC, staff_name ASC
+        LIMIT 6
+        `,
+        [tenantId, rangeStart.toISOString(), rangeEnd.toISOString()]
+      );
+      staffUtilization = (staffLoad.rows || []).map((r) => {
+        const booked = Number(r.booked_minutes || 0);
 
   return {
     ok: true,
