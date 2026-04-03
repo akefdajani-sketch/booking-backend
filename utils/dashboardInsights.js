@@ -31,6 +31,7 @@ async function computeDashboardInsights(ctx) {
     tenantId, rangeStart, rangeEnd, safeMode, startCol,
     hasMoneyCols, revenueSelect, staffCount, resourceCount,
     capacityUnits, currencyCode,
+    series,  // passed from dashboardSummary — read for peak/top-service, mutated for utilization_over_time
   } = ctx;
 
 // ---------------------------------------------------------------------------

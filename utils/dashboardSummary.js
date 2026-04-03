@@ -530,6 +530,7 @@ async function getDashboardSummary({ tenantId, tenantSlug, mode, dateStr }) {
     tenantId, rangeStart, rangeEnd, safeMode, startCol,
     hasMoneyCols, revenueSelect, staffCount, resourceCount,
     capacityUnits, currencyCode,
+    series,   // passed so dashboardInsights can read + mutate it
   });
 
   return {
