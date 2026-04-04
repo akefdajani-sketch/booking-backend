@@ -5,9 +5,30 @@ const db = require("../db");
 const { getTenantBySlug } = require("../utils/tenants");
 const { runSupportAgent, generateLandingCopy } = require("../utils/claudeService");
 const requireAppAuth = require("../middleware/requireAppAuth");
-const maybeEnsureUser = require("../middleware/maybeEnsureUser");
 
 const router = express.Router();
+
+// Optional auth middleware — sets req.googleUser/req.auth if token present, never blocks
+function optionalAuth(req, res, next) {
+  const hasAuth =
+    !!req.headers.authorization ||
+    !!req.headers["x-user-email"] ||
+    !!req.cookies?.bf_session ||
+    !!req.cookies?.["next-auth.session-token"] ||
+    !!req.cookies?.["__Secure-next-auth.session-token"];
+
+  if (!hasAuth) return next();
+
+  // Run requireAppAuth but catch any rejection — anonymous users should still proceed
+  requireAppAuth(req, res, (err) => {
+    if (err) {
+      // Auth failed but we still allow the request — just as anonymous
+      req.googleUser = null;
+      req.auth = null;
+    }
+    next();
+  });
+}
 
 // ── Helpers ───────────────────────────────────────────────────────────
 
@@ -163,7 +184,7 @@ async function handleAction(action, tenantId, customerId) {
 }
 
 // ── POST /api/ai/:tenantSlug/chat ─────────────────────────────────────
-router.post("/:tenantSlug/chat", maybeEnsureUser, async (req, res) => {
+router.post("/:tenantSlug/chat", optionalAuth, async (req, res) => {
   try {
     const { message, history = [] } = req.body;
     if (!message || typeof message !== "string") {
