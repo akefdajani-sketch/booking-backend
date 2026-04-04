@@ -24,13 +24,17 @@ router.post("/:tenantSlug/chat", async (req, res) => {
 
     const [servicesResult, membershipsResult] = await Promise.all([
       db.query(
-        `SELECT id, name, duration_minutes, price_amount AS price FROM services
+        `SELECT id, name, description, duration_minutes, price_amount AS price,
+                max_consecutive_slots, max_parallel_bookings, slot_interval_minutes
+         FROM services
          WHERE tenant_id = $1 AND is_active = true
          ORDER BY name ASC`,
         [tenant.id]
       ),
       db.query(
-        `SELECT id, name FROM membership_plans
+        `SELECT id, name, description, billing_type, price, currency,
+                included_minutes, included_uses, validity_days
+         FROM membership_plans
          WHERE tenant_id = $1 AND is_active = true
          ORDER BY name ASC`,
         [tenant.id]
@@ -68,13 +72,17 @@ router.post("/:tenantSlug/generate-landing", async (req, res) => {
 
     const [servicesResult, membershipsResult] = await Promise.all([
       db.query(
-        `SELECT id, name, duration_minutes, price_amount AS price FROM services
+        `SELECT id, name, description, duration_minutes, price_amount AS price,
+                max_consecutive_slots, max_parallel_bookings, slot_interval_minutes
+         FROM services
          WHERE tenant_id = $1 AND is_active = true
          ORDER BY name ASC`,
         [tenant.id]
       ),
       db.query(
-        `SELECT id, name FROM membership_plans
+        `SELECT id, name, description, billing_type, price, currency,
+                included_minutes, included_uses, validity_days
+         FROM membership_plans
          WHERE tenant_id = $1 AND is_active = true
          ORDER BY name ASC`,
         [tenant.id]
