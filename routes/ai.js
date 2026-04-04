@@ -22,7 +22,7 @@ router.post("/:tenantSlug/chat", async (req, res) => {
 
     const tenant = await getTenantBySlug(req.params.tenantSlug);
 
-    const [servicesResult, membershipsResult] = await Promise.all([
+    const [servicesResult, membershipsResult, ratesResult] = await Promise.all([
       db.query(
         `SELECT id, name, description, duration_minutes, price_amount AS price,
                 max_consecutive_slots, max_parallel_bookings, slot_interval_minutes
@@ -39,6 +39,19 @@ router.post("/:tenantSlug/chat", async (req, res) => {
          ORDER BY name ASC`,
         [tenant.id]
       ),
+      db.query(
+        `SELECT r.name, r.price_type, r.amount, r.currency_code,
+                r.days_of_week, r.time_start, r.time_end,
+                r.date_start, r.date_end, r.min_duration_mins, r.max_duration_mins,
+                r.require_any_membership, r.require_any_prepaid,
+                s.name AS service_name, mp.name AS membership_name
+         FROM rate_rules r
+         LEFT JOIN services s ON s.id = r.service_id
+         LEFT JOIN membership_plans mp ON mp.id = r.membership_plan_id
+         WHERE r.tenant_id = $1 AND COALESCE(r.is_active, false) = true
+         ORDER BY r.priority DESC NULLS LAST, r.name ASC`,
+        [tenant.id]
+      ),
     ]);
 
     const reply = await runSupportAgent({
@@ -46,6 +59,7 @@ router.post("/:tenantSlug/chat", async (req, res) => {
         ...tenant,
         services: servicesResult.rows,
         memberships: membershipsResult.rows,
+        rates: ratesResult.rows,
       },
       history,
       message,
