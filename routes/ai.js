@@ -24,7 +24,7 @@ router.post("/:tenantSlug/chat", async (req, res) => {
 
     const [servicesResult, membershipsResult] = await Promise.all([
       db.query(
-        `SELECT id, name, duration_minutes, price FROM services
+        `SELECT id, name, duration_minutes, price_amount AS price FROM services
          WHERE tenant_id = $1 AND is_active = true
          ORDER BY name ASC`,
         [tenant.id]
@@ -68,7 +68,7 @@ router.post("/:tenantSlug/generate-landing", async (req, res) => {
 
     const [servicesResult, membershipsResult] = await Promise.all([
       db.query(
-        `SELECT id, name, duration_minutes, price FROM services
+        `SELECT id, name, duration_minutes, price_amount AS price FROM services
          WHERE tenant_id = $1 AND is_active = true
          ORDER BY name ASC`,
         [tenant.id]
