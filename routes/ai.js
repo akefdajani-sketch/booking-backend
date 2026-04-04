@@ -1,11 +1,9 @@
-import express from "express";
-import { runSupportAgent, generateLandingCopy } from "../utils/claudeService.js";
+"use strict";
 
-// ── Replace these imports with your actual middleware/query helpers ───
-// import { requireAuth } from "../middleware/auth.js";
-// import { getTenantBySlug } from "../queries/tenants.js";
-// import { getServicesByTenant } from "../queries/services.js";
-// import { getMembershipsByTenant } from "../queries/memberships.js";
+const express = require("express");
+const db = require("../db");
+const { getTenantBySlug } = require("../utils/tenants");
+const { runSupportAgent, generateLandingCopy } = require("../utils/claudeService");
 
 const router = express.Router();
 
@@ -22,22 +20,38 @@ router.post("/:tenantSlug/chat", async (req, res) => {
       return res.status(400).json({ error: "message is required" });
     }
 
-    // ── swap these for your real DB helpers ──────────────────────────
     const tenant = await getTenantBySlug(req.params.tenantSlug);
-    if (!tenant) return res.status(404).json({ error: "tenant not found" });
 
-    const services = await getServicesByTenant(tenant.id);
-    const memberships = await getMembershipsByTenant(tenant.id);
-    // ─────────────────────────────────────────────────────────────────
+    const [servicesResult, membershipsResult] = await Promise.all([
+      db.query(
+        `SELECT id, name, duration_minutes, price FROM services
+         WHERE tenant_id = $1 AND is_active = true
+         ORDER BY name ASC`,
+        [tenant.id]
+      ),
+      db.query(
+        `SELECT id, name FROM membership_plans
+         WHERE tenant_id = $1 AND is_active = true
+         ORDER BY name ASC`,
+        [tenant.id]
+      ),
+    ]);
 
     const reply = await runSupportAgent({
-      tenantContext: { ...tenant, services, memberships },
+      tenantContext: {
+        ...tenant,
+        services: servicesResult.rows,
+        memberships: membershipsResult.rows,
+      },
       history,
       message,
     });
 
     res.json({ reply });
   } catch (err) {
+    if (err.code === "TENANT_NOT_FOUND") {
+      return res.status(404).json({ error: "Tenant not found" });
+    }
     console.error("[AI chat error]", err);
     res.status(500).json({ error: "AI unavailable, please try again" });
   }
@@ -46,25 +60,41 @@ router.post("/:tenantSlug/chat", async (req, res) => {
 // ---------------------------------------------------------------------------
 // POST /api/ai/:tenantSlug/generate-landing
 // Private — owner only, called from the dashboard
-// Body: {} (no body needed, data is pulled from DB)
+// Body: {} (data is pulled from DB automatically)
 // ---------------------------------------------------------------------------
-router.post("/:tenantSlug/generate-landing", /* requireAuth, */ async (req, res) => {
+router.post("/:tenantSlug/generate-landing", async (req, res) => {
   try {
-    // ── swap these for your real DB helpers ──────────────────────────
     const tenant = await getTenantBySlug(req.params.tenantSlug);
-    if (!tenant) return res.status(404).json({ error: "tenant not found" });
 
-    const services = await getServicesByTenant(tenant.id);
-    const memberships = await getMembershipsByTenant(tenant.id);
-    // ─────────────────────────────────────────────────────────────────
+    const [servicesResult, membershipsResult] = await Promise.all([
+      db.query(
+        `SELECT id, name, duration_minutes, price FROM services
+         WHERE tenant_id = $1 AND is_active = true
+         ORDER BY name ASC`,
+        [tenant.id]
+      ),
+      db.query(
+        `SELECT id, name FROM membership_plans
+         WHERE tenant_id = $1 AND is_active = true
+         ORDER BY name ASC`,
+        [tenant.id]
+      ),
+    ]);
 
-    const copy = await generateLandingCopy({ tenant, services, memberships });
+    const copy = await generateLandingCopy({
+      tenant,
+      services: servicesResult.rows,
+      memberships: membershipsResult.rows,
+    });
 
     res.json(copy);
   } catch (err) {
+    if (err.code === "TENANT_NOT_FOUND") {
+      return res.status(404).json({ error: "Tenant not found" });
+    }
     console.error("[Landing gen error]", err);
     res.status(500).json({ error: "Generation failed, please try again" });
   }
 });
 
-export default router;
+module.exports = router;
