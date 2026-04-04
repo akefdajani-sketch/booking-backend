@@ -1,29 +1,21 @@
 "use strict";
 
 const Anthropic = require("@anthropic-ai/sdk");
+const claude = new Anthropic();
 
-const claude = new Anthropic(); // reads ANTHROPIC_API_KEY automatically
-
-// ── Build a rich, structured system prompt from real DB data ──────────
-function buildSystemPrompt(tenantContext) {
-  const { name, services = [], memberships = [], rates = [], workingHours } = tenantContext;
-
-  // Format services with all available detail
+// ── Build business context (always shown) ────────────────────────────
+function buildBusinessContext({ name, services = [], memberships = [], rates = [], workingHours }) {
   const servicesBlock = services.length > 0
     ? services.map((s) => {
-        const price = s.price != null
-          ? (s.price === 0 ? "Free" : `${s.price} ${s.currency || "JD"}`)
-          : "contact for pricing";
+        const price = s.price != null ? (s.price === 0 ? "Free" : `${s.price} ${s.currency || "JD"}`) : "contact for pricing";
         const duration = s.duration_minutes ? `${s.duration_minutes} min` : null;
-        const slots = s.max_consecutive_slots ? `up to ${s.max_consecutive_slots} consecutive slots` : null;
-        const parallel = s.max_parallel_bookings > 1 ? `${s.max_parallel_bookings} people can book simultaneously` : null;
+        const slots = s.max_consecutive_slots ? `up to ${s.max_consecutive_slots} slots` : null;
+        const parallel = s.max_parallel_bookings > 1 ? `${s.max_parallel_bookings} simultaneous bookings` : null;
         const desc = s.description ? `"${s.description}"` : null;
-        const details = [duration, price, slots, parallel, desc].filter(Boolean).join(" | ");
-        return `  - ${s.name}: ${details}`;
+        return `  - ${s.name} [id:${s.id}]: ${[duration, price, slots, parallel, desc].filter(Boolean).join(" | ")}`;
       }).join("\n")
-    : "  No services listed yet.";
+    : "  No services listed.";
 
-  // Format memberships with full detail
   const membershipsBlock = memberships.length > 0
     ? memberships.map((m) => {
         const price = m.price != null ? `${m.price} ${m.currency || "JD"}` : null;
@@ -32,51 +24,37 @@ function buildSystemPrompt(tenantContext) {
         const uses = m.included_uses ? `${m.included_uses} uses included` : null;
         const validity = m.validity_days ? `valid ${m.validity_days} days` : null;
         const desc = m.description ? `"${m.description}"` : null;
-        const details = [price, billing, minutes, uses, validity, desc].filter(Boolean).join(" | ");
-        return `  - ${m.name}: ${details}`;
+        return `  - ${m.name} [id:${m.id}]: ${[price, billing, minutes, uses, validity, desc].filter(Boolean).join(" | ")}`;
       }).join("\n")
-    : "  No membership plans available.";
+    : "  No membership plans.";
 
-  // Format rate rules — these are special pricing overrides (peak, off-peak, member rates etc.)
   const ratesBlock = rates.length > 0
     ? rates.map((r) => {
-        const parts = [];
         const amount = r.amount != null
-          ? (r.price_type === "percent_discount"
-              ? `${r.amount}% discount`
-              : r.price_type === "fixed_override"
-              ? `fixed price ${r.amount} ${r.currency_code || "JD"}`
-              : r.price_type === "flat_fee"
-              ? `flat fee ${r.amount} ${r.currency_code || "JD"}`
-              : `${r.amount} ${r.currency_code || "JD"}`)
+          ? r.price_type === "percent_discount" ? `${r.amount}% discount`
+          : r.price_type === "fixed_override" ? `fixed ${r.amount} ${r.currency_code || "JD"}`
+          : r.price_type === "flat_fee" ? `flat fee ${r.amount} ${r.currency_code || "JD"}`
+          : `${r.amount} ${r.currency_code || "JD"}`
           : null;
-        if (amount) parts.push(amount);
-        if (r.service_name) parts.push(`for ${r.service_name}`);
-        if (r.days_of_week) {
-          const days = Array.isArray(r.days_of_week) ? r.days_of_week : [];
-          const dayNames = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
-          if (days.length > 0) parts.push(`on ${days.map(d => dayNames[d] || d).join(", ")}`);
-        }
-        if (r.time_start && r.time_end) parts.push(`${r.time_start}–${r.time_end}`);
-        if (r.date_start && r.date_end) parts.push(`from ${r.date_start} to ${r.date_end}`);
-        if (r.membership_name) parts.push(`(members: ${r.membership_name} only)`);
-        if (r.require_any_membership) parts.push("(any active membership required)");
-        return `  - ${r.name}: ${parts.join(", ")}`;
+        const days = Array.isArray(r.days_of_week) && r.days_of_week.length > 0
+          ? ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"].filter((_,i) => r.days_of_week.includes(i)).join(", ")
+          : null;
+        const time = r.time_start && r.time_end ? `${r.time_start}–${r.time_end}` : null;
+        const forService = r.service_name ? `for ${r.service_name}` : null;
+        const memberOnly = r.membership_name ? `(${r.membership_name} members only)` : r.require_any_membership ? "(members only)" : null;
+        return `  - ${r.name}: ${[amount, forService, days, time, memberOnly].filter(Boolean).join(", ")}`;
       }).join("\n")
-    : "  No special rate rules configured.";
+    : "  No special rate rules.";
 
-  // Format working hours
   const hoursBlock = workingHours
-    ? (Array.isArray(workingHours)
-        ? workingHours
-            .filter((h) => h.is_open !== false)
-            .map((h) => `  ${h.day_of_week || h.day}: ${h.open_time || h.from} - ${h.close_time || h.to}`)
-            .join("\n")
-        : String(workingHours))
-    : "  Check the booking page for available slots.";
+    ? Array.isArray(workingHours)
+      ? workingHours.filter(h => h.is_open !== false)
+          .map(h => `  ${h.day_of_week || h.day}: ${h.open_time || h.from} – ${h.close_time || h.to}`)
+          .join("\n")
+      : String(workingHours)
+    : "  Check booking page for availability.";
 
-  return `You are the AI assistant for ${name}, a booking-based business.
-Your job is to help customers understand services, pricing, memberships, and how to book.
+  return `BUSINESS: ${name}
 
 SERVICES:
 ${servicesBlock}
@@ -84,58 +62,154 @@ ${servicesBlock}
 MEMBERSHIP PLANS:
 ${membershipsBlock}
 
-PRICING & RATE RULES (special rates, peak hours, member discounts etc.):
+RATE RULES (peak/off-peak/member pricing):
 ${ratesBlock}
 
 WORKING HOURS:
-${hoursBlock}
-
-INSTRUCTIONS:
-- Always answer based on the real data above. Never invent services, prices, or rules.
-- If a customer asks about pricing, give the exact price from the data above including any applicable rate rules.
-- If a customer asks how long a session is, give the exact duration.
-- If a customer asks about memberships, explain what is included clearly.
-- If there are special rates (peak, off-peak, member discounts), mention them when relevant.
-- Keep replies concise and friendly. Use bullet points for lists.
-- Always end with a nudge to book, e.g. "Ready to book? Tap the Book tab above."
-- If you don't know something (e.g. real-time availability), say so and direct them to book directly.
-- Do not make up information that is not in the data above.`;
+${hoursBlock}`;
 }
 
-// ── AGENT: Answer tenant/customer questions ───────────────────────────
-async function runSupportAgent({ tenantContext, history, message }) {
+// ── Build customer context (only when signed in) ─────────────────────
+function buildCustomerContext({ profile, bookings = [], memberships = [], packages = [] }) {
+  if (!profile) return null;
+
+  const profileBlock = `  Name: ${profile.name || "N/A"}
+  Email: ${profile.email || "N/A"}
+  Phone: ${profile.phone || "N/A"}
+  Member since: ${profile.created_at ? new Date(profile.created_at).toLocaleDateString() : "N/A"}`;
+
+  const now = Date.now();
+
+  const upcomingBookings = bookings
+    .filter(b => new Date(b.start_time).getTime() >= now && b.status !== "cancelled")
+    .sort((a, b) => new Date(a.start_time) - new Date(b.start_time))
+    .slice(0, 10);
+
+  const pastBookings = bookings
+    .filter(b => new Date(b.start_time).getTime() < now)
+    .sort((a, b) => new Date(b.start_time) - new Date(a.start_time))
+    .slice(0, 10);
+
+  const bookingsBlock = `  Upcoming (${upcomingBookings.length}):
+${upcomingBookings.length > 0
+  ? upcomingBookings.map(b =>
+      `    - [id:${b.id}] ${b.service_name || "Service"} on ${new Date(b.start_time).toLocaleString()} | ${b.duration_minutes || "?"}min | status: ${b.status} | ${b.price_amount != null ? `${b.price_amount} ${b.currency_code || "JD"}` : "no charge"}`
+    ).join("\n")
+  : "    None"}
+
+  Recent past (${pastBookings.length}):
+${pastBookings.length > 0
+  ? pastBookings.map(b =>
+      `    - [id:${b.id}] ${b.service_name || "Service"} on ${new Date(b.start_time).toLocaleDateString()} | ${b.status}`
+    ).join("\n")
+  : "    None"}`;
+
+  const membershipsBlock = memberships.length > 0
+    ? memberships.map(m => {
+        const balance = m.minutes_remaining != null
+          ? `${m.minutes_remaining} min remaining`
+          : m.uses_remaining != null
+          ? `${m.uses_remaining} uses remaining`
+          : null;
+        const expires = m.end_at ? `expires ${new Date(m.end_at).toLocaleDateString()}` : null;
+        return `    - [id:${m.id}] ${m.plan_name || "Plan"} | status: ${m.status} | ${[balance, expires].filter(Boolean).join(" | ")}`;
+      }).join("\n")
+    : "    None";
+
+  const packagesBlock = packages.length > 0
+    ? packages.map(p =>
+        `    - [id:${p.id}] ${p.product_name || "Package"} | ${p.remaining_quantity ?? "?"} remaining | status: ${p.status} | expires: ${p.expires_at ? new Date(p.expires_at).toLocaleDateString() : "N/A"}`
+      ).join("\n")
+    : "    None";
+
+  return `CUSTOMER PROFILE:
+${profileBlock}
+
+CUSTOMER BOOKINGS:
+${bookingsBlock}
+
+CUSTOMER MEMBERSHIPS:
+${membershipsBlock}
+
+CUSTOMER PACKAGES / PREPAID:
+${packagesBlock}`;
+}
+
+// ── Build the full system prompt ──────────────────────────────────────
+function buildSystemPrompt({ tenantContext, customerData, isSignedIn }) {
+  const businessContext = buildBusinessContext(tenantContext);
+  const customerContext = isSignedIn && customerData ? buildCustomerContext(customerData) : null;
+
+  const customerSection = customerContext
+    ? `\n\n${customerContext}`
+    : "\n\nCUSTOMER: Not signed in. Provide general information only.";
+
+  const actionSection = isSignedIn ? `
+ACTIONS YOU CAN TAKE:
+When the customer requests an action, respond with a JSON block in this format on its own line:
+ACTION:{"type":"cancel_booking","booking_id":123}
+ACTION:{"type":"check_balance"}
+ACTION:{"type":"view_bookings"}
+
+Supported actions:
+- cancel_booking: when customer wants to cancel a specific upcoming booking
+- check_balance: when customer asks about their membership/package balance
+- view_bookings: when customer wants to see their upcoming bookings` : "";
+
+  return `You are the AI assistant for ${tenantContext.name}.
+You have full knowledge of this business and the signed-in customer's account.
+
+${businessContext}${customerSection}${actionSection}
+
+RULES:
+- Use real data from above. Never invent prices, services, or customer data.
+- For pricing questions, reference exact amounts and applicable rate rules.
+- For customer questions (balance, bookings, history), use their actual data above.
+- When taking actions, confirm with the customer first, then output the ACTION line.
+- Be concise, warm, and professional.
+- For anonymous users, answer general questions only — never reveal other customers' data.
+- End responses with a helpful next step or CTA.`;
+}
+
+// ── Main agent function ───────────────────────────────────────────────
+async function runSupportAgent({ tenantContext, customerData, isSignedIn, history, message }) {
   const response = await claude.messages.create({
     model: "claude-sonnet-4-6",
-    max_tokens: 1000,
-    system: buildSystemPrompt(tenantContext),
+    max_tokens: 1500,
+    system: buildSystemPrompt({ tenantContext, customerData, isSignedIn }),
     messages: [
       ...history,
       { role: "user", content: message },
     ],
   });
 
-  return response.content[0].text;
+  const text = response.content[0].text;
+
+  // Parse any action the AI wants to take
+  const actionMatch = text.match(/^ACTION:(\{.+\})$/m);
+  const action = actionMatch ? JSON.parse(actionMatch[1]) : null;
+
+  // Return clean text (without the ACTION line) + parsed action
+  const cleanText = text.replace(/^ACTION:\{.+\}$/m, "").trim();
+
+  return { reply: cleanText, action };
 }
 
-// ── GENERATOR: Create landing page copy ──────────────────────────────
+// ── Landing page copy generator ───────────────────────────────────────
 async function generateLandingCopy({ tenant, services, memberships }) {
   const serviceList = services
-    .map((s) => {
-      const price = s.price != null
-        ? (s.price === 0 ? "Free" : `${s.price} ${s.currency || "JD"}`)
-        : "contact for pricing";
+    .map(s => {
+      const price = s.price != null ? (s.price === 0 ? "Free" : `${s.price} ${s.currency || "JD"}`) : "contact for pricing";
       return `${s.name} (${s.duration_minutes || "?"}min, ${price})`;
-    })
-    .join(", ");
+    }).join(", ");
 
   const response = await claude.messages.create({
     model: "claude-sonnet-4-6",
     max_tokens: 2000,
     system: "You are a SaaS copywriter. Respond ONLY with valid JSON, no markdown, no explanation.",
-    messages: [
-      {
-        role: "user",
-        content: `Generate landing page copy for this business:
+    messages: [{
+      role: "user",
+      content: `Generate landing page copy for this business:
 Name: ${tenant.name}
 Industry: ${tenant.industry || "service business"}
 Services: ${serviceList}
@@ -150,8 +224,7 @@ Return this exact JSON shape:
   "features": ["...", "...", "..."],
   "about": "..."
 }`,
-      },
-    ],
+    }],
   });
 
   return JSON.parse(response.content[0].text);
