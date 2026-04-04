@@ -102,12 +102,12 @@ async function fetchCustomerData(tenantId, email) {
     // Bookings with service name
     db.query(
       `SELECT b.id, b.status, b.start_time, b.duration_minutes,
-              b.price_amount, b.currency_code, b.notes,
+              b.price_amount, b.currency_code,
               s.name AS service_name
        FROM bookings b
        LEFT JOIN services s ON s.id = b.service_id
        WHERE b.tenant_id = $1 AND b.customer_id = $2
-         AND COALESCE(b.deleted_at IS NULL, true)
+         AND b.deleted_at IS NULL
        ORDER BY b.start_time DESC
        LIMIT 50`,
       [tenantId, customerId]
