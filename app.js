@@ -89,6 +89,9 @@ const healthRouter = require("./routes/health");
 const stripeWebhookRouter = require("./routes/stripeWebhook");
 const billingRouter = require("./routes/billing");
 
+// AI: Claude-powered support agent + landing copy generator
+const aiRouter = require("./routes/ai");
+
 const app = express();
 const ENABLE_DEBUG_ROUTES =
   String(process.env.ENABLE_DEBUG_ROUTES || "").toLowerCase() === "true";
@@ -214,6 +217,9 @@ app.use("/api/public/tenant-theme", publicApiLimiter, publicTenantThemeRouter);
 // ─── Misc ─────────────────────────────────────────────────────────────────────
 app.use("/api/links", linksRouter);
 app.use("/api/tenant-domains", tenantDomainsRouter);
+
+// AI: Claude-powered routes
+app.use("/api/ai", aiRouter);
 
 if (ENABLE_DEBUG_ROUTES && process.env.NODE_ENV !== "production") {
   app.use("/api/debug", debugGoogleAuthRouter);

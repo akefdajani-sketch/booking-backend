@@ -13,6 +13,7 @@
     "migrate:dry": "node scripts/migrate.js --dry-run"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.39.0",
     "@aws-sdk/client-s3": "^3.958.0",
     "@aws-sdk/s3-request-presigner": "^3.958.0",
     "@sentry/node": "^7.0.0",
