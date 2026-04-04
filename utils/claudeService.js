@@ -1,9 +1,11 @@
-import Anthropic from "@anthropic-ai/sdk";
+"use strict";
+
+const Anthropic = require("@anthropic-ai/sdk");
 
 const claude = new Anthropic(); // reads ANTHROPIC_API_KEY automatically
 
 // ── AGENT: Answer tenant/customer questions ──────────────────────────
-export async function runSupportAgent({ tenantContext, history, message }) {
+async function runSupportAgent({ tenantContext, history, message }) {
   const response = await claude.messages.create({
     model: "claude-sonnet-4-6",
     max_tokens: 1000,
@@ -15,15 +17,15 @@ Answer questions about bookings, availability, services and memberships.
 Be concise, friendly, and always guide the customer to book.`,
     messages: [
       ...history, // [{ role: "user", content: "..." }, { role: "assistant", content: "..." }]
-      { role: "user", content: message }
-    ]
+      { role: "user", content: message },
+    ],
   });
 
   return response.content[0].text;
 }
 
 // ── GENERATOR: Create landing page copy ──────────────────────────────
-export async function generateLandingCopy({ tenant, services, memberships }) {
+async function generateLandingCopy({ tenant, services, memberships }) {
   const response = await claude.messages.create({
     model: "claude-sonnet-4-6",
     max_tokens: 2000,
@@ -53,3 +55,5 @@ Return this exact JSON shape:
 
   return JSON.parse(response.content[0].text);
 }
+
+module.exports = { runSupportAgent, generateLandingCopy };
