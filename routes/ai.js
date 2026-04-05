@@ -596,7 +596,7 @@ router.post("/:tenantSlug/chat", optionalAuth, async (req, res) => {
     }
 
     // If an action was executed, send the results back to Claude for a follow-up response
-    let finalReply = reply;
+    let finalReply = reply || "";
     if (action && actionResult) {
       let actionContext = "";
 
@@ -624,21 +624,38 @@ router.post("/:tenantSlug/chat", optionalAuth, async (req, res) => {
       }
 
       if (actionContext) {
-        // Second Claude call with the action results so it can respond naturally
-        const followUp = await runSupportAgent({
-          tenantContext: { ...tenant, ...businessContext },
-          customerData,
-          isSignedIn,
-          history: [
-            ...history,
-            { role: "user", content: message },
-            { role: "assistant", content: reply },
-            { role: "user", content: `[SYSTEM: ${actionContext}. Now respond to the customer based on these results. If showing available slots, list them clearly and ask which one they'd like. If confirming a booking, confirm all details clearly.]` },
-          ],
-          message: actionContext,
-        });
-        finalReply = followUp.reply;
+        try {
+          const followUp = await runSupportAgent({
+            tenantContext: { ...tenant, ...businessContext },
+            customerData,
+            isSignedIn,
+            history: [
+              ...history,
+              { role: "user", content: message },
+              ...(reply ? [{ role: "assistant", content: reply }] : []),
+              { role: "user", content: `[SYSTEM: ${actionContext}]` },
+            ],
+            message: actionContext,
+          });
+          if (followUp.reply) finalReply = followUp.reply;
+        } catch (followUpErr) {
+          console.error("[AI follow-up error]", followUpErr);
+          if (actionResult.message) finalReply = actionResult.message;
+        }
       }
+    }
+
+    // For successful bookings skip second Claude call - use message directly
+    if (action?.type === "create_booking" && actionResult?.success) {
+      finalReply = actionResult.message || "✅ Your booking has been confirmed!";
+    }
+    if (action?.type === "create_booking" && actionResult?.requiresUI) {
+      finalReply = actionResult.message;
+    }
+
+    // Safety net - never return empty reply
+    if (!finalReply || !finalReply.trim()) {
+      finalReply = actionResult?.message || "I processed your request. Is there anything else I can help you with?";
     }
 
     res.json({
