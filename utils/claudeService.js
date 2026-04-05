@@ -211,8 +211,9 @@ ACTION:{"type":"action_name",...params}
 
 Available actions:
 1. Check availability:
-   ACTION:{"type":"check_availability","service_id":123,"date":"YYYY-MM-DD"}
-   Use this before confirming any booking. Always check before quoting a specific time.
+   ACTION:{"type":"check_availability","service_id":123,"date":"YYYY-MM-DD","resource_id":null,"staff_id":null}
+   - Include resource_id if the customer specified a simulator/room/resource, otherwise leave null (system will auto-select)
+   - Use this before confirming any booking. Always check before quoting a specific time.
 
 2. Create booking (only after customer confirms and you have checked availability):
    ACTION:{"type":"create_booking","service_id":123,"start_time":"2026-04-05T10:00:00","duration_minutes":60,"resource_id":null,"staff_id":null,"membership_id":null}

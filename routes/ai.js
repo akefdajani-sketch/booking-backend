@@ -365,10 +365,25 @@ async function handleAction(action, tenantId, tenantSlug, customerId, customerEm
           [action.service_id, tenantId]
         );
         if (svcRes.rows.length === 0) return { success: false, message: "Service not found." };
+        const service = svcRes.rows[0];
 
         // Get tenant timezone
         const tzRes = await db.query(`SELECT timezone FROM tenants WHERE id = $1 LIMIT 1`, [tenantId]);
         const tenantTz = tzRes.rows?.[0]?.timezone || "UTC";
+
+        // If no resource_id provided, auto-pick the first active resource for this service
+        let resourceId = action.resource_id ? Number(action.resource_id) : null;
+        if (!resourceId) {
+          const resLink = await db.query(
+            `SELECT r.id FROM resources r
+             LEFT JOIN resource_service_links rsl ON rsl.resource_id = r.id AND rsl.service_id = $2
+             WHERE r.tenant_id = $1 AND COALESCE(r.is_active, true) = true
+             ORDER BY rsl.resource_id NULLS LAST, r.id ASC
+             LIMIT 1`,
+            [tenantId, action.service_id]
+          ).catch(() => ({ rows: [] }));
+          if (resLink.rows.length > 0) resourceId = Number(resLink.rows[0].id);
+        }
 
         const result = await buildAvailabilitySlots({
           tenantId,
@@ -376,18 +391,27 @@ async function handleAction(action, tenantId, tenantSlug, customerId, customerEm
           date: normalizeDateInput(action.date),
           serviceId: Number(action.service_id),
           staffId: action.staff_id ? Number(action.staff_id) : null,
-          resourceId: action.resource_id ? Number(action.resource_id) : null,
+          resourceId,
           tenantTz,
-          service: svcRes.rows[0],
+          service,
         });
 
+        // Check meta reason for empty results
+        const reason = result.meta?.reason;
+        if (reason === "resource_required" || reason === "resource_required_for_availability") {
+          return { success: false, message: "This service requires a specific resource to be selected. Please book via the booking form." };
+        }
+        if (reason && reason !== "ok") {
+          return { success: true, slots: [], message: `No available slots on ${action.date} (${reason.replace(/_/g, " ")}).` };
+        }
+
         const allSlots = result.slots || result.times || [];
-        const available = allSlots.filter(s => s.is_available !== false);
+        const available = allSlots.filter(s => s.is_available !== false && s.available !== false);
 
         if (available.length === 0) {
-          return { success: true, slots: [], message: `No available slots on ${action.date}.` };
+          return { success: true, slots: [], message: `No available slots on ${action.date}. All times may be booked or outside working hours.` };
         }
-        return { success: true, slots: available.slice(0, 20), message: null };
+        return { success: true, slots: available.slice(0, 20), resourceId, message: null };
       } catch (e) {
         console.error("[AI check_availability error]", e);
         return { success: false, message: "Could not fetch availability right now." };
