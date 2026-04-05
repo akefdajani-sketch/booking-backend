@@ -201,7 +201,7 @@ function buildCustomerContext({ profile, bookings = [], memberships = [], packag
     ? packages.map(p => {
         const rem     = p.remaining_quantity != null ? `${p.remaining_quantity}/${p.original_quantity || "?"} remaining` : "";
         const expires = p.expires_at ? `expires ${new Date(p.expires_at).toLocaleDateString("en-GB")}` : null;
-        return `    - [package id:${p.id}] ${p.product_name || "Package"} | status: ${p.status} | ${rem}${expires ? ` | ${expires}` : ""}`;
+        return `    - [package id:${p.id}] ${p.product_name || "Package"} | status: ${p.status} | ${rem}${expires ? ` | ${expires}` : ""} (use prepaid_entitlement_id:${p.id} in create_booking to redeem)`;
       }).join("\n")
     : "    None";
 
@@ -253,12 +253,13 @@ Available actions:
    - Always check availability before confirming any time slot.
 
 2. Create booking (only after customer confirms and you have checked availability):
-   ACTION:{"type":"create_booking","service_id":123,"start_time":"2026-04-06T17:00:00","duration_minutes":120,"resource_id":4,"staff_id":null,"membership_id":null,"slots":2}
+   ACTION:{"type":"create_booking","service_id":123,"start_time":"2026-04-06T17:00:00","duration_minutes":120,"resource_id":4,"staff_id":null,"membership_id":null,"prepaid_entitlement_id":null,"slots":2}
    - start_time: ISO 8601 in local time (e.g. 2026-04-06T17:00:00)
    - duration_minutes: total booking duration (slot_interval × number of slots)
    - slots: number of consecutive slots booked
    - resource_id: use the exact resource_id from availability check result, or from service listing
-   - membership_id: include the customer's membership id if they want to use credits
+   - membership_id: the [membership id:X] from the customer's active membership if they want to pay with credits
+   - prepaid_entitlement_id: the [package id:X] from the customer's package if they want to use prepaid sessions
 
 3. Cancel booking (only for upcoming bookings on the customer's account):
    ACTION:{"type":"cancel_booking","booking_id":456}
@@ -275,6 +276,8 @@ RULES:
 - MEMBERSHIP: If the customer has an active membership with remaining balance, proactively mention they can use it. Include membership_id in the create_booking ACTION if they want to.
 - AVAILABILITY: Always call check_availability before confirming any slot. Pass the specific resource_id if the customer named a resource.
 - BOOKING FLOW: 1) Check availability → 2) Show available slots → 3) Confirm details + price with customer → 4) Create booking only after explicit customer confirmation.
+- CONFIRMATION CRITICAL: When the customer says YES to confirming a booking (any of: "yes", "confirm", "go ahead", "book it", "do it", "yes please", "confirm it"), you MUST output ACTION:{...create_booking...} immediately with all booking details from the conversation. Do NOT just say "I'll do it" or "creating now" - output the ACTION line directly.
+- PACKAGE PAYMENT: If the customer has a prepaid package with remaining sessions, offer to use it. Include prepaid_entitlement_id from their [package id:X] in the ACTION.
 - CANCELLATION: Always show booking details and ask "Shall I go ahead and cancel?" before acting.
 - Be concise, warm, and professional. Use bullet points for lists.
 - If you don't know something not in the data, say so honestly.

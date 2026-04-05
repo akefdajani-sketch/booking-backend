@@ -473,12 +473,12 @@ async function handleAction(action, tenantId, tenantSlug, customerId, customerEm
         return { success: false, message: "Need service and start time to create a booking." };
       }
 
-      // Card/Cliq payments need the payment gateway UI — AI can only handle membership/cash
-      const paymentMethod = action.payment_method || null;
-      if (paymentMethod === "card" || paymentMethod === "cliq") {
+      // Card/Cliq payments need the payment gateway UI — AI can only handle membership/cash/package
+      const requestedPayMethod = action.payment_method || null;
+      if (requestedPayMethod === "card" || requestedPayMethod === "cliq") {
         return {
           success: false, requiresUI: true,
-          message: "Card and Cliq payments need to go through the secure payment page. Please use the **Book now** button and select the same slot — I'll keep your preferences noted!",
+          message: "Card and Cliq payments need to go through the secure payment page. Please use the **Book now** button and select the same slot!",
         };
       }
 
@@ -497,7 +497,18 @@ async function handleAction(action, tenantId, tenantSlug, customerId, customerEm
         const start = new Date(action.start_time);
         if (isNaN(start.getTime())) return { success: false, message: "Invalid start time." };
 
-        console.log(`[AI create_booking] tenant=${tenantId} service=${svc.name} start=${start.toISOString()} duration=${duration} resource=${action.resource_id} membership=${action.membership_id}`);
+        // Determine payment method:
+        // 1. membership credits (customerMembershipId)
+        // 2. prepaid package (prepaidEntitlementId)
+        // 3. cash (default)
+        const membershipId = action.membership_id ? Number(action.membership_id) : null;
+        const prepaidId = action.prepaid_entitlement_id ? Number(action.prepaid_entitlement_id) : null;
+
+        let paymentMethod = "cash";
+        if (membershipId) paymentMethod = "membership";
+        else if (prepaidId) paymentMethod = "package";
+
+        console.log(`[AI create_booking] tenant=${tenantId} service=${svc.name} start=${start.toISOString()} duration=${duration} resource=${action.resource_id} payment=${paymentMethod} membership=${membershipId} prepaid=${prepaidId}`);
 
         const backendUrl = (process.env.RENDER_EXTERNAL_URL || "https://booking-backend-6jbc.onrender.com").replace(/\/$/, "");
 
@@ -508,9 +519,14 @@ async function handleAction(action, tenantId, tenantSlug, customerId, customerEm
           durationMinutes: duration,
           resourceId: action.resource_id || null,
           staffId: action.staff_id || null,
-          customerMembershipId: action.membership_id || null,
-          autoConsumeMembership: !!action.membership_id,
-          paymentMethod: action.membership_id ? "membership" : "cash",
+          // Membership
+          customerMembershipId: membershipId || null,
+          autoConsumeMembership: !!membershipId,
+          // Package / prepaid
+          prepaidEntitlementId: prepaidId || null,
+          autoConsumePrepaid: !!prepaidId,
+          // Payment method
+          paymentMethod,
         };
 
         const bookingRes = await fetch(`${backendUrl}/api/bookings`, {
@@ -525,24 +541,39 @@ async function handleAction(action, tenantId, tenantSlug, customerId, customerEm
         const bookingText = await bookingRes.text();
         let bookingData;
         try { bookingData = JSON.parse(bookingText); } catch { bookingData = {}; }
-        console.log(`[AI create_booking] status=${bookingRes.status} body=${bookingText.slice(0, 400)}`);
+        console.log(`[AI create_booking] status=${bookingRes.status} body=${bookingText.slice(0, 600)}`);
 
         if (!bookingRes.ok) {
-          return { success: false, message: bookingData.error || bookingData.message || "Booking failed — please try using the booking form." };
+          const errMsg = bookingData?.error || bookingData?.message || "Booking failed.";
+
+          // Handle membership-specific errors gracefully
+          if (bookingRes.status === 409 && bookingData?.insufficientBalance) {
+            return { success: false, message: `Not enough membership balance. You have ${bookingData.balanceBefore ?? "?"} min remaining but need ${duration} min. Try paying cash instead, or use the booking form.` };
+          }
+          if (bookingRes.status === 409 && bookingData?.conflictingBookings) {
+            return { success: false, message: "That slot is no longer available — it may have just been booked. Shall I check for other times?" };
+          }
+          return { success: false, message: `${errMsg} Please try the booking form if the problem continues.` };
         }
 
-        const bookingId = bookingData.id || bookingData.booking?.id;
+        const bookingId = bookingData?.booking?.id || bookingData?.id;
         const tzRes = await db.query(`SELECT timezone FROM tenants WHERE id = $1 LIMIT 1`, [tenantId]);
         const tz = tzRes.rows?.[0]?.timezone || "Asia/Amman";
         const displayTime = start.toLocaleString("en-GB", { timeZone: tz, dateStyle: "full", timeStyle: "short" });
 
+        let payLabel = "Cash at venue";
+        if (paymentMethod === "membership") payLabel = "Membership credits ✓";
+        else if (paymentMethod === "package") payLabel = "Prepaid package ✓";
+
         return {
-          success: true, booking: bookingData, bookingId,
-          message: `✅ **Booking confirmed!**\n- **Service:** ${svc.name}\n- **When:** ${displayTime}\n- **Duration:** ${duration} min\n- **Booking ID:** #${bookingId}\n${action.membership_id ? "- **Paid with:** Membership credits" : "- **Payment:** Cash at venue"}`,
+          success: true,
+          booking: bookingData,
+          bookingId,
+          message: `✅ **Booked!**\n- **Service:** ${svc.name}\n- **When:** ${displayTime}\n- **Duration:** ${duration} min\n- **Booking ref:** #${bookingId}\n- **Payment:** ${payLabel}`,
         };
       } catch (e) {
         console.error("[AI create_booking error]", e);
-        return { success: false, message: "Could not create booking. Please use the booking form directly." };
+        return { success: false, message: "Could not create booking — please use the booking form directly." };
       }
     }
 
