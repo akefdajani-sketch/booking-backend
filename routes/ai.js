@@ -365,25 +365,10 @@ async function handleAction(action, tenantId, tenantSlug, customerId, customerEm
           [action.service_id, tenantId]
         );
         if (svcRes.rows.length === 0) return { success: false, message: "Service not found." };
-        const service = svcRes.rows[0];
 
         // Get tenant timezone
         const tzRes = await db.query(`SELECT timezone FROM tenants WHERE id = $1 LIMIT 1`, [tenantId]);
         const tenantTz = tzRes.rows?.[0]?.timezone || "UTC";
-
-        // If no resource_id provided, auto-pick the first active resource for this service
-        let resourceId = action.resource_id ? Number(action.resource_id) : null;
-        if (!resourceId) {
-          const resLink = await db.query(
-            `SELECT r.id FROM resources r
-             LEFT JOIN resource_service_links rsl ON rsl.resource_id = r.id AND rsl.service_id = $2
-             WHERE r.tenant_id = $1 AND COALESCE(r.is_active, true) = true
-             ORDER BY rsl.resource_id NULLS LAST, r.id ASC
-             LIMIT 1`,
-            [tenantId, action.service_id]
-          ).catch(() => ({ rows: [] }));
-          if (resLink.rows.length > 0) resourceId = Number(resLink.rows[0].id);
-        }
 
         const result = await buildAvailabilitySlots({
           tenantId,
@@ -391,27 +376,18 @@ async function handleAction(action, tenantId, tenantSlug, customerId, customerEm
           date: normalizeDateInput(action.date),
           serviceId: Number(action.service_id),
           staffId: action.staff_id ? Number(action.staff_id) : null,
-          resourceId,
+          resourceId: action.resource_id ? Number(action.resource_id) : null,
           tenantTz,
-          service,
+          service: svcRes.rows[0],
         });
 
-        // Check meta reason for empty results
-        const reason = result.meta?.reason;
-        if (reason === "resource_required" || reason === "resource_required_for_availability") {
-          return { success: false, message: "This service requires a specific resource to be selected. Please book via the booking form." };
-        }
-        if (reason && reason !== "ok") {
-          return { success: true, slots: [], message: `No available slots on ${action.date} (${reason.replace(/_/g, " ")}).` };
-        }
-
         const allSlots = result.slots || result.times || [];
-        const available = allSlots.filter(s => s.is_available !== false && s.available !== false);
+        const available = allSlots.filter(s => s.is_available !== false);
 
         if (available.length === 0) {
-          return { success: true, slots: [], message: `No available slots on ${action.date}. All times may be booked or outside working hours.` };
+          return { success: true, slots: [], message: `No available slots on ${action.date}.` };
         }
-        return { success: true, slots: available.slice(0, 20), resourceId, message: null };
+        return { success: true, slots: available.slice(0, 20), message: null };
       } catch (e) {
         console.error("[AI check_availability error]", e);
         return { success: false, message: "Could not fetch availability right now." };
@@ -533,14 +509,55 @@ router.post("/:tenantSlug/chat", optionalAuth, async (req, res) => {
       );
     }
 
-    const finalReply = actionResult?.message
-      ? `${reply}\n\n${actionResult.message}`
-      : reply;
+    // If an action was executed, send the results back to Claude for a follow-up response
+    let finalReply = reply;
+    if (action && actionResult) {
+      let actionContext = "";
+
+      if (action.type === "check_availability") {
+        if (actionResult.success && actionResult.slots && actionResult.slots.length > 0) {
+          const slotTimes = actionResult.slots
+            .map(s => s.time || s.label)
+            .filter(Boolean)
+            .slice(0, 15)
+            .join(", ");
+          actionContext = `AVAILABILITY RESULT: Found ${actionResult.slots.length} available slots on ${action.date}: ${slotTimes}. The resource_id to use is ${actionResult.resourceId || action.resource_id || "auto-selected"}.`;
+        } else if (actionResult.success) {
+          actionContext = `AVAILABILITY RESULT: ${actionResult.message || `No available slots on ${action.date}.`}`;
+        } else {
+          actionContext = `AVAILABILITY RESULT: Failed — ${actionResult.message}`;
+        }
+      } else if (action.type === "create_booking") {
+        actionContext = actionResult.success
+          ? `BOOKING RESULT: ${actionResult.message}`
+          : `BOOKING RESULT: Failed — ${actionResult.message}`;
+      } else if (action.type === "cancel_booking") {
+        actionContext = actionResult.success
+          ? `CANCELLATION RESULT: ${actionResult.message}`
+          : `CANCELLATION RESULT: Failed — ${actionResult.message}`;
+      }
+
+      if (actionContext) {
+        // Second Claude call with the action results so it can respond naturally
+        const followUp = await runSupportAgent({
+          tenantContext: { ...tenant, ...businessContext },
+          customerData,
+          isSignedIn,
+          history: [
+            ...history,
+            { role: "user", content: message },
+            { role: "assistant", content: reply },
+            { role: "user", content: `[SYSTEM: ${actionContext}. Now respond to the customer based on these results. If showing available slots, list them clearly and ask which one they'd like. If confirming a booking, confirm all details clearly.]` },
+          ],
+          message: actionContext,
+        });
+        finalReply = followUp.reply;
+      }
+    }
 
     res.json({
       reply: finalReply,
       action: actionResult,
-      // Return slots so frontend can render them
       slots: actionResult?.slots || null,
     });
   } catch (err) {
