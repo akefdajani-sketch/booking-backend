@@ -212,32 +212,17 @@ async function fetchCustomerData(tenantId, email) {
   const customerId = customer.id;
 
   // Check which columns exist in bookings
-  const [
-    bHasDeletedAt, bHasPriceAmount, bHasChargeAmt, bHasCurrCode,
-    bHasPayMethod, bHasEndTime, bHasDuration, bHasResourceId, bHasStaffId,
-  ] = await Promise.all([
-    columnExists("bookings", "deleted_at"),
-    columnExists("bookings", "price_amount"),
-    columnExists("bookings", "charge_amount"),
-    columnExists("bookings", "currency_code"),
-    columnExists("bookings", "payment_method"),
-    columnExists("bookings", "end_time"),
-    columnExists("bookings", "duration_minutes"),
-    columnExists("bookings", "resource_id"),
-    columnExists("bookings", "staff_id"),
-  ]);
+  const hasDeletedAt   = await columnExists("bookings", "deleted_at");
+  const hasPriceAmount = await columnExists("bookings", "price_amount");
+  const hasChargeAmt   = await columnExists("bookings", "charge_amount");
+  const hasCurrCode    = await columnExists("bookings", "currency_code");
+  const hasPayMethod   = await columnExists("bookings", "payment_method");
 
-  const bPriceCol   = bHasPriceAmount ? "b.price_amount"   : "NULL::numeric AS price_amount";
-  const bChargeCol  = bHasChargeAmt   ? "b.charge_amount"  : "NULL::numeric AS charge_amount";
-  const bCurrCol    = bHasCurrCode    ? "b.currency_code"  : "NULL::text AS currency_code";
-  const bPayCol     = bHasPayMethod   ? "b.payment_method" : "NULL::text AS payment_method";
-  const bEndCol     = bHasEndTime     ? "b.end_time"       : "NULL::timestamptz AS end_time";
-  const bDurCol     = bHasDuration    ? "b.duration_minutes" : "NULL::int AS duration_minutes";
-  const bDeleteWhere= bHasDeletedAt   ? "AND b.deleted_at IS NULL" : "";
-  const bResJoin    = bHasResourceId  ? "LEFT JOIN resources r ON r.id = b.resource_id" : "";
-  const bStaffJoin  = bHasStaffId     ? "LEFT JOIN staff st ON st.id = b.staff_id" : "";
-  const bResName    = bHasResourceId  ? "r.name AS resource_name," : "NULL::text AS resource_name,";
-  const bStaffName  = bHasStaffId     ? "st.name AS staff_name"    : "NULL::text AS staff_name";
+  const priceCol   = hasPriceAmount ? "b.price_amount"  : "NULL::numeric AS price_amount";
+  const chargeCol  = hasChargeAmt   ? "b.charge_amount" : "NULL::numeric AS charge_amount";
+  const currCol    = hasCurrCode    ? "b.currency_code" : "NULL::text AS currency_code";
+  const payCol     = hasPayMethod   ? "b.payment_method": "NULL::text AS payment_method";
+  const deleteWhere= hasDeletedAt   ? "AND b.deleted_at IS NULL" : "";
 
   // Check customer_memberships columns
   const cmHasPlanId     = await columnExists("customer_memberships", "plan_id");
@@ -259,17 +244,17 @@ async function fetchCustomerData(tenantId, email) {
 
   const [bookingsRes, membershipsRes, packagesRes] = await Promise.all([
     db.query(
-      `SELECT b.id, b.status, b.start_time, ${bEndCol},
-              ${bDurCol}, ${bPriceCol}, ${bChargeCol},
-              ${bCurrCol}, ${bPayCol},
+      `SELECT b.id, b.status, b.start_time, b.end_time,
+              b.duration_minutes, ${priceCol}, ${chargeCol},
+              ${currCol}, ${payCol},
               s.name AS service_name, s.id AS service_id,
-              ${bResName} ${bStaffName}
+              r.name AS resource_name, st.name AS staff_name
        FROM bookings b
        LEFT JOIN services s ON s.id = b.service_id
-       ${bResJoin}
-       ${bStaffJoin}
+       LEFT JOIN resources r ON r.id = b.resource_id
+       LEFT JOIN staff st ON st.id = b.staff_id
        WHERE b.tenant_id = $1 AND b.customer_id = $2
-         ${bDeleteWhere}
+         ${deleteWhere}
        ORDER BY b.start_time DESC
        LIMIT 50`,
       [tenantId, customerId]
@@ -357,13 +342,39 @@ async function handleAction(action, tenantId, tenantSlug, customerId, customerEm
         return { success: false, message: "Need service and date to check availability." };
       }
       try {
-        const url = `http://localhost:${process.env.PORT || 5000}/api/availability?tenantSlug=${tenantSlug}&serviceId=${action.service_id}&date=${action.date}`;
-        const res = await fetch(url);
-        const data = await res.json();
-        const available = (data.slots || data.times || []).filter(s => s.is_available !== false);
-        if (available.length === 0) return { success: true, slots: [], message: `No available slots on ${action.date} for this service.` };
-        return { success: true, slots: available.slice(0, 10), message: null };
+        const { buildAvailabilitySlots, normalizeDateInput } = require("../utils/availabilityEngine");
+
+        // Get service details
+        const svcRes = await db.query(
+          `SELECT * FROM services WHERE id = $1 AND tenant_id = $2 LIMIT 1`,
+          [action.service_id, tenantId]
+        );
+        if (svcRes.rows.length === 0) return { success: false, message: "Service not found." };
+
+        // Get tenant timezone
+        const tzRes = await db.query(`SELECT timezone FROM tenants WHERE id = $1 LIMIT 1`, [tenantId]);
+        const tenantTz = tzRes.rows?.[0]?.timezone || "UTC";
+
+        const result = await buildAvailabilitySlots({
+          tenantId,
+          tenantSlug,
+          date: normalizeDateInput(action.date),
+          serviceId: Number(action.service_id),
+          staffId: action.staff_id ? Number(action.staff_id) : null,
+          resourceId: action.resource_id ? Number(action.resource_id) : null,
+          tenantTz,
+          service: svcRes.rows[0],
+        });
+
+        const allSlots = result.slots || result.times || [];
+        const available = allSlots.filter(s => s.is_available !== false);
+
+        if (available.length === 0) {
+          return { success: true, slots: [], message: `No available slots on ${action.date}.` };
+        }
+        return { success: true, slots: available.slice(0, 20), message: null };
       } catch (e) {
+        console.error("[AI check_availability error]", e);
         return { success: false, message: "Could not fetch availability right now." };
       }
     }
@@ -375,7 +386,7 @@ async function handleAction(action, tenantId, tenantSlug, customerId, customerEm
       }
 
       try {
-        // Get service details for duration
+        // Get service details
         const svcRes = await db.query(
           `SELECT id, name, duration_minutes, slot_interval_minutes
            FROM services WHERE id = $1 AND tenant_id = $2 LIMIT 1`,
@@ -384,21 +395,31 @@ async function handleAction(action, tenantId, tenantSlug, customerId, customerEm
         if (svcRes.rows.length === 0) return { success: false, message: "Service not found." };
         const svc = svcRes.rows[0];
 
-        const duration = action.duration_minutes || svc.slot_interval_minutes || svc.duration_minutes;
+        const slotInterval = svc.slot_interval_minutes || svc.duration_minutes;
+        const slots = action.slots || 1;
+        const duration = action.duration_minutes || (slotInterval * slots);
 
-        const url = `http://localhost:${process.env.PORT || 5000}/api/bookings`;
+        const start = new Date(action.start_time);
+        if (isNaN(start.getTime())) return { success: false, message: "Invalid start time." };
+        const end = new Date(start.getTime() + duration * 60000);
+
+        // Use the Render backend URL to create the booking via HTTP
+        // (keeps all booking logic, validation, rate calculation, and membership deduction intact)
+        const backendUrl = process.env.RENDER_EXTERNAL_URL ||
+          `https://${process.env.RENDER_SERVICE_NAME || "booking-backend-6jbc"}.onrender.com`;
+
         const payload = {
           tenantSlug,
           serviceId: action.service_id,
-          startTime: action.start_time,
+          startTime: start.toISOString(),
           durationMinutes: duration,
           resourceId: action.resource_id || null,
           staffId: action.staff_id || null,
           customerMembershipId: action.membership_id || null,
-          autoConsumeMembership: action.membership_id ? true : false,
+          autoConsumeMembership: !!action.membership_id,
         };
 
-        const bookingRes = await fetch(url, {
+        const bookingRes = await fetch(`${backendUrl}/api/bookings`, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
@@ -409,17 +430,18 @@ async function handleAction(action, tenantId, tenantSlug, customerId, customerEm
 
         const bookingData = await bookingRes.json();
         if (!bookingRes.ok) {
-          return { success: false, message: bookingData.error || "Booking failed. Please try again." };
+          return { success: false, message: bookingData.error || "Booking failed. Please try again or use the booking form." };
         }
 
+        const bookingId = bookingData.id || bookingData.booking?.id;
         return {
           success: true,
           booking: bookingData,
-          message: `✅ Your booking for ${svc.name} on ${new Date(action.start_time).toLocaleString()} has been confirmed! Booking ID: #${bookingData.id || bookingData.booking?.id}`,
+          message: `✅ Booking confirmed! ${svc.name} on ${start.toLocaleString("en-GB", { dateStyle: "medium", timeStyle: "short" })} for ${duration} min. Booking ID: #${bookingId}`,
         };
       } catch (e) {
         console.error("[AI create_booking error]", e);
-        return { success: false, message: "Could not create booking right now. Please try via the booking form." };
+        return { success: false, message: "Could not create booking right now. Please use the booking form directly." };
       }
     }
 
