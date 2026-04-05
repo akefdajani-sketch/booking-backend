@@ -45,8 +45,15 @@ async function fetchBusinessContext(tenantId, tenantSlug) {
   const hasAllowMem     = await columnExists("services", "allow_membership");
   const hasCategoryId   = await columnExists("services", "category_id");
   const hasPriceAmount  = await columnExists("services", "price_amount");
+  const hasPrice        = await columnExists("services", "price");
 
-  const priceCol       = hasPriceAmount ? "COALESCE(s.price_amount, s.price)" : "s.price";
+  const priceCol = hasPriceAmount && hasPrice
+    ? "COALESCE(s.price_amount, s.price)"
+    : hasPriceAmount
+    ? "s.price_amount"
+    : hasPrice
+    ? "s.price"
+    : "NULL::numeric";
   const descCol        = hasDescription ? "s.description" : "NULL::text AS description";
   const parallelCol    = hasMaxParallel ? "s.max_parallel_bookings" : "NULL::int AS max_parallel_bookings";
   const minSlotsCol    = hasMinSlots    ? "s.min_consecutive_slots" : "NULL::int AS min_consecutive_slots";
