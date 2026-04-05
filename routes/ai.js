@@ -605,12 +605,14 @@ router.post("/:tenantSlug/chat", optionalAuth, async (req, res) => {
       req.headers.authorization?.replace("Bearer ", "") ||
       req.cookies?.bf_session || null;
 
+    const isConfirmation = isConfirmationMessage(message);
     const { reply, action } = await runSupportAgent({
       tenantContext: { ...tenant, ...businessContext },
       customerData,
       isSignedIn,
       history,
       message,
+      confirmationMode: isConfirmation,
     });
 
     // Execute action if Claude requested one

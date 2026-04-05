@@ -285,14 +285,22 @@ RULES:
 }
 
 // ── Main agent ────────────────────────────────────────────────────────
-async function runSupportAgent({ tenantContext, customerData, isSignedIn, history, message }) {
+async function runSupportAgent({ tenantContext, customerData, isSignedIn, history, message, confirmationMode = false }) {
+  // When user is confirming a previously-discussed booking, inject an explicit instruction
+  // so Claude reliably outputs ACTION:create_booking with the correct IDs from context.
+  const confirmNote = confirmationMode
+    ? `
+
+[SYSTEM INSTRUCTION: The customer just confirmed. Output ACTION:{"type":"create_booking","service_id":X,"start_time":"ISO","duration_minutes":N,"resource_id":X,"membership_id":X_or_null,"prepaid_entitlement_id":X_or_null,"slots":N} immediately. Use exact IDs from the business context. Use the time the customer selected. Do NOT ask again.]`
+    : "";
+
   const response = await claude.messages.create({
     model: "claude-sonnet-4-6",
     max_tokens: 1500,
     system: buildSystemPrompt({ tenantContext, customerData, isSignedIn }),
     messages: [
       ...history,
-      { role: "user", content: message },
+      { role: "user", content: message + confirmNote },
     ],
   });
 
