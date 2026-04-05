@@ -212,17 +212,32 @@ async function fetchCustomerData(tenantId, email) {
   const customerId = customer.id;
 
   // Check which columns exist in bookings
-  const hasDeletedAt   = await columnExists("bookings", "deleted_at");
-  const hasPriceAmount = await columnExists("bookings", "price_amount");
-  const hasChargeAmt   = await columnExists("bookings", "charge_amount");
-  const hasCurrCode    = await columnExists("bookings", "currency_code");
-  const hasPayMethod   = await columnExists("bookings", "payment_method");
+  const [
+    bHasDeletedAt, bHasPriceAmount, bHasChargeAmt, bHasCurrCode,
+    bHasPayMethod, bHasEndTime, bHasDuration, bHasResourceId, bHasStaffId,
+  ] = await Promise.all([
+    columnExists("bookings", "deleted_at"),
+    columnExists("bookings", "price_amount"),
+    columnExists("bookings", "charge_amount"),
+    columnExists("bookings", "currency_code"),
+    columnExists("bookings", "payment_method"),
+    columnExists("bookings", "end_time"),
+    columnExists("bookings", "duration_minutes"),
+    columnExists("bookings", "resource_id"),
+    columnExists("bookings", "staff_id"),
+  ]);
 
-  const priceCol   = hasPriceAmount ? "b.price_amount"  : "NULL::numeric AS price_amount";
-  const chargeCol  = hasChargeAmt   ? "b.charge_amount" : "NULL::numeric AS charge_amount";
-  const currCol    = hasCurrCode    ? "b.currency_code" : "NULL::text AS currency_code";
-  const payCol     = hasPayMethod   ? "b.payment_method": "NULL::text AS payment_method";
-  const deleteWhere= hasDeletedAt   ? "AND b.deleted_at IS NULL" : "";
+  const bPriceCol   = bHasPriceAmount ? "b.price_amount"   : "NULL::numeric AS price_amount";
+  const bChargeCol  = bHasChargeAmt   ? "b.charge_amount"  : "NULL::numeric AS charge_amount";
+  const bCurrCol    = bHasCurrCode    ? "b.currency_code"  : "NULL::text AS currency_code";
+  const bPayCol     = bHasPayMethod   ? "b.payment_method" : "NULL::text AS payment_method";
+  const bEndCol     = bHasEndTime     ? "b.end_time"       : "NULL::timestamptz AS end_time";
+  const bDurCol     = bHasDuration    ? "b.duration_minutes" : "NULL::int AS duration_minutes";
+  const bDeleteWhere= bHasDeletedAt   ? "AND b.deleted_at IS NULL" : "";
+  const bResJoin    = bHasResourceId  ? "LEFT JOIN resources r ON r.id = b.resource_id" : "";
+  const bStaffJoin  = bHasStaffId     ? "LEFT JOIN staff st ON st.id = b.staff_id" : "";
+  const bResName    = bHasResourceId  ? "r.name AS resource_name," : "NULL::text AS resource_name,";
+  const bStaffName  = bHasStaffId     ? "st.name AS staff_name"    : "NULL::text AS staff_name";
 
   // Check customer_memberships columns
   const cmHasPlanId     = await columnExists("customer_memberships", "plan_id");
@@ -244,17 +259,17 @@ async function fetchCustomerData(tenantId, email) {
 
   const [bookingsRes, membershipsRes, packagesRes] = await Promise.all([
     db.query(
-      `SELECT b.id, b.status, b.start_time, b.end_time,
-              b.duration_minutes, ${priceCol}, ${chargeCol},
-              ${currCol}, ${payCol},
+      `SELECT b.id, b.status, b.start_time, ${bEndCol},
+              ${bDurCol}, ${bPriceCol}, ${bChargeCol},
+              ${bCurrCol}, ${bPayCol},
               s.name AS service_name, s.id AS service_id,
-              r.name AS resource_name, st.name AS staff_name
+              ${bResName} ${bStaffName}
        FROM bookings b
        LEFT JOIN services s ON s.id = b.service_id
-       LEFT JOIN resources r ON r.id = b.resource_id
-       LEFT JOIN staff st ON st.id = b.staff_id
+       ${bResJoin}
+       ${bStaffJoin}
        WHERE b.tenant_id = $1 AND b.customer_id = $2
-         ${deleteWhere}
+         ${bDeleteWhere}
        ORDER BY b.start_time DESC
        LIMIT 50`,
       [tenantId, customerId]
