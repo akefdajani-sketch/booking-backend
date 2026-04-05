@@ -473,28 +473,33 @@ async function handleAction(action, tenantId, tenantSlug, customerId, customerEm
         return { success: false, message: "Need service and start time to create a booking." };
       }
 
+      // Card/Cliq payments need the payment gateway UI — AI can only handle membership/cash
+      const paymentMethod = action.payment_method || null;
+      if (paymentMethod === "card" || paymentMethod === "cliq") {
+        return {
+          success: false, requiresUI: true,
+          message: "Card and Cliq payments need to go through the secure payment page. Please use the **Book now** button and select the same slot — I'll keep your preferences noted!",
+        };
+      }
+
       try {
-        // Get service details
         const svcRes = await db.query(
-          `SELECT id, name, duration_minutes, slot_interval_minutes
-           FROM services WHERE id = $1 AND tenant_id = $2 LIMIT 1`,
+          `SELECT * FROM services WHERE id = $1 AND tenant_id = $2 LIMIT 1`,
           [action.service_id, tenantId]
         );
         if (svcRes.rows.length === 0) return { success: false, message: "Service not found." };
         const svc = svcRes.rows[0];
 
-        const slotInterval = svc.slot_interval_minutes || svc.duration_minutes;
+        const slotInterval = svc.slot_interval_minutes || svc.duration_minutes || 60;
         const slots = action.slots || 1;
         const duration = action.duration_minutes || (slotInterval * slots);
 
         const start = new Date(action.start_time);
         if (isNaN(start.getTime())) return { success: false, message: "Invalid start time." };
-        const end = new Date(start.getTime() + duration * 60000);
 
-        // Use the Render backend URL to create the booking via HTTP
-        // (keeps all booking logic, validation, rate calculation, and membership deduction intact)
-        const backendUrl = process.env.RENDER_EXTERNAL_URL ||
-          `https://${process.env.RENDER_SERVICE_NAME || "booking-backend-6jbc"}.onrender.com`;
+        console.log(`[AI create_booking] tenant=${tenantId} service=${svc.name} start=${start.toISOString()} duration=${duration} resource=${action.resource_id} membership=${action.membership_id}`);
+
+        const backendUrl = (process.env.RENDER_EXTERNAL_URL || "https://booking-backend-6jbc.onrender.com").replace(/\/$/, "");
 
         const payload = {
           tenantSlug,
@@ -505,6 +510,7 @@ async function handleAction(action, tenantId, tenantSlug, customerId, customerEm
           staffId: action.staff_id || null,
           customerMembershipId: action.membership_id || null,
           autoConsumeMembership: !!action.membership_id,
+          paymentMethod: action.membership_id ? "membership" : "cash",
         };
 
         const bookingRes = await fetch(`${backendUrl}/api/bookings`, {
@@ -516,20 +522,27 @@ async function handleAction(action, tenantId, tenantSlug, customerId, customerEm
           body: JSON.stringify(payload),
         });
 
-        const bookingData = await bookingRes.json();
+        const bookingText = await bookingRes.text();
+        let bookingData;
+        try { bookingData = JSON.parse(bookingText); } catch { bookingData = {}; }
+        console.log(`[AI create_booking] status=${bookingRes.status} body=${bookingText.slice(0, 400)}`);
+
         if (!bookingRes.ok) {
-          return { success: false, message: bookingData.error || "Booking failed. Please try again or use the booking form." };
+          return { success: false, message: bookingData.error || bookingData.message || "Booking failed — please try using the booking form." };
         }
 
         const bookingId = bookingData.id || bookingData.booking?.id;
+        const tzRes = await db.query(`SELECT timezone FROM tenants WHERE id = $1 LIMIT 1`, [tenantId]);
+        const tz = tzRes.rows?.[0]?.timezone || "Asia/Amman";
+        const displayTime = start.toLocaleString("en-GB", { timeZone: tz, dateStyle: "full", timeStyle: "short" });
+
         return {
-          success: true,
-          booking: bookingData,
-          message: `✅ Booking confirmed! ${svc.name} on ${start.toLocaleString("en-GB", { dateStyle: "medium", timeStyle: "short" })} for ${duration} min. Booking ID: #${bookingId}`,
+          success: true, booking: bookingData, bookingId,
+          message: `✅ **Booking confirmed!**\n- **Service:** ${svc.name}\n- **When:** ${displayTime}\n- **Duration:** ${duration} min\n- **Booking ID:** #${bookingId}\n${action.membership_id ? "- **Paid with:** Membership credits" : "- **Payment:** Cash at venue"}`,
         };
       } catch (e) {
         console.error("[AI create_booking error]", e);
-        return { success: false, message: "Could not create booking right now. Please use the booking form directly." };
+        return { success: false, message: "Could not create booking. Please use the booking form directly." };
       }
     }
 
