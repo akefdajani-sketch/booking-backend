@@ -199,9 +199,17 @@ function buildSystemPrompt({ tenantContext, customerData, isSignedIn }) {
   const businessCtx  = buildBusinessContext(tenantContext);
   const customerCtx  = isSignedIn && customerData ? buildCustomerContext(customerData) : null;
 
+  // Inject current date/time in tenant timezone
+  const tenantTz = tenantContext.timezone || "Asia/Amman";
+  const now = new Date();
+  const todayStr = now.toLocaleDateString("en-CA", { timeZone: tenantTz }); // YYYY-MM-DD
+  const nowStr   = now.toLocaleString("en-GB", { timeZone: tenantTz, dateStyle: "full", timeStyle: "short" });
+
   const customerSection = customerCtx
     ? `\n\n${customerCtx}`
     : "\n\nCUSTOMER: Not signed in — provide general business information only. Do NOT reveal other customers' data.";
+
+  const dateContext = `\n\nCURRENT DATE & TIME: ${nowStr} (today's date for bookings: ${todayStr})\nWhen customer says "tomorrow", use ${new Date(now.getTime() + 86400000).toLocaleDateString("en-CA", { timeZone: tenantTz })}.\nAlways use YYYY-MM-DD format for dates in ACTION calls.`;
 
   const actionSection = `
 
@@ -211,9 +219,8 @@ ACTION:{"type":"action_name",...params}
 
 Available actions:
 1. Check availability:
-   ACTION:{"type":"check_availability","service_id":123,"date":"YYYY-MM-DD","resource_id":null,"staff_id":null}
-   - Include resource_id if the customer specified a simulator/room/resource, otherwise leave null (system will auto-select)
-   - Use this before confirming any booking. Always check before quoting a specific time.
+   ACTION:{"type":"check_availability","service_id":123,"date":"YYYY-MM-DD"}
+   Use this before confirming any booking. Always check before quoting a specific time.
 
 2. Create booking (only after customer confirms and you have checked availability):
    ACTION:{"type":"create_booking","service_id":123,"start_time":"2026-04-05T10:00:00","duration_minutes":60,"resource_id":null,"staff_id":null,"membership_id":null}
@@ -226,7 +233,7 @@ Available actions:
 
   return `You are the AI assistant for ${tenantContext.name}. You have full knowledge of this business and access to the signed-in customer's account data.
 
-${businessCtx}${customerSection}${actionSection}
+${businessCtx}${customerSection}${dateContext}${actionSection}
 
 RULES:
 - Use ONLY the real data above — never invent prices, services, times, or balances.
