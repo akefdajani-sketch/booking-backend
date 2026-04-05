@@ -8,6 +8,21 @@ const { runSupportAgent, generateLandingCopy } = require("../utils/claudeService
 const requireAppAuth = require("../middleware/requireAppAuth");
 
 const router = express.Router();
+// Detect when user is confirming a previously discussed booking
+function isConfirmationMessage(msg) {
+  if (!msg) return false;
+  const t = msg.toLowerCase().replace(/[!.?]/g, "").trim();
+  const patterns = [
+    "yes", "yeah", "yep", "sure", "ok", "okay", "confirm", "confirmed",
+    "go ahead", "book it", "do it", "please", "yes please", "yes confirm",
+    "create it", "make it", "perfect", "great", "correct", "that works",
+    "lets do it", "yes go ahead", "please do", "yes confirm it"
+  ];
+  // Also match emoji-suffixed versions like "Yes, confirm it checkmark"
+  const clean = t.replace(/[^a-z ,]/g, "").trim();
+  return patterns.some(p => clean === p || clean.startsWith(p + " ") || clean === "yes confirm it");
+}
+
 
 // ── Optional auth — sets req.googleUser/req.auth when token present, never blocks ──
 function optionalAuth(req, res, next) {
