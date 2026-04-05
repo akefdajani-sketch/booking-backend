@@ -359,35 +359,84 @@ async function handleAction(action, tenantId, tenantSlug, customerId, customerEm
       try {
         const { buildAvailabilitySlots, normalizeDateInput } = require("../utils/availabilityEngine");
 
-        // Get service details
+        // Get full service details (SELECT * needed for requires_resource, availability_basis etc.)
         const svcRes = await db.query(
           `SELECT * FROM services WHERE id = $1 AND tenant_id = $2 LIMIT 1`,
           [action.service_id, tenantId]
         );
         if (svcRes.rows.length === 0) return { success: false, message: "Service not found." };
+        const service = svcRes.rows[0];
 
         // Get tenant timezone
         const tzRes = await db.query(`SELECT timezone FROM tenants WHERE id = $1 LIMIT 1`, [tenantId]);
         const tenantTz = tzRes.rows?.[0]?.timezone || "UTC";
 
+        // Auto-pick resource if not provided
+        // Try resource_service_links first (explicit link), then any resource for tenant
+        let resourceId = action.resource_id ? Number(action.resource_id) : null;
+        if (!resourceId) {
+          // Try linked resources first
+          const linkedRes = await db.query(
+            `SELECT r.id FROM resources r
+             JOIN resource_service_links rsl ON rsl.resource_id = r.id
+             WHERE rsl.service_id = $1 AND r.tenant_id = $2
+               AND COALESCE(r.is_active, true) = true
+             ORDER BY r.id ASC LIMIT 1`,
+            [action.service_id, tenantId]
+          ).catch(() => ({ rows: [] }));
+
+          if (linkedRes.rows.length > 0) {
+            resourceId = Number(linkedRes.rows[0].id);
+          } else {
+            // Fall back to any active resource for this tenant
+            const anyRes = await db.query(
+              `SELECT id FROM resources
+               WHERE tenant_id = $1 AND COALESCE(is_active, true) = true
+               ORDER BY id ASC LIMIT 1`,
+              [tenantId]
+            ).catch(() => ({ rows: [] }));
+            if (anyRes.rows.length > 0) resourceId = Number(anyRes.rows[0].id);
+          }
+        }
+
+        const normalizedDate = normalizeDateInput(action.date);
+        console.log(`[AI availability] service=${action.service_id} date=${normalizedDate} resourceId=${resourceId} basis=${service.availability_basis}`);
+
         const result = await buildAvailabilitySlots({
           tenantId,
           tenantSlug,
-          date: normalizeDateInput(action.date),
+          date: normalizedDate,
           serviceId: Number(action.service_id),
           staffId: action.staff_id ? Number(action.staff_id) : null,
-          resourceId: action.resource_id ? Number(action.resource_id) : null,
+          resourceId,
           tenantTz,
-          service: svcRes.rows[0],
+          service,
         });
 
+        const reason = result.meta?.reason;
+        console.log(`[AI availability] reason=${reason} totalSlots=${(result.slots||[]).length}`);
+
+        if (reason && reason !== "ok" && reason !== "success") {
+          const reasonMap = {
+            tenant_closed: "The business is closed on that day.",
+            resource_required: "This service requires a specific resource selection.",
+            staff_required: "This service requires staff selection.",
+            no_working_hours: "No working hours configured for that day.",
+            invalid_working_hours: "Working hours configuration issue.",
+          };
+          return {
+            success: true, slots: [],
+            message: reasonMap[reason] || `No slots available (${reason.replace(/_/g, " ")}).`,
+          };
+        }
+
         const allSlots = result.slots || result.times || [];
-        const available = allSlots.filter(s => s.is_available !== false);
+        const available = allSlots.filter(s => s.is_available !== false && s.available !== false);
 
         if (available.length === 0) {
-          return { success: true, slots: [], message: `No available slots on ${action.date}.` };
+          return { success: true, slots: [], message: `No available slots on ${action.date}. The business may be closed or fully booked.` };
         }
-        return { success: true, slots: available.slice(0, 20), message: null };
+        return { success: true, slots: available.slice(0, 20), resourceId, message: null };
       } catch (e) {
         console.error("[AI check_availability error]", e);
         return { success: false, message: "Could not fetch availability right now." };
