@@ -4,16 +4,30 @@ const Anthropic = require("@anthropic-ai/sdk");
 const claude = new Anthropic();
 
 // ── Format business context ───────────────────────────────────────────
-function buildBusinessContext({ name, services = [], memberships = [], rates = [], workingHours = [], resources = [], staff = [], categories = [], prepaidProducts = [] }) {
+function buildBusinessContext({ name, services = [], memberships = [], rates = [], workingHours = [], resources = [], staff = [], categories = [], prepaidProducts = [], resourceLinks = [], staffLinks = [] }) {
 
   const DAY = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
   const DAY_SHORT = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
-  // Categories map
+  // Build lookup maps
   const catMap = {};
   categories.forEach(c => { catMap[c.id] = c.name; });
 
-  // Services
+  // Build resource map: service_id → [{ id, name }]
+  const serviceResourceMap = {};
+  resourceLinks.forEach(l => {
+    if (!serviceResourceMap[l.service_id]) serviceResourceMap[l.service_id] = [];
+    serviceResourceMap[l.service_id].push({ id: l.resource_id, name: l.resource_name });
+  });
+
+  // Build staff map: service_id → [{ id, name }]
+  const serviceStaffMap = {};
+  staffLinks.forEach(l => {
+    if (!serviceStaffMap[l.service_id]) serviceStaffMap[l.service_id] = [];
+    serviceStaffMap[l.service_id].push({ id: l.staff_id, name: l.staff_name });
+  });
+
+  // Services — include linked resources and staff per service
   const servicesBlock = services.length > 0
     ? services.map((s) => {
         const price = s.price != null
@@ -27,8 +41,21 @@ function buildBusinessContext({ name, services = [], memberships = [], rates = [
         const allowMem   = s.allow_membership ? "membership credits accepted" : null;
         const category   = s.category_id && catMap[s.category_id] ? `category: ${catMap[s.category_id]}` : null;
         const desc       = s.description ? `"${s.description}"` : null;
-        const details    = [duration, interval, price, maxSlots, minSlots, parallel, allowMem, category, desc].filter(Boolean).join(" | ");
-        return `  - ${s.name} [id:${s.id}]: ${details}`;
+
+        // Show which resources this service can use
+        const linkedResources = serviceResourceMap[s.id];
+        const resourcesStr = linkedResources && linkedResources.length > 0
+          ? `resources: ${linkedResources.map(r => `${r.name} [resource_id:${r.id}]`).join(", ")}`
+          : null;
+
+        // Show which staff can do this service
+        const linkedStaff = serviceStaffMap[s.id];
+        const staffStr = linkedStaff && linkedStaff.length > 0
+          ? `staff: ${linkedStaff.map(st => `${st.name} [staff_id:${st.id}]`).join(", ")}`
+          : null;
+
+        const details = [duration, interval, price, maxSlots, minSlots, parallel, allowMem, category, resourcesStr, staffStr, desc].filter(Boolean).join(" | ");
+        return `  - ${s.name} [service_id:${s.id}]: ${details}`;
       }).join("\n")
     : "  No services configured.";
 
@@ -219,17 +246,23 @@ ACTION:{"type":"action_name",...params}
 
 Available actions:
 1. Check availability:
-   ACTION:{"type":"check_availability","service_id":123,"date":"YYYY-MM-DD"}
-   Use this before confirming any booking. Always check before quoting a specific time.
+   ACTION:{"type":"check_availability","service_id":123,"date":"YYYY-MM-DD","resource_id":null,"staff_id":null}
+   - IMPORTANT: If the customer mentions a specific resource by name (e.g. "Simulator 3", "Room 2"), look up its resource_id from the SERVICE listing above (each service shows its linked resources with IDs) and include it.
+   - If customer mentions a specific staff member, look up their staff_id and include it.
+   - If no preference stated, leave resource_id and staff_id as null — the system will auto-select.
+   - Always check availability before confirming any time slot.
 
 2. Create booking (only after customer confirms and you have checked availability):
-   ACTION:{"type":"create_booking","service_id":123,"start_time":"2026-04-05T10:00:00","duration_minutes":60,"resource_id":null,"staff_id":null,"membership_id":null}
-   - start_time must be ISO 8601 format
-   - Include membership_id if customer wants to use their membership credits
+   ACTION:{"type":"create_booking","service_id":123,"start_time":"2026-04-06T17:00:00","duration_minutes":120,"resource_id":4,"staff_id":null,"membership_id":null,"slots":2}
+   - start_time: ISO 8601 in local time (e.g. 2026-04-06T17:00:00)
+   - duration_minutes: total booking duration (slot_interval × number of slots)
+   - slots: number of consecutive slots booked
+   - resource_id: use the exact resource_id from availability check result, or from service listing
+   - membership_id: include the customer's membership id if they want to use credits
 
 3. Cancel booking (only for upcoming bookings on the customer's account):
    ACTION:{"type":"cancel_booking","booking_id":456}
-   Always confirm with the customer before cancelling.`;
+   Always confirm details with the customer before cancelling.`;
 
   return `You are the AI assistant for ${tenantContext.name}. You have full knowledge of this business and access to the signed-in customer's account data.
 
@@ -237,14 +270,15 @@ ${businessCtx}${customerSection}${dateContext}${actionSection}
 
 RULES:
 - Use ONLY the real data above — never invent prices, services, times, or balances.
-- For pricing: quote exact amounts including applicable rate rules (peak hours, member rates, etc.).
-- For availability: always call check_availability before quoting a specific slot. Never assume a slot is free.
-- For bookings: confirm service, date, time, and price with customer BEFORE creating the booking.
-- For membership use: if the customer has an active membership that covers the service, mention they can use it.
-- When cancelling: confirm which booking (show the details) and ask "Shall I go ahead?" before acting.
+- RESOURCES: Each service listing above shows exactly which resources (simulators, rooms, etc.) it can use with their IDs. When a customer requests a specific resource by name, find its resource_id from the service listing and pass it in the ACTION.
+- PRICING: Always calculate and quote prices using the rate rules above. Peak hours, member discounts, and time-based pricing all apply. Tell the customer the exact price before confirming.
+- MEMBERSHIP: If the customer has an active membership with remaining balance, proactively mention they can use it. Include membership_id in the create_booking ACTION if they want to.
+- AVAILABILITY: Always call check_availability before confirming any slot. Pass the specific resource_id if the customer named a resource.
+- BOOKING FLOW: 1) Check availability → 2) Show available slots → 3) Confirm details + price with customer → 4) Create booking only after explicit customer confirmation.
+- CANCELLATION: Always show booking details and ask "Shall I go ahead and cancel?" before acting.
 - Be concise, warm, and professional. Use bullet points for lists.
 - If you don't know something not in the data, say so honestly.
-- Always end with a clear next step.`;
+- Always end with a clear next step or question.`;
 }
 
 // ── Main agent ────────────────────────────────────────────────────────

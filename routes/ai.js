@@ -89,7 +89,7 @@ async function fetchBusinessContext(tenantId, tenantSlug) {
   const mpCurrencyCol = hasMpCurrency    ? "currency"        : "NULL::text AS currency";
   const mpDescCol     = hasMpDescription ? "description"     : "NULL::text AS description";
 
-  const [servicesRes, membershipsRes, ratesRes, hoursRes, resourcesRes, staffRes, categoriesRes, packagesCheckRes] =
+  const [servicesRes, membershipsRes, ratesRes, hoursRes, resourcesRes, staffRes, categoriesRes, packagesCheckRes, resourceLinksRes, staffLinksRes] =
     await Promise.all([
       db.query(
         `SELECT s.id, s.name, ${descCol},
@@ -115,7 +115,7 @@ async function fetchBusinessContext(tenantId, tenantSlug) {
       ).catch(() => ({ rows: [] })),
 
       db.query(
-        `SELECT r.name, r.price_type, r.amount, r.currency_code,
+        `SELECT r.id, r.name, r.price_type, r.amount, r.currency_code,
                 r.days_of_week, r.time_start, r.time_end,
                 r.date_start, r.date_end,
                 r.min_duration_mins, r.max_duration_mins,
@@ -166,6 +166,28 @@ async function fetchBusinessContext(tenantId, tenantSlug) {
       db.query(
         `SELECT to_regclass('public.prepaid_products') AS prod`
       ).catch(() => ({ rows: [{ prod: null }] })),
+
+      // Resource ↔ Service links (which simulators/rooms work with which services)
+      db.query(
+        `SELECT rsl.resource_id, rsl.service_id,
+                r.name AS resource_name, s.name AS service_name
+         FROM resource_service_links rsl
+         JOIN resources r ON r.id = rsl.resource_id
+         JOIN services s ON s.id = rsl.service_id
+         WHERE rsl.tenant_id = $1`,
+        [tenantId]
+      ).catch(() => ({ rows: [] })),
+
+      // Staff ↔ Service links (which staff can do which services)
+      db.query(
+        `SELECT ssl.staff_id, ssl.service_id,
+                st.name AS staff_name, s.name AS service_name
+         FROM staff_service_links ssl
+         JOIN staff st ON st.id = ssl.staff_id
+         JOIN services s ON s.id = ssl.service_id
+         WHERE ssl.tenant_id = $1`,
+        [tenantId]
+      ).catch(() => ({ rows: [] })),
     ]);
 
   const hasPrePaid = !!packagesCheckRes.rows?.[0]?.prod;
@@ -192,6 +214,8 @@ async function fetchBusinessContext(tenantId, tenantSlug) {
     staff: staffRes.rows,
     categories: categoriesRes.rows,
     prepaidProducts,
+    resourceLinks: resourceLinksRes.rows,   // resource ↔ service mappings
+    staffLinks: staffLinksRes.rows,         // staff ↔ service mappings
   };
 }
 
