@@ -38,46 +38,76 @@ async function columnExists(table, column) {
 
 // ── Fetch full business context ───────────────────────────────────────
 async function fetchBusinessContext(tenantId, tenantSlug) {
-  // Services — use COALESCE for columns that may not exist in older schemas
-  const hasDescription  = await columnExists("services", "description");
-  const hasMaxParallel  = await columnExists("services", "max_parallel_bookings");
-  const hasMinSlots     = await columnExists("services", "min_consecutive_slots");
-  const hasAllowMem     = await columnExists("services", "allow_membership");
-  const hasCategoryId   = await columnExists("services", "category_id");
-  const hasPriceAmount  = await columnExists("services", "price_amount");
-  const hasPrice        = await columnExists("services", "price");
+  // Check every column before using it — schema varies between installs
+  const [
+    hasDescription, hasMaxParallel, hasMinSlots, hasAllowMem,
+    hasCategoryId, hasPriceAmount, hasPrice, hasCurrencyCode,
+    hasSlotInterval, hasMaxConsec, hasDeletedAt,
+    // membership_plans columns
+    hasMpBillingType, hasMpIncMins, hasMpIncUses, hasMpValidity,
+    hasMpCurrency, hasMpDescription,
+    // services allow_membership
+  ] = await Promise.all([
+    columnExists("services", "description"),
+    columnExists("services", "max_parallel_bookings"),
+    columnExists("services", "min_consecutive_slots"),
+    columnExists("services", "allow_membership"),
+    columnExists("services", "category_id"),
+    columnExists("services", "price_amount"),
+    columnExists("services", "price"),
+    columnExists("services", "currency_code"),
+    columnExists("services", "slot_interval_minutes"),
+    columnExists("services", "max_consecutive_slots"),
+    columnExists("services", "deleted_at"),
+    columnExists("membership_plans", "billing_type"),
+    columnExists("membership_plans", "included_minutes"),
+    columnExists("membership_plans", "included_uses"),
+    columnExists("membership_plans", "validity_days"),
+    columnExists("membership_plans", "currency"),
+    columnExists("membership_plans", "description"),
+  ]);
 
-  const priceCol = hasPriceAmount && hasPrice
-    ? "COALESCE(s.price_amount, s.price)"
-    : hasPriceAmount
-    ? "s.price_amount"
-    : hasPrice
-    ? "s.price"
-    : "NULL::numeric";
-  const descCol        = hasDescription ? "s.description" : "NULL::text AS description";
-  const parallelCol    = hasMaxParallel ? "s.max_parallel_bookings" : "NULL::int AS max_parallel_bookings";
-  const minSlotsCol    = hasMinSlots    ? "s.min_consecutive_slots" : "NULL::int AS min_consecutive_slots";
-  const allowMemCol    = hasAllowMem    ? "s.allow_membership" : "false AS allow_membership";
-  const categoryCol    = hasCategoryId  ? "s.category_id" : "NULL::int AS category_id";
+  const priceCol      = hasPriceAmount && hasPrice ? "COALESCE(s.price_amount, s.price)"
+                      : hasPriceAmount ? "s.price_amount"
+                      : hasPrice ? "s.price"
+                      : "NULL::numeric";
+  const currCol       = hasCurrencyCode  ? "s.currency_code"         : "NULL::text AS currency_code";
+  const descCol       = hasDescription   ? "s.description"           : "NULL::text AS description";
+  const parallelCol   = hasMaxParallel   ? "s.max_parallel_bookings" : "NULL::int AS max_parallel_bookings";
+  const minSlotsCol   = hasMinSlots      ? "s.min_consecutive_slots" : "NULL::int AS min_consecutive_slots";
+  const allowMemCol   = hasAllowMem      ? "s.allow_membership"      : "false AS allow_membership";
+  const categoryCol   = hasCategoryId    ? "s.category_id"           : "NULL::int AS category_id";
+  const slotIntCol    = hasSlotInterval  ? "s.slot_interval_minutes" : "NULL::int AS slot_interval_minutes";
+  const maxConsecCol  = hasMaxConsec     ? "s.max_consecutive_slots" : "NULL::int AS max_consecutive_slots";
+  const deletedWhere  = hasDeletedAt     ? "AND s.deleted_at IS NULL" : "";
+
+  // membership_plans safe columns
+  const mpBillingCol  = hasMpBillingType ? "billing_type"    : "NULL::text AS billing_type";
+  const mpIncMinsCol  = hasMpIncMins     ? "included_minutes": "NULL::int AS included_minutes";
+  const mpIncUsesCol  = hasMpIncUses     ? "included_uses"   : "NULL::int AS included_uses";
+  const mpValidityCol = hasMpValidity    ? "validity_days"   : "NULL::int AS validity_days";
+  const mpCurrencyCol = hasMpCurrency    ? "currency"        : "NULL::text AS currency";
+  const mpDescCol     = hasMpDescription ? "description"     : "NULL::text AS description";
 
   const [servicesRes, membershipsRes, ratesRes, hoursRes, resourcesRes, staffRes, categoriesRes, packagesCheckRes] =
     await Promise.all([
       db.query(
         `SELECT s.id, s.name, ${descCol},
-                s.duration_minutes, s.slot_interval_minutes,
-                s.max_consecutive_slots, ${minSlotsCol},
-                ${priceCol} AS price, s.currency_code,
+                s.duration_minutes, ${slotIntCol},
+                ${maxConsecCol}, ${minSlotsCol},
+                ${priceCol} AS price, ${currCol},
                 ${parallelCol}, ${allowMemCol}, ${categoryCol}
          FROM services s
          WHERE s.tenant_id = $1 AND COALESCE(s.is_active, true) = true
-           AND COALESCE(s.deleted_at IS NULL, true)
+           ${deletedWhere}
          ORDER BY s.name ASC`,
         [tenantId]
       ),
 
       db.query(
-        `SELECT id, name, description, billing_type, price, currency,
-                included_minutes, included_uses, validity_days, is_active
+        `SELECT id, name, ${mpDescCol}, ${mpBillingCol}, price,
+                ${mpCurrencyCol}, ${mpIncMinsCol}, ${mpIncUsesCol},
+                ${mpValidityCol}, is_active
          FROM membership_plans
          WHERE tenant_id = $1 AND COALESCE(is_active, true) = true
          ORDER BY name ASC`,
