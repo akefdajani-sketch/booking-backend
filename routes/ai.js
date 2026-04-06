@@ -23,6 +23,111 @@ function isConfirmationMessage(msg) {
   return patterns.some(p => clean === p || clean.startsWith(p + " ") || clean === "yes confirm it");
 }
 
+// Parse a booking action directly from conversation history
+// Used when user confirms - bypasses Claude entirely
+function parseBookingFromHistory(history, businessContext, customerData, tenantTz) {
+  try {
+    const services = businessContext.services || [];
+    const resources = businessContext.resources || [];
+    const memberships = customerData?.memberships || [];
+
+    // Find last assistant message asking for confirmation
+    const confMsg = [...history].reverse().find(m =>
+      m.role === "assistant" &&
+      /shall i|confirm this|go ahead and confirm|confirm the booking/i.test(m.content)
+    );
+    if (!confMsg) return null;
+    const text = confMsg.content;
+
+    // Extract service name (after "Service:" or "Booking:")
+    const svcMatch = text.match(/service[:\s*•\-]+([^
+]+)/i);
+    const svcName = svcMatch?.[1]?.trim().replace(/\*\*/g, "").split("(")[0].trim();
+
+    // Find matching service by name
+    const service = services.find(s =>
+      svcName && (
+        s.name.toLowerCase() === svcName.toLowerCase() ||
+        s.name.toLowerCase().includes(svcName.toLowerCase()) ||
+        svcName.toLowerCase().includes(s.name.toLowerCase())
+      )
+    );
+    if (!service) { console.log("[parseBooking] no service match for:", svcName); return null; }
+
+    // Extract full date (e.g. "Tuesday, 7 April 2026" or "7 April 2026")
+    const dateMatch = text.match(/(\d{1,2})\s+(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{4})/i);
+    if (!dateMatch) { console.log("[parseBooking] no date found"); return null; }
+    const [, day, monthStr, year] = dateMatch;
+    const monthMap = {january:0,february:1,march:2,april:3,may:4,june:5,july:6,august:7,september:8,october:9,november:10,december:11};
+    const monthNum = monthMap[monthStr.toLowerCase()];
+
+    // Extract start time (e.g. "5:00 PM" from "5:00 PM – 6:00 PM" or "Time: 5:00 PM")
+    const timeMatch = text.match(/(\d{1,2}):(\d{2})\s*(AM|PM)/i);
+    if (!timeMatch) { console.log("[parseBooking] no time found"); return null; }
+    let [, h, m, ampm] = timeMatch;
+    h = parseInt(h); m = parseInt(m);
+    if (ampm.toUpperCase() === "PM" && h !== 12) h += 12;
+    if (ampm.toUpperCase() === "AM" && h === 12) h = 0;
+
+    // Build start_time as ISO with explicit timezone offset
+    // so booking route parses it correctly regardless of server timezone
+    const getOffset = (tz) => {
+      try {
+        const now = new Date();
+        const tzD = new Date(now.toLocaleString("en-US", { timeZone: tz }));
+        const utcD = new Date(now.toLocaleString("en-US", { timeZone: "UTC" }));
+        const offMin = Math.round((tzD - utcD) / 60000);
+        const sign = offMin >= 0 ? "+" : "-";
+        const abs = Math.abs(offMin);
+        return `${sign}${String(Math.floor(abs/60)).padStart(2,"0")}:${String(abs%60).padStart(2,"0")}`;
+      } catch { return "+00:00"; }
+    };
+    const offset = getOffset(tenantTz || "Asia/Amman");
+    const pad = n => String(n).padStart(2, "0");
+    const startTimeStr = `${year}-${pad(monthNum+1)}-${pad(parseInt(day))}T${pad(h)}:${pad(m)}:00${offset}`;
+
+    // Extract resource/simulator name
+    const simMatch = text.match(/(?:simulator|room|resource|bay)[:\s*•\-]+([^
+]+)/i);
+    const simName = simMatch?.[1]?.trim().replace(/\*\*/g, "").split("
+")[0].trim();
+    const resource = resources.find(r =>
+      simName && (
+        r.name.toLowerCase() === simName.toLowerCase() ||
+        r.name.toLowerCase().includes(simName.toLowerCase()) ||
+        simName.toLowerCase().includes(r.name.toLowerCase())
+      )
+    );
+
+    // Check if membership was mentioned and customer has one
+    const usesMembership = /membership|credits/i.test(text);
+    const activeMembership = memberships.find(m =>
+      (m.status === "active" || m.status === "Active") &&
+      ((m.minutes_remaining != null && m.minutes_remaining > 0) ||
+       (m.uses_remaining != null && m.uses_remaining > 0))
+    );
+
+    const slotInterval = service.slot_interval_minutes || service.duration_minutes || 60;
+
+    const parsed = {
+      type: "create_booking",
+      service_id: service.id,
+      start_time: startTimeStr,
+      duration_minutes: slotInterval,
+      resource_id: resource?.id || null,
+      membership_id: (usesMembership && activeMembership) ? activeMembership.id : null,
+      slots: 1,
+    };
+    console.log("[parseBooking] parsed action:", JSON.stringify(parsed));
+    return parsed;
+  } catch (e) {
+    console.error("[parseBooking error]", e.message);
+    return null;
+  }
+}
+
+
+
 
 // ── Optional auth — sets req.googleUser/req.auth when token present, never blocks ──
 function optionalAuth(req, res, next) {
@@ -621,14 +726,39 @@ router.post("/:tenantSlug/chat", optionalAuth, async (req, res) => {
       req.cookies?.bf_session || null;
 
     const isConfirmation = isConfirmationMessage(message);
-    const { reply, action } = await runSupportAgent({
-      tenantContext: { ...tenant, ...businessContext },
-      customerData,
-      isSignedIn,
-      history,
-      message,
-      confirmationMode: isConfirmation,
-    });
+    let reply, action;
+
+    if (isConfirmation) {
+      // Try to parse booking directly from history — much more reliable than asking Claude
+      const parsedAction = parseBookingFromHistory(
+        history,
+        businessContext,
+        customerData,
+        tenant.timezone || "Asia/Amman"
+      );
+
+      if (parsedAction) {
+        console.log("[AI] Confirmation detected — executing parsed booking directly");
+        reply = "";
+        action = parsedAction;
+      } else {
+        // Could not parse — fall back to Claude with explicit instruction
+        console.log("[AI] Confirmation detected but could not parse — asking Claude with instruction");
+        const result = await runSupportAgent({
+          tenantContext: { ...tenant, ...businessContext },
+          customerData, isSignedIn, history, message, confirmationMode: true,
+        });
+        reply = result.reply;
+        action = result.action;
+      }
+    } else {
+      const result = await runSupportAgent({
+        tenantContext: { ...tenant, ...businessContext },
+        customerData, isSignedIn, history, message,
+      });
+      reply = result.reply;
+      action = result.action;
+    }
 
     // Execute action if Claude requested one
     let actionResult = null;
