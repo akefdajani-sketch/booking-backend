@@ -171,6 +171,9 @@ app.use("/api/bookings", bookingCreateLimiter, bookingsRouter);
 // PR-2: availability is fully public — rate-limit it.
 app.use("/api/availability", availabilityLimiter, availabilityRouter);
 
+// RENTAL-1: nightly rental availability check + blocked-dates calendar feed.
+app.use("/api/rental-availability", availabilityLimiter, require("./routes/rentalAvailability"));
+
 app.use("/api/membership-plans", membershipPlansRouter);
 app.use("/api/customer-memberships", customerMembershipsRouter);
 
