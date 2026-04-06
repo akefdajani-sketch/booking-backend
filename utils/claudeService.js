@@ -240,11 +240,34 @@ function buildSystemPrompt({ tenantContext, customerData, isSignedIn }) {
   const todayStr = now.toLocaleDateString("en-CA", { timeZone: tenantTz }); // YYYY-MM-DD
   const nowStr   = now.toLocaleString("en-GB", { timeZone: tenantTz, dateStyle: "full", timeStyle: "short" });
 
+  // Compute the UTC offset string for this timezone at this moment (e.g. "+03:00", "-05:00")
+  // This is injected into prompts so Claude always produces correctly-offset ISO timestamps.
+  const tzOffsetStr = (() => {
+    try {
+      // Use Intl to extract the numeric offset. "longOffset" gives "GMT+3" or "GMT+5:30" etc.
+      const offsetPart = new Intl.DateTimeFormat("en", {
+        timeZone: tenantTz,
+        timeZoneName: "longOffset",
+      }).formatToParts(now).find(p => p.type === "timeZoneName")?.value || "GMT+0";
+      // offsetPart examples: "GMT+3", "GMT+5:30", "GMT-5", "GMT+0"
+      const match = offsetPart.match(/GMT([+\-])(\d+)(?::(\d{2}))?/);
+      if (!match) return "+00:00";
+      const sign   = match[1];
+      const hours  = match[2].padStart(2, "0");
+      const mins   = (match[3] || "00").padStart(2, "00");
+      return `${sign}${hours}:${mins}`;
+    } catch {
+      return "+00:00";
+    }
+  })();
+
+  const exampleDate = todayStr; // use today's date in examples so it's always current-looking
+
   const customerSection = customerCtx
     ? `\n\n${customerCtx}`
     : "\n\nCUSTOMER: Not signed in — provide general business information only. Do NOT reveal other customers' data.";
 
-  const dateContext = `\n\nCURRENT DATE & TIME: ${nowStr} (today's date for bookings: ${todayStr})\nWhen customer says "tomorrow", use ${new Date(now.getTime() + 86400000).toLocaleDateString("en-CA", { timeZone: tenantTz })}.\nAlways use YYYY-MM-DD format for dates in ACTION calls.`;
+  const dateContext = `\n\nCURRENT DATE & TIME: ${nowStr} (today's date for bookings: ${todayStr})\nBusiness timezone: ${tenantTz} (UTC offset: ${tzOffsetStr})\nWhen customer says "tomorrow", use ${new Date(now.getTime() + 86400000).toLocaleDateString("en-CA", { timeZone: tenantTz })}.\nAlways use YYYY-MM-DD format for dates in ACTION calls.`;
 
   const actionSection = `
 
@@ -261,8 +284,9 @@ Available actions:
    - Always check availability before confirming any time slot.
 
 2. Create booking (only after customer confirms and you have checked availability):
-   ACTION:{"type":"create_booking","service_id":123,"start_time":"2026-04-06T17:00:00","duration_minutes":120,"resource_id":4,"staff_id":null,"membership_id":null,"prepaid_entitlement_id":null,"slots":2}
-   - start_time: ISO 8601 in local time (e.g. 2026-04-06T17:00:00)
+   ACTION:{"type":"create_booking","service_id":123,"start_time":"${exampleDate}T17:00:00${tzOffsetStr}","duration_minutes":120,"resource_id":4,"staff_id":null,"membership_id":null,"prepaid_entitlement_id":null,"slots":2}
+   - start_time: ISO 8601 with the business UTC offset — ALWAYS include ${tzOffsetStr} at the end (e.g. ${exampleDate}T17:00:00${tzOffsetStr})
+   - CRITICAL: Never omit the timezone offset from start_time. The offset for this business is ${tzOffsetStr}.
    - duration_minutes: total booking duration (slot_interval × number of slots)
    - slots: number of consecutive slots booked
    - resource_id: use the exact resource_id from availability check result, or from service listing
@@ -285,8 +309,8 @@ RULES:
 - AVAILABILITY: Always call check_availability before confirming any slot. Pass the specific resource_id if the customer named a resource.
 - BOOKING FLOW: 1) Check availability → 2) Show available slots → 3) Confirm details + price with customer → 4) Create booking only after explicit customer confirmation.
 - PENDING_BOOKING REQUIRED: Whenever you are presenting booking details and asking "Shall I confirm this booking?", you MUST append this line at the very end of your message (after all other text), on its own line, with no extra characters before or after:
-PENDING_BOOKING:{"service_id":SERVICE_ID_NUMBER,"start_time":"2026-MM-DDTHH:MM:00+03:00","resource_id":RESOURCE_ID_OR_NULL,"membership_id":MEMBERSHIP_ID_OR_NULL,"duration_minutes":DURATION_NUMBER}
-Replace values with exact numbers from the business context. membership_id is null if cash payment. This line is parsed by the system and not displayed.
+PENDING_BOOKING:{"service_id":SERVICE_ID_NUMBER,"start_time":"YYYY-MM-DDTHH:MM:00${tzOffsetStr}","resource_id":RESOURCE_ID_OR_NULL,"membership_id":MEMBERSHIP_ID_OR_NULL,"duration_minutes":DURATION_NUMBER}
+Replace values with exact numbers from the business context. ALWAYS append the timezone offset ${tzOffsetStr} to start_time — never omit it. membership_id is null if cash payment. This line is parsed by the system and not displayed.
 - CONFIRMATION CRITICAL: When the customer says YES to confirming a booking (any of: "yes", "confirm", "go ahead", "book it", "do it", "yes please", "confirm it"), you MUST output ACTION:{...create_booking...} immediately with all booking details from the conversation. Do NOT just say "I'll do it" or "creating now" - output the ACTION line directly.
 - PACKAGE PAYMENT: If the customer has a prepaid package with remaining sessions, offer to use it. Include prepaid_entitlement_id from their [package id:X] in the ACTION.
 - CANCELLATION: Always show booking details and ask "Shall I go ahead and cancel?" before acting.
