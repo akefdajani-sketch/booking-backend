@@ -23,114 +23,6 @@ function isConfirmationMessage(msg) {
   return patterns.some(p => clean === p || clean.startsWith(p + " ") || clean === "yes confirm it");
 }
 
-// Parse a booking action directly from conversation history
-// Used when user confirms - bypasses Claude entirely for reliability
-function parseBookingFromHistory(history, businessContext, customerData, tenantTz) {
-  try {
-    const services = businessContext.services || [];
-    const resources = businessContext.resources || [];
-    const memberships = customerData?.memberships || [];
-
-    // Find last assistant message asking for confirmation
-    const confMsg = [...history].reverse().find(m =>
-      m.role === "assistant" &&
-      /shall i|confirm this|go ahead and confirm|confirm the booking/i.test(m.content)
-    );
-    if (!confMsg) return null;
-    const text = confMsg.content;
-
-    // Extract service name — look for "Service: Golf Simulator" on a line
-    let svcName = null;
-    for (const line of text.split("\n")) {
-      const m = line.match(/service[:\s]+(.+)/i);
-      if (m) { svcName = m[1].trim().replace(/\*\*/g, "").split("(")[0].trim(); break; }
-    }
-
-    // Find matching service by name (case-insensitive partial match)
-    const service = services.find(s =>
-      svcName && (
-        s.name.toLowerCase() === svcName.toLowerCase() ||
-        s.name.toLowerCase().includes(svcName.toLowerCase()) ||
-        svcName.toLowerCase().includes(s.name.toLowerCase())
-      )
-    );
-    if (!service) { console.log("[parseBooking] no service match for:", svcName); return null; }
-
-    // Extract date: "7 April 2026" or "Tuesday, 7 April 2026"
-    const dateMatch = text.match(/(\d{1,2})\s+(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{4})/i);
-    if (!dateMatch) { console.log("[parseBooking] no date found in:", text.slice(0,200)); return null; }
-    const [, day, monthStr, year] = dateMatch;
-    const monthMap = {january:0,february:1,march:2,april:3,may:4,june:5,july:6,august:7,september:8,october:9,november:10,december:11};
-    const monthNum = monthMap[monthStr.toLowerCase()];
-
-    // Extract start time: first "5:00 PM" occurrence (take first, not second for range "5pm-6pm")
-    const timeMatch = text.match(/(\d{1,2}):(\d{2})\s*(AM|PM)/i);
-    if (!timeMatch) { console.log("[parseBooking] no time found"); return null; }
-    let [, h, mm, ampm] = timeMatch;
-    h = parseInt(h); mm = parseInt(mm);
-    if (ampm.toUpperCase() === "PM" && h !== 12) h += 12;
-    if (ampm.toUpperCase() === "AM" && h === 12) h = 0;
-
-    // Get timezone offset string e.g. "+03:00"
-    const getOffset = (tz) => {
-      try {
-        const now = new Date();
-        const tzD = new Date(now.toLocaleString("en-US", { timeZone: tz }));
-        const utcD = new Date(now.toLocaleString("en-US", { timeZone: "UTC" }));
-        const offMin = Math.round((tzD - utcD) / 60000);
-        const sign = offMin >= 0 ? "+" : "-";
-        const abs = Math.abs(offMin);
-        const hh = String(Math.floor(abs/60)).padStart(2,"0");
-        const mn = String(abs%60).padStart(2,"0");
-        return sign + hh + ":" + mn;
-      } catch { return "+00:00"; }
-    };
-    const offset = getOffset(tenantTz || "Asia/Amman");
-    const pad = n => String(n).padStart(2, "0");
-    const startTimeStr = year + "-" + pad(monthNum+1) + "-" + pad(parseInt(day)) + "T" + pad(h) + ":" + pad(mm) + ":00" + offset;
-
-    // Extract resource/simulator name
-    let simName = null;
-    for (const line of text.split("\n")) {
-      const m = line.match(/(?:simulator|room|resource|bay)[:\s]+(.+)/i);
-      if (m) { simName = m[1].trim().replace(/\*\*/g, "").split("\n")[0].trim(); break; }
-    }
-    const resource = resources.find(r =>
-      simName && (
-        r.name.toLowerCase() === simName.toLowerCase() ||
-        r.name.toLowerCase().includes(simName.toLowerCase()) ||
-        simName.toLowerCase().includes(r.name.toLowerCase())
-      )
-    );
-
-    // Check if membership was mentioned in the confirmation message
-    const usesMembership = /membership|credits/i.test(text);
-    const activeMembership = memberships.find(m =>
-      (m.status === "active" || m.status === "Active") &&
-      ((m.minutes_remaining != null && m.minutes_remaining > 0) ||
-       (m.uses_remaining != null && m.uses_remaining > 0))
-    );
-
-    const slotInterval = service.slot_interval_minutes || service.duration_minutes || 60;
-
-    const parsed = {
-      type: "create_booking",
-      service_id: service.id,
-      start_time: startTimeStr,
-      duration_minutes: slotInterval,
-      resource_id: resource ? resource.id : null,
-      membership_id: (usesMembership && activeMembership) ? activeMembership.id : null,
-      slots: 1,
-    };
-    console.log("[parseBooking] parsed action:", JSON.stringify(parsed));
-    return parsed;
-  } catch (e) {
-    console.error("[parseBooking error]", e.message);
-    return null;
-  }
-}
-
-
 
 // ── Optional auth — sets req.googleUser/req.auth when token present, never blocks ──
 function optionalAuth(req, res, next) {
@@ -708,7 +600,7 @@ async function handleAction(action, tenantId, tenantSlug, customerId, customerEm
 // ── POST /api/ai/:tenantSlug/chat ─────────────────────────────────────
 router.post("/:tenantSlug/chat", optionalAuth, async (req, res) => {
   try {
-    const { message, history = [], authToken: clientAuthToken } = req.body;
+    const { message, history = [], authToken: clientAuthToken, pendingAction } = req.body;
     if (!message || typeof message !== "string") {
       return res.status(400).json({ error: "message is required" });
     }
@@ -728,33 +620,32 @@ router.post("/:tenantSlug/chat", optionalAuth, async (req, res) => {
       req.headers.authorization?.replace("Bearer ", "") ||
       req.cookies?.bf_session || null;
 
-    const isConfirmation = isConfirmationMessage(message);
-    let reply, action;
-
-    if (isConfirmation) {
-      const parsedAction = parseBookingFromHistory(
-        history, businessContext, customerData,
-        tenant.timezone || "Asia/Amman"
+    // ── DIRECT BOOKING via pendingAction (most reliable path) ─────────
+    // Frontend sends pendingAction when user confirms a PENDING_BOOKING embedded by Claude
+    if (pendingAction?.type === "create_booking" && pendingAction?.service_id && pendingAction?.start_time) {
+      console.log("[AI] pendingAction received — executing directly:", JSON.stringify(pendingAction));
+      const directResult = await handleAction(
+        pendingAction, tenant.id, tenant.slug,
+        customerData?.profile?.id || null, email, authToken
       );
-      if (parsedAction) {
-        console.log("[AI] Confirmation: executing parsed booking directly");
-        reply = "";
-        action = parsedAction;
+      let directReply;
+      if (directResult?.success && directResult?.bookingId) {
+        directReply = directResult.message || "\u2705 Your booking has been confirmed!";
       } else {
-        console.log("[AI] Confirmation: fallback to Claude");
-        const r = await runSupportAgent({
-          tenantContext: { ...tenant, ...businessContext },
-          customerData, isSignedIn, history, message, confirmationMode: true,
-        });
-        reply = r.reply; action = r.action;
+        directReply = directResult?.message || "Something went wrong creating the booking. Please try via the booking form.";
       }
-    } else {
-      const r = await runSupportAgent({
-        tenantContext: { ...tenant, ...businessContext },
-        customerData, isSignedIn, history, message,
-      });
-      reply = r.reply; action = r.action;
+      return res.json({ reply: directReply, action: directResult });
     }
+
+    const isConfirmation = isConfirmationMessage(message);
+    const { reply, action } = await runSupportAgent({
+      tenantContext: { ...tenant, ...businessContext },
+      customerData,
+      isSignedIn,
+      history,
+      message,
+      confirmationMode: isConfirmation,
+    });
 
     // Execute action if Claude requested one
     let actionResult = null;
@@ -832,9 +723,23 @@ router.post("/:tenantSlug/chat", optionalAuth, async (req, res) => {
       finalReply = actionResult?.message || "I processed your request. Is there anything else I can help you with?";
     }
 
+    // Parse and strip PENDING_BOOKING line that Claude embeds in confirmation messages
+    let pendingBooking = null;
+    const pbMatch = finalReply.match(/^PENDING_BOOKING:(\{[^\n\r]+\})\s*$/m);
+    if (pbMatch) {
+      try {
+        pendingBooking = JSON.parse(pbMatch[1]);
+        finalReply = finalReply.replace(/^PENDING_BOOKING:\{[^\n\r]+\}\s*$/m, "").trim();
+        console.log("[AI] PENDING_BOOKING parsed:", JSON.stringify(pendingBooking));
+      } catch (e) {
+        console.error("[AI] PENDING_BOOKING parse error:", e.message);
+      }
+    }
+
     res.json({
       reply: finalReply,
       action: actionResult,
+      pendingBooking,
       slots: actionResult?.slots || null,
     });
   } catch (err) {
