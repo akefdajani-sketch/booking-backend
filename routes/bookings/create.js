@@ -54,6 +54,9 @@ router.post("/", requireAppAuth, requireTenant, async (req, res) => {
       checkin_date,
       checkout_date,
       nights_count,
+      // NIGHTLY SUITE: add-ons and guests
+      addons_json: incomingAddonsJson,
+      guests_count: incomingGuestsCount,
     } = req.body || {};
 
     const slug = (req.tenantSlug || tenantSlug || "").toString().trim();
@@ -676,13 +679,32 @@ const charge_amount = (finalCustomerMembershipId || prepaidApplied) ? 0 : price_
         // PAY-2: include payment_method only if column exists (defensive — see ensurePaymentMethodColumn)
         // RENTAL-1: check if nightly columns exist (added by migration 023)
         const bookingCols = await db.query(
-          `SELECT column_name FROM information_schema.columns WHERE table_name='bookings' AND column_name IN ('booking_mode','checkin_date','checkout_date','nights_count')`,
+          `SELECT column_name FROM information_schema.columns WHERE table_name='bookings' AND column_name IN ('booking_mode','checkin_date','checkout_date','nights_count','addons_json','guests_count','addons_total')`,
         ).then(r => new Set(r.rows.map(x => x.column_name))).catch(() => new Set());
         const hasNightlyCols = bookingCols.has('booking_mode') && bookingCols.has('checkin_date');
+        const hasAddonsCols  = bookingCols.has('addons_json') && bookingCols.has('guests_count');
+
+        // Parse and validate incoming add-ons
+        let parsedAddons = null;
+        let addonsTotal  = 0;
+        if (isNightlyBooking && incomingAddonsJson && hasAddonsCols) {
+          try {
+            parsedAddons = typeof incomingAddonsJson === 'string'
+              ? JSON.parse(incomingAddonsJson)
+              : incomingAddonsJson;
+            if (Array.isArray(parsedAddons)) {
+              addonsTotal = parsedAddons.reduce((sum, a) => sum + (Number(a.subtotal) || 0), 0);
+            }
+          } catch { parsedAddons = null; }
+        }
+        const guestsCount = incomingGuestsCount ? Math.max(1, Number(incomingGuestsCount)) : 1;
 
         let extraCols = hasPaymentMethodCol ? ', payment_method' : '';
         if (isNightlyBooking && hasNightlyCols) {
           extraCols += ', booking_mode, checkin_date, checkout_date, nights_count';
+        }
+        if (isNightlyBooking && hasAddonsCols) {
+          extraCols += ', addons_json, guests_count, addons_total';
         }
 
         const baseCols = `tenant_id, service_id, staff_id, resource_id, start_time, duration_minutes,
@@ -698,6 +720,11 @@ const charge_amount = (finalCustomerMembershipId || prepaidApplied) ? 0 : price_
           baseVals.push(checkin_date || null);
           baseVals.push(checkout_date || null);
           baseVals.push(nights_count ? Number(nights_count) : null);
+        }
+        if (isNightlyBooking && hasAddonsCols) {
+          baseVals.push(parsedAddons ? JSON.stringify(parsedAddons) : null);
+          baseVals.push(guestsCount);
+          baseVals.push(addonsTotal);
         }
 
         let insertSql;
