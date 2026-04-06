@@ -73,7 +73,7 @@ router.get('/check', async (req, res) => {
     // Load service to get min/max nights and price_per_night
     const svcResult = await pool.query(
       `SELECT booking_mode, min_nights, max_nights,
-              price_per_night, price_amount, price
+              price_per_night, COALESCE(price_amount, price_jd) AS price_amount
        FROM services WHERE id = $1 AND tenant_id = $2`,
       [serviceId, tenantId]
     );
@@ -111,7 +111,7 @@ router.get('/check', async (req, res) => {
     });
 
     // Compute pricing
-    const effectivePrice = svc.price_per_night ?? svc.price_amount ?? svc.price ?? null;
+    const effectivePrice = svc.price_per_night ?? svc.price_amount ?? null;
     const pricing = getNightlyPriceSummary({
       checkIn,
       checkOut,
