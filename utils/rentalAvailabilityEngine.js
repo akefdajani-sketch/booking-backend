@@ -135,9 +135,19 @@ async function getBlockedDatesForMonth({ tenantId, resourceId, month }) {
 
   for (const row of rows) {
     if (row.booking_mode === 'nightly' && row.checkin_date && row.checkout_date) {
-      // Expand nightly range: block each night [checkin, checkout)
-      const ci     = new Date(`${row.checkin_date}T00:00:00Z`);
-      const co     = new Date(`${row.checkout_date}T00:00:00Z`);
+      // node-postgres returns DATE columns as JavaScript Date objects (full ISO strings
+      // like "2026-04-15T00:00:00.000Z"). Concatenating "T00:00:00Z" onto that produces
+      // "2026-04-15T00:00:00.000ZT00:00:00Z" → Invalid Date → while loop never runs.
+      // Fix: extract just the YYYY-MM-DD portion regardless of what node-postgres returns.
+      const ciStr = (row.checkin_date instanceof Date)
+        ? row.checkin_date.toISOString().slice(0, 10)
+        : String(row.checkin_date).slice(0, 10);
+      const coStr = (row.checkout_date instanceof Date)
+        ? row.checkout_date.toISOString().slice(0, 10)
+        : String(row.checkout_date).slice(0, 10);
+
+      const ci     = new Date(`${ciStr}T00:00:00Z`);
+      const co     = new Date(`${coStr}T00:00:00Z`);
       const cursor = new Date(ci);
       while (cursor < co) {
         blocked.add(cursor.toISOString().slice(0, 10));
