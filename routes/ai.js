@@ -576,8 +576,33 @@ async function handleAction(action, tenantId, tenantSlug, customerId, customerEm
         const slots = action.slots || 1;
         const duration = action.duration_minutes || (slotInterval * slots);
 
-        const start = new Date(action.start_time);
+        // ── Timezone-safe start time parsing ─────────────────────────────
+        // If Claude omitted the UTC offset (e.g. sent "2026-04-08T19:00:00" instead of
+        // "2026-04-08T19:00:00+03:00"), new Date() on a UTC server would misinterpret it
+        // as UTC — shifting the booking by the tenant's offset (e.g. +3h for Amman).
+        // Safety net: if no offset present, ask Postgres to interpret as tenant local time.
+        const tzRes = await db.query(`SELECT timezone FROM tenants WHERE id = $1 LIMIT 1`, [tenantId]);
+        const tenantTz = tzRes.rows?.[0]?.timezone || "Asia/Amman";
+
+        let start;
+        const rawTime = String(action.start_time);
+        const hasOffset = /Z$|[+\-]\d{2}:?\d{2}$/.test(rawTime);
+
+        if (hasOffset) {
+          // Has explicit offset — parse directly (correct path)
+          start = new Date(rawTime);
+        } else {
+          // No offset — treat as local time in tenant timezone via Postgres
+          console.log(`[AI create_booking] WARNING: start_time "${rawTime}" has no UTC offset — interpreting as ${tenantTz} local time`);
+          const pgRes = await db.query(
+            `SELECT ($1::timestamp AT TIME ZONE $2) AS utc_time`,
+            [rawTime, tenantTz]
+          );
+          start = new Date(pgRes.rows[0].utc_time);
+        }
+
         if (isNaN(start.getTime())) return { success: false, message: "Invalid start time." };
+        console.log(`[AI create_booking] parsed start=${start.toISOString()} from raw="${rawTime}" hasOffset=${hasOffset} tz=${tenantTz}`);
 
         // Determine payment method:
         // 1. membership credits (customerMembershipId)
