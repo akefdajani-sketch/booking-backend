@@ -249,13 +249,43 @@ async function fetchBusinessContext(tenantId, tenantSlug) {
     }
   }
 
+  // Retry resources without is_active filter if empty (handles is_active=false set explicitly)
+  let resourcesRows = resourcesRes.rows;
+  if (resourcesRows.length === 0) {
+    try {
+      const retryRes = await db.query(
+        `SELECT id, name, capacity FROM resources WHERE tenant_id = $1 ORDER BY name ASC`,
+        [tenantId]
+      );
+      resourcesRows = retryRes.rows;
+      if (resourcesRows.length > 0) {
+        console.log(`[AI ctx] Retried resources without is_active filter — found ${resourcesRows.length} resources`);
+      }
+    } catch (e) { console.error("[AI resources retry error]", e.message); }
+  }
+
+  // Retry staff without is_active filter if empty
+  let staffRows = staffRes.rows;
+  if (staffRows.length === 0) {
+    try {
+      const retryRes = await db.query(
+        `SELECT id, name, email FROM staff WHERE tenant_id = $1 ORDER BY name ASC`,
+        [tenantId]
+      );
+      staffRows = retryRes.rows;
+      if (staffRows.length > 0) {
+        console.log(`[AI ctx] Retried staff without is_active filter — found ${staffRows.length} staff`);
+      }
+    } catch (e) { console.error("[AI staff retry error]", e.message); }
+  }
+
   const result = {
     services: servicesRows,
     memberships: membershipsRes.rows,
     rates: ratesRes.rows,
     workingHours: hoursRes.rows,
-    resources: resourcesRes.rows,
-    staff: staffRes.rows,
+    resources: resourcesRows,
+    staff: staffRows,
     categories: categoriesRes.rows,
     prepaidProducts,
     resourceLinks: resourceLinksRes.rows,
