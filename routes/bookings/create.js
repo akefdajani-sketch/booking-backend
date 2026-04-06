@@ -550,16 +550,39 @@ router.post("/", requireAppAuth, requireTenant, async (req, res) => {
       // Compute price + charge amounts.
       // - price_amount represents the booking's list price/value.
       // - charge_amount is what we actually charge (0 if covered by membership).
-      // If booking duration differs from service duration, scale proportionally.
+      // Compute price amount.
+      //
+      // NIGHTLY bookings: price = price_per_night × nights_count.
+      // duration_minutes is a timeslot concept and must NOT be used for nightly
+      // pricing — tenants set a nightly rate and should never need to touch
+      // duration_minutes to get a correct total.
+      //
+      // TIMESLOT bookings: scale proportionally when the booked duration differs
+      // from the service's base duration (e.g. a 90-min session on a 60-min service).
       let price_amount = null;
       if (servicePriceAmount != null && Number.isFinite(servicePriceAmount)) {
         const base = Number(servicePriceAmount);
-        const svcDur = Number(serviceDurationMinutes || duration || 0);
-        const dur = Number(duration || 0);
-        if (svcDur > 0 && dur > 0 && dur !== svcDur) {
-          price_amount = Math.round((base * (dur / svcDur)) * 100) / 100;
+
+        if (isNightlyBooking) {
+          // Nightly: flat rate × nights. nights_count is sent by the frontend
+          // and also derived from checkin/checkout dates as a fallback.
+          const n = Number(nights_count) ||
+            (checkin_date && checkout_date
+              ? Math.round(
+                  (new Date(`${checkout_date}T00:00:00Z`) - new Date(`${checkin_date}T00:00:00Z`))
+                  / 86400000
+                )
+              : 1);
+          price_amount = Math.round(base * Math.max(n, 1) * 100) / 100;
         } else {
-          price_amount = Math.round(base * 100) / 100;
+          // Timeslot: proportional scaling when booked duration ≠ service duration.
+          const svcDur = Number(serviceDurationMinutes || duration || 0);
+          const dur = Number(duration || 0);
+          if (svcDur > 0 && dur > 0 && dur !== svcDur) {
+            price_amount = Math.round((base * (dur / svcDur)) * 100) / 100;
+          } else {
+            price_amount = Math.round(base * 100) / 100;
+          }
         }
       }
       
@@ -615,7 +638,13 @@ router.post("/", requireAppAuth, requireTenant, async (req, res) => {
             start,
             durationMinutes: Number(duration),
             basePriceAmount: price_amount != null ? Number(price_amount) : null,
-            serviceSlotMinutes: Number(serviceDurationMinutes) || Number(duration),
+            // NIGHTLY: one pricing unit = 1 night = 1440 minutes.
+            // Using serviceDurationMinutes (e.g. 10 min) here would create
+            // hundreds of artificial slots and multiply the rate wrongly.
+            // Timeslot bookings continue to use the service's slot duration.
+            serviceSlotMinutes: isNightlyBooking
+              ? 1440
+              : (Number(serviceDurationMinutes) || Number(duration)),
             customerMembershipPlanIds,
             customerPrepaidProductIds,
           });
