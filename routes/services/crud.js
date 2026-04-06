@@ -109,6 +109,26 @@ router.get("/", async (req, res) => {
       ? "COALESCE(s.allow_membership, false) AS allow_membership"
       : "false::boolean AS allow_membership";
 
+    // RENTAL-1: nightly rental expressions
+    const bookingModeExpr = svcCols.has("booking_mode")
+      ? "COALESCE(s.booking_mode, 'time_slots') AS booking_mode"
+      : "'time_slots'::text AS booking_mode";
+    const minNightsExpr = svcCols.has("min_nights")
+      ? "COALESCE(s.min_nights, 1) AS min_nights"
+      : "1::int AS min_nights";
+    const maxNightsExpr = svcCols.has("max_nights")
+      ? "s.max_nights AS max_nights"
+      : "NULL::int AS max_nights";
+    const checkinTimeExpr = svcCols.has("checkin_time")
+      ? "COALESCE(s.checkin_time::text, '15:00') AS checkin_time"
+      : "'15:00'::text AS checkin_time";
+    const checkoutTimeExpr = svcCols.has("checkout_time")
+      ? "COALESCE(s.checkout_time::text, '11:00') AS checkout_time"
+      : "'11:00'::text AS checkout_time";
+    const pricePerNightExpr = svcCols.has("price_per_night")
+      ? "s.price_per_night AS price_per_night"
+      : "NULL::numeric AS price_per_night";
+
     const q = `
       SELECT
         s.id,
@@ -129,7 +149,13 @@ router.get("/", async (req, res) => {
         COALESCE(s.is_active, true)         AS is_active,
         ${imageExpr},
         ${currencyExpr},
-        s.category_id
+        s.category_id,
+        ${bookingModeExpr},
+        ${minNightsExpr},
+        ${maxNightsExpr},
+        ${checkinTimeExpr},
+        ${checkoutTimeExpr},
+        ${pricePerNightExpr}
       FROM services s
       JOIN tenants t ON t.id = s.tenant_id
       ${softDeleteWhere}
@@ -225,6 +251,13 @@ router.post("/", requireTenant, requireAdminOrTenantRole("manager"), async (req,
       availability_basis,
       is_active,
       category_id,
+      // RENTAL-1: nightly rental mode fields
+      booking_mode,
+      min_nights,
+      max_nights,
+      checkin_time,
+      checkout_time,
+      price_per_night,
     } = req.body || {};
 
     const ab = normalizeAvailabilityBasis(availability_basis);
@@ -314,6 +347,18 @@ router.post("/", requireTenant, requireAdminOrTenantRole("manager"), async (req,
     if (svcCols.has("category_id") && category_id !== undefined) {
       add("category_id", category_id == null ? null : Number(category_id));
     }
+    // RENTAL-1: nightly rental columns (safe — only written if migration 023 has run)
+    if (svcCols.has("booking_mode") && booking_mode !== undefined) {
+      const safeMode = booking_mode === "nightly" ? "nightly" : "time_slots";
+      add("booking_mode", safeMode);
+      if (safeMode === "nightly") {
+        if (svcCols.has("min_nights"))      add("min_nights",      min_nights      != null ? Math.max(1, Number(min_nights))  : 1);
+        if (svcCols.has("max_nights"))      add("max_nights",      max_nights      != null ? Number(max_nights)               : null);
+        if (svcCols.has("checkin_time"))    add("checkin_time",    checkin_time    || "15:00");
+        if (svcCols.has("checkout_time"))   add("checkout_time",   checkout_time   || "11:00");
+        if (svcCols.has("price_per_night")) add("price_per_night", price_per_night != null ? Number(price_per_night)          : null);
+      }
+    }
 
     const q = `
       INSERT INTO services (${cols.join(", ")})
@@ -359,6 +404,13 @@ router.patch("/:id", resolveTenantFromServiceId, requireAdminOrTenantRole("manag
       availability_basis,
       is_active,
       category_id,
+      // RENTAL-1: nightly rental mode fields
+      booking_mode,
+      min_nights,
+      max_nights,
+      checkin_time,
+      checkout_time,
+      price_per_night,
     } = req.body || {};
 
     const ab = normalizeAvailabilityBasis(availability_basis);
@@ -416,6 +468,21 @@ router.patch("/:id", resolveTenantFromServiceId, requireAdminOrTenantRole("manag
     if (category_id !== undefined && svcCols.has("category_id")) {
       add("category_id", category_id == null ? null : Number(category_id));
     }
+    // RENTAL-1: nightly rental columns
+    if (booking_mode !== undefined && svcCols.has("booking_mode")) {
+      const safeMode = booking_mode === "nightly" ? "nightly" : "time_slots";
+      add("booking_mode", safeMode);
+    }
+    if (min_nights !== undefined && svcCols.has("min_nights"))
+      add("min_nights", min_nights == null ? 1 : Math.max(1, Number(min_nights)));
+    if (max_nights !== undefined && svcCols.has("max_nights"))
+      add("max_nights", max_nights == null ? null : Number(max_nights));
+    if (checkin_time !== undefined && svcCols.has("checkin_time"))
+      add("checkin_time", checkin_time || "15:00");
+    if (checkout_time !== undefined && svcCols.has("checkout_time"))
+      add("checkout_time", checkout_time || "11:00");
+    if (price_per_night !== undefined && svcCols.has("price_per_night"))
+      add("price_per_night", price_per_night == null ? null : Number(price_per_night));
 
     if (!sets.length) return res.status(400).json({ error: "No fields to update" });
 

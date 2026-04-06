@@ -259,4 +259,7 @@ router.patch("/:id", resolveTenantFromResourceId, requireAdminOrTenantRole("mana
   }
 });
 
+// RENTAL-1: multi-image gallery for resources / properties.
+require("./resources/gallery")(router);
+
 module.exports = router;

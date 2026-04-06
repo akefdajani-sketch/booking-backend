@@ -423,6 +423,11 @@ router.patch(
         admin_email: String(body.admin_email ?? "").trim() || null,
       };
 
+      // RENTAL-1: rental_mode_enabled is a boolean flag on the tenant
+      if (body.rental_mode_enabled !== undefined) {
+        optional.rental_mode_enabled = !!body.rental_mode_enabled;
+      }
+
       const sets = ["name = $1", "slug = $2", "kind = $3", "timezone = $4"]; // stable order
       const vals = [name, slug, kind, timezone];
 
@@ -442,6 +447,8 @@ router.patch(
       appendOptional("country_code", optional.country_code);
       appendOptional("admin_name", optional.admin_name);
       appendOptional("admin_email", optional.admin_email);
+      // RENTAL-1
+      if (optional.rental_mode_enabled !== undefined) appendOptional("rental_mode_enabled", optional.rental_mode_enabled);
 
       vals.push(id);
 
