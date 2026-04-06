@@ -69,6 +69,15 @@ router.get("/me/bookings", requireAppAuth, requireTenant, async (req, res) => {
     const rateRuleId    = await pickCol("bookings", "b", ["applied_rate_rule_id"],  "NULL");
     const rateSnapshot  = await pickCol("bookings", "b", ["applied_rate_snapshot"], "NULL");
 
+    // RENTAL-1: nightly booking fields (schema-tolerant — NULL for time-slot bookings)
+    const bookingMode   = await pickCol("bookings", "b", ["booking_mode"],  "'time_slots'");
+    const checkinDate   = await pickCol("bookings", "b", ["checkin_date"],  "NULL");
+    const checkoutDate  = await pickCol("bookings", "b", ["checkout_date"], "NULL");
+    const nightsCount   = await pickCol("bookings", "b", ["nights_count"],  "NULL");
+    const guestsCount   = await pickCol("bookings", "b", ["guests_count"],  "NULL");
+    const addonsJson    = await pickCol("bookings", "b", ["addons_json"],   "NULL");
+    const addonsTotal   = await pickCol("bookings", "b", ["addons_total"],  "NULL");
+
     const q = await pool.query(
       `
       SELECT
@@ -110,7 +119,15 @@ router.get("/me/bookings", requireAppAuth, requireTenant, async (req, res) => {
         COALESCE(${customerPhone}, c.phone) AS customer_phone,
         COALESCE(s.name, ${serviceName}) AS service_name,
         COALESCE(st.name, ${staffName}) AS staff_name,
-        COALESCE(r.name, ${resourceName}) AS resource_name
+        COALESCE(r.name, ${resourceName}) AS resource_name,
+        -- RENTAL-1: nightly fields
+        ${bookingMode}  AS booking_mode,
+        ${checkinDate}  AS checkin_date,
+        ${checkoutDate} AS checkout_date,
+        ${nightsCount}  AS nights_count,
+        ${guestsCount}  AS guests_count,
+        ${addonsJson}   AS addons_json,
+        ${addonsTotal}  AS addons_total
       FROM bookings b
       LEFT JOIN customers c ON c.id = b.customer_id
       LEFT JOIN services s ON s.id = b.service_id
