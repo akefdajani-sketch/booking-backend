@@ -312,6 +312,15 @@ async function loadJoinedBookingById(bookingId, tenantId) {
       b.created_at,
       b.booking_code,
 
+      -- RENTAL-1: nightly booking fields (NULL for time-slot bookings)
+      b.booking_mode,
+      b.checkin_date,
+      b.checkout_date,
+      b.nights_count,
+      b.guests_count,
+      b.addons_json,
+      b.addons_total,
+
       -- Money + applied Rates snapshot (optional columns; present in v1 hardened schema)
       b.price_amount,
       b.charge_amount,
