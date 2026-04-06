@@ -131,6 +131,52 @@ router.delete("/:id/logo", requireAdmin, async (req, res) => {
 });
 
 // -----------------------------------------------------------------------------
+// POST /api/tenants/:id/logo-dark  &  POST /api/tenants/:id/logo-light
+// Admin: upload dark/light logo variants to R2, stored in branding.assets only
+// (no separate DB column — lives purely in the branding JSON draft)
+// field name must be: "file"
+// -----------------------------------------------------------------------------
+for (const variant of ["dark", "light"]) {
+  router.post(
+    `/:id/logo-${variant}`,
+    requireAdmin,
+    upload.single("file"),
+    uploadErrorHandler,
+    async (req, res) => {
+      let filePath = null;
+      try {
+        const id = Number(req.params.id);
+        if (!Number.isFinite(id) || id <= 0) {
+          return res.status(400).json({ error: "Invalid tenant id" });
+        }
+        if (!req.file) {
+          return res.status(400).json({ error: "No file uploaded" });
+        }
+        filePath = req.file.path;
+
+        const key = `tenants/${id}/branding/logo-${variant}/${Date.now()}-${safeName(req.file.originalname)}`;
+        const { url } = await uploadFileToR2({
+          filePath,
+          contentType: req.file.mimetype,
+          key,
+        });
+
+        // Store in branding.assets.logoDarkUrl / logoLightUrl
+        const brandingKey = variant === "dark" ? ["assets", "logoDarkUrl"] : ["assets", "logoLightUrl"];
+        await setBrandingAsset(id, brandingKey, url);
+
+        return res.json({ ok: true, url, [`logo_${variant}_url`]: url });
+      } catch (err) {
+        console.error(`Tenant logo-${variant} upload error:`, err);
+        return res.status(500).json({ error: "Upload failed" });
+      } finally {
+        if (filePath) await fs.unlink(filePath).catch(() => {});
+      }
+    }
+  );
+}
+
+// -----------------------------------------------------------------------------
 // POST /api/tenants/:id/favicon
 // Admin: upload tenant favicon to R2 and store in tenants.branding.assets.faviconUrl
 // field name must be: "file"
