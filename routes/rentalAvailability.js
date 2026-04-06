@@ -72,9 +72,11 @@ router.get('/check', async (req, res) => {
 
     // Load service to get min/max nights and price_per_night
     const svcResult = await pool.query(
-      `SELECT booking_mode, min_nights, max_nights,
-              price_per_night, COALESCE(price_amount, price_jd) AS price_amount
-       FROM services WHERE id = $1 AND tenant_id = $2`,
+      `SELECT s.booking_mode, COALESCE(s.min_nights,1) AS min_nights, s.max_nights,
+              s.price_per_night, s.price_amount,
+              t.currency_code
+       FROM services s JOIN tenants t ON t.id = s.tenant_id
+       WHERE s.id = $1 AND s.tenant_id = $2`,
       [serviceId, tenantId]
     );
     if (!svcResult.rows.length) return res.status(404).json({ error: 'Service not found' });
@@ -110,19 +112,18 @@ router.get('/check', async (req, res) => {
       excludeBookingId: excludeBookingId ? Number(excludeBookingId) : null,
     });
 
-    // Compute pricing
+    // Compute pricing using tenant currency (never hardcoded)
     const effectivePrice = svc.price_per_night ?? svc.price_amount ?? null;
-    const pricing = getNightlyPriceSummary({
-      checkIn,
-      checkOut,
-      pricePerNight: effectivePrice,
-    });
+    const currencyCode   = svc.currency_code || 'USD';
+    const pricingSummary = getNightlyPriceSummary({ checkIn, checkOut, pricePerNight: effectivePrice });
+    const pricing = pricingSummary ? { ...pricingSummary, currencyCode } : null;
 
     return res.json({
-      available:    availability.available,
-      nights:       rangeValidation.nights,
+      available:   availability.available,
+      nights:      rangeValidation.nights,
       pricing,
-      conflicting:  availability.conflictingBookings ?? [],
+      currencyCode,
+      conflicting: availability.conflictingBookings ?? [],
     });
   } catch (err) {
     console.error('rentalAvailability/check error:', err);
