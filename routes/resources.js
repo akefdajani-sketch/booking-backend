@@ -233,7 +233,7 @@ router.patch("/:id", resolveTenantFromResourceId, requireAdminOrTenantRole("mana
     const id = Number(req.params.id);
     if (!Number.isFinite(id) || id <= 0) return res.status(400).json({ error: "invalid id" });
 
-    const { name, type, is_active } = req.body || {};
+    const { name, type, is_active, property_details_json } = req.body || {};
 
     const sets = [];
     const params = [];
@@ -245,6 +245,9 @@ router.patch("/:id", resolveTenantFromResourceId, requireAdminOrTenantRole("mana
     if (name !== undefined) add("name", name == null ? null : String(name).trim());
     if (type !== undefined) add("type", type == null ? null : String(type).trim());
     if (is_active !== undefined) add("is_active", !!is_active);
+    if (property_details_json !== undefined) {
+      add("property_details_json", property_details_json == null ? null : JSON.stringify(property_details_json));
+    }
 
     if (!sets.length) return res.status(400).json({ error: "No fields to update" });
 
@@ -261,5 +264,9 @@ router.patch("/:id", resolveTenantFromResourceId, requireAdminOrTenantRole("mana
 
 // RENTAL-1: multi-image gallery for resources / properties.
 require("./resources/gallery")(router);
+
+// NIGHTLY SUITE: amenities, add-ons, property details
+// Pass resolveTenantFromResourceId so the sub-module reuses the same middleware
+require("./resources/amenitiesAndAddons")(router, resolveTenantFromResourceId);
 
 module.exports = router;
