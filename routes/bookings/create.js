@@ -49,6 +49,11 @@ router.post("/", requireAppAuth, requireTenant, async (req, res) => {
       autoConsumePrepaid,
       requirePrepaid,
       paymentMethod: requestedPaymentMethod, // PAY-2: cash | card | cliq from client
+      // RENTAL-1: nightly booking fields
+      booking_mode: incomingBookingMode,
+      checkin_date,
+      checkout_date,
+      nights_count,
     } = req.body || {};
 
     const slug = (req.tenantSlug || tenantSlug || "").toString().trim();
@@ -148,13 +153,27 @@ router.post("/", requireAppAuth, requireTenant, async (req, res) => {
       });
     }
 
-    const start = new Date(startTime);
+    // RENTAL-1: For nightly bookings, derive startTime from checkin_date if not provided
+    const isNightlyBooking = incomingBookingMode === 'nightly';
+    let resolvedStartTime = startTime;
+    if (isNightlyBooking && !startTime && checkin_date) {
+      resolvedStartTime = new Date(`${checkin_date}T00:00:00Z`).toISOString();
+    }
+    if (!resolvedStartTime) {
+      return res.status(400).json({ error: "Missing required fields (startTime)." });
+    }
+
+    const start = new Date(resolvedStartTime);
     if (Number.isNaN(start.getTime())) {
       return res.status(400).json({ error: "Invalid startTime." });
     }
 
     const now = new Date();
-    if (start.getTime() < now.getTime() - 60 * 1000) {
+    // Nightly: allow same-day check-in (compare against today midnight)
+    const pastThreshold = isNightlyBooking
+      ? (() => { const d = new Date(now); d.setHours(0,0,0,0); return d.getTime(); })()
+      : now.getTime() - 60 * 1000;
+    if (start.getTime() < pastThreshold) {
       return res.status(400).json({ error: "Cannot create a booking in the past." });
     }
 
@@ -655,28 +674,36 @@ const charge_amount = (finalCustomerMembershipId || prepaidApplied) ? 0 : price_
         }
 
         // PAY-2: include payment_method only if column exists (defensive — see ensurePaymentMethodColumn)
-        const baseCols = hasPaymentMethodCol
-          ? `tenant_id, service_id, staff_id, resource_id, start_time, duration_minutes,
-             customer_id, customer_name, customer_phone, customer_email, status, idempotency_key, customer_membership_id, session_id, payment_method`
-          : `tenant_id, service_id, staff_id, resource_id, start_time, duration_minutes,
-             customer_id, customer_name, customer_phone, customer_email, status, idempotency_key, customer_membership_id, session_id`;
+        // RENTAL-1: check if nightly columns exist (added by migration 023)
+        const bookingCols = await db.query(
+          `SELECT column_name FROM information_schema.columns WHERE table_name='bookings' AND column_name IN ('booking_mode','checkin_date','checkout_date','nights_count')`,
+        ).then(r => new Set(r.rows.map(x => x.column_name))).catch(() => new Set());
+        const hasNightlyCols = bookingCols.has('booking_mode') && bookingCols.has('checkin_date');
 
-        const baseVals = hasPaymentMethodCol
-          ? [resolvedTenantId, resolvedServiceId, staff_id, resource_id,
-             start.toISOString(), duration,
-             finalCustomerId, cleanName, cleanPhone, cleanEmail,
-             initialStatus, idemKey, finalCustomerMembershipId, resolvedSessionId,
-             payment_method]
-          : [resolvedTenantId, resolvedServiceId, staff_id, resource_id,
+        let extraCols = hasPaymentMethodCol ? ', payment_method' : '';
+        if (isNightlyBooking && hasNightlyCols) {
+          extraCols += ', booking_mode, checkin_date, checkout_date, nights_count';
+        }
+
+        const baseCols = `tenant_id, service_id, staff_id, resource_id, start_time, duration_minutes,
+             customer_id, customer_name, customer_phone, customer_email, status, idempotency_key, customer_membership_id, session_id${extraCols}`;
+
+        let baseVals = [resolvedTenantId, resolvedServiceId, staff_id, resource_id,
              start.toISOString(), duration,
              finalCustomerId, cleanName, cleanPhone, cleanEmail,
              initialStatus, idemKey, finalCustomerMembershipId, resolvedSessionId];
+        if (hasPaymentMethodCol) baseVals.push(payment_method);
+        if (isNightlyBooking && hasNightlyCols) {
+          baseVals.push('nightly');
+          baseVals.push(checkin_date || null);
+          baseVals.push(checkout_date || null);
+          baseVals.push(nights_count ? Number(nights_count) : null);
+        }
 
         let insertSql;
         let insertParams = baseVals;
 
-        // Build INSERT dynamically so parameter indices are always correct
-        // regardless of how many columns are in baseCols (14 or 15 with payment_method).
+        // Build INSERT dynamically so parameter indices are always correct.
         function makePlaceholders(params) {
           return params.map((_, i) => `$${i + 1}`).join(', ');
         }
@@ -700,7 +727,6 @@ const charge_amount = (finalCustomerMembershipId || prepaidApplied) ? 0 : price_
           RETURNING id;
           `;
         } else {
-          // Backwards-compatible: DB does not yet have money columns.
           insertParams = baseVals;
           insertSql = `
           INSERT INTO bookings
