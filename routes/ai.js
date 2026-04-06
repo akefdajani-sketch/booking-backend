@@ -57,7 +57,7 @@ async function fetchBusinessContext(tenantId, tenantSlug) {
   const [
     hasDescription, hasMaxParallel, hasMinSlots, hasAllowMem,
     hasCategoryId, hasPriceAmount, hasPrice, hasCurrencyCode,
-    hasSlotInterval, hasMaxConsec, hasDeletedAt, hasIsActive,
+    hasSlotInterval, hasMaxConsec, hasDeletedAt, hasIsActive, hasResourceIsActive,
     // membership_plans columns
     hasMpBillingType, hasMpIncMins, hasMpIncUses, hasMpValidity,
     hasMpCurrency, hasMpDescription,
@@ -75,6 +75,7 @@ async function fetchBusinessContext(tenantId, tenantSlug) {
     columnExists("services", "max_consecutive_slots"),
     columnExists("services", "deleted_at"),
     columnExists("services", "is_active"),
+    columnExists("resources", "is_active"),
     columnExists("membership_plans", "billing_type"),
     columnExists("membership_plans", "included_minutes"),
     columnExists("membership_plans", "included_uses"),
@@ -157,9 +158,9 @@ async function fetchBusinessContext(tenantId, tenantSlug) {
       ).catch(() => ({ rows: [] })),
 
       db.query(
-        `SELECT id, name, capacity, is_active
+        `SELECT id, name, capacity
          FROM resources
-         WHERE tenant_id = $1 AND COALESCE(is_active, true) = true
+         WHERE tenant_id = $1${hasResourceIsActive ? " AND COALESCE(is_active, true) = true" : ""}
          ORDER BY name ASC`,
         [tenantId]
       ).catch(() => ({ rows: [] })),
@@ -261,7 +262,7 @@ async function fetchBusinessContext(tenantId, tenantSlug) {
     staffLinks: staffLinksRes.rows,
   };
   // Diagnostic: visible in Render logs — tells us exactly what each tenant's AI context contains
-  console.log(`[AI ctx] tenant=${tenantSlug} services=${result.services.length} memberships=${result.memberships.length} resources=${result.resources.length} isActiveColExists=${hasIsActive} deletedColExists=${hasDeletedAt}`);
+  console.log(`[AI ctx] tenant=${tenantSlug} services=${result.services.length} memberships=${result.memberships.length} resources=${result.resources.length} staff=${result.staff.length} isActiveColExists=${hasIsActive} resIsActiveColExists=${hasResourceIsActive}`);
   if (result.services.length > 0) {
     console.log(`[AI ctx services] ${result.services.map(s => s.name + "[id:" + s.id + "]").join(", ")}`);
   } else {
