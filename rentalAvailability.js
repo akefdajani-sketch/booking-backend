@@ -70,48 +70,19 @@ router.get('/check', async (req, res) => {
       return res.status(400).json({ error: 'Invalid resourceId or serviceId' });
     }
 
-    // Detect which price column exists (schema-safe — same pattern as services/crud.js)
-    const colCheck = await pool.query(
-      `SELECT column_name FROM information_schema.columns
-       WHERE table_name = 'services'
-         AND column_name IN ('price_per_night', 'price_amount', 'price', 'booking_mode', 'min_nights', 'max_nights')`
-    );
-    const svcCols = new Set(colCheck.rows.map(r => r.column_name));
-
-    // Build price expression: prefer price_per_night, then price_amount, then price
-    const pricePerNightExpr = svcCols.has('price_per_night')
-      ? 's.price_per_night'
-      : 'NULL::numeric';
-    const priceAmountExpr = svcCols.has('price_amount') && svcCols.has('price')
-      ? 'COALESCE(s.price_amount, s.price)'
-      : svcCols.has('price_amount')
-      ? 's.price_amount'
-      : svcCols.has('price')
-      ? 's.price'
-      : 'NULL::numeric';
-
-    const bookingModeExpr  = svcCols.has('booking_mode') ? "s.booking_mode" : "'time_slots'";
-    const minNightsExpr    = svcCols.has('min_nights')   ? 'COALESCE(s.min_nights, 1)' : '1';
-    const maxNightsExpr    = svcCols.has('max_nights')   ? 's.max_nights' : 'NULL';
-
-    // Also fetch tenant currency_code so pricing is not hardcoded to any currency
-    const tenantColCheck = await pool.query(
-      `SELECT column_name FROM information_schema.columns
-       WHERE table_name = 'tenants' AND column_name = 'currency_code'`
-    );
-    const currencyExpr = tenantColCheck.rows.length > 0
-      ? 't.currency_code'
-      : "NULL::text";
-
+    // Load service — use only columns guaranteed to exist after migration 023.
+    // We do NOT reference price, price_jd, or any legacy column names.
+    // currency_code comes from the tenant, not the service.
     const svcResult = await pool.query(
-      `SELECT ${bookingModeExpr} AS booking_mode,
-              ${minNightsExpr}   AS min_nights,
-              ${maxNightsExpr}   AS max_nights,
-              ${pricePerNightExpr} AS price_per_night,
-              ${priceAmountExpr}   AS price_amount,
-              ${currencyExpr}      AS currency_code
+      `SELECT
+         COALESCE(s.booking_mode, 'time_slots')  AS booking_mode,
+         COALESCE(s.min_nights, 1)               AS min_nights,
+         s.max_nights                             AS max_nights,
+         s.price_per_night                        AS price_per_night,
+         s.price_amount                           AS price_amount,
+         t.currency_code                          AS currency_code
        FROM services s
-       JOIN tenants t ON t.id = s.tenant_id
+       JOIN tenants  t ON t.id = s.tenant_id
        WHERE s.id = $1 AND s.tenant_id = $2`,
       [serviceId, tenantId]
     );
@@ -148,9 +119,9 @@ router.get('/check', async (req, res) => {
       excludeBookingId: excludeBookingId ? Number(excludeBookingId) : null,
     });
 
-    // Compute pricing using tenant currency (not hardcoded)
+    // Compute pricing using tenant currency (not hardcoded to any currency)
     const effectivePrice = svc.price_per_night ?? svc.price_amount ?? null;
-    const currencyCode   = svc.currency_code || 'USD';
+    const currencyCode   = svc.currency_code   || 'USD';
 
     const pricingSummary = getNightlyPriceSummary({
       checkIn,
@@ -158,7 +129,6 @@ router.get('/check', async (req, res) => {
       pricePerNight: effectivePrice,
     });
 
-    // Attach currency to pricing so the frontend can format correctly
     const pricing = pricingSummary
       ? { ...pricingSummary, currencyCode }
       : null;
