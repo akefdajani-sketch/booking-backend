@@ -188,3 +188,61 @@ router.get('/blocked-dates', async (req, res) => {
 });
 
 module.exports = router;
+
+// ---------------------------------------------------------------------------
+// GET /api/rental-availability/debug-bookings  (TEMPORARY - remove after diagnosis)
+// Shows raw booking data for a resource so we can verify DB state
+// ---------------------------------------------------------------------------
+router.get('/debug-bookings', async (req, res) => {
+  try {
+    const { tenantSlug, resourceId: resourceIdRaw, month } = req.query;
+    if (!resourceIdRaw) return res.status(400).json({ error: 'resourceId required' });
+
+    let tenantId = null;
+    if (tenantSlug) {
+      const row = await pool.query('SELECT id FROM tenants WHERE slug = $1', [String(tenantSlug)]);
+      if (row.rows.length) tenantId = Number(row.rows[0].id);
+    }
+    if (!tenantId) return res.status(400).json({ error: 'tenantSlug required' });
+
+    const resourceId = Number(resourceIdRaw);
+    const monthStr = month || new Date().toISOString().slice(0, 7);
+    const [year, mon] = monthStr.split('-').map(Number);
+    const firstDay = `${year}-${String(mon).padStart(2, '0')}-01`;
+    const lastDay = new Date(year, mon, 0);
+    const lastDayStr = `${year}-${String(mon).padStart(2, '0')}-${String(lastDay.getDate()).padStart(2, '0')}`;
+
+    // Raw query - no filter, just show all bookings for this resource this month
+    const { rows } = await pool.query(
+      `SELECT id, booking_mode, checkin_date, checkout_date, start_time, status, deleted_at,
+              (start_time AT TIME ZONE 'UTC')::date AS start_date_utc
+       FROM bookings
+       WHERE tenant_id = $1
+         AND resource_id = $2
+         AND (
+           (start_time IS NOT NULL AND (start_time AT TIME ZONE 'UTC')::date BETWEEN $3::date AND $4::date)
+           OR (checkin_date IS NOT NULL AND checkin_date BETWEEN $3::date AND $4::date)
+         )
+       ORDER BY start_time, checkin_date`,
+      [tenantId, resourceId, firstDay, lastDayStr]
+    );
+
+    return res.json({
+      tenantId, resourceId, month: monthStr, firstDay, lastDayStr,
+      count: rows.length,
+      bookings: rows.map(r => ({
+        id: r.id,
+        booking_mode: r.booking_mode,
+        checkin_date: r.checkin_date,
+        checkout_date: r.checkout_date,
+        start_time: r.start_time,
+        start_date_utc: r.start_date_utc,
+        status: r.status,
+        deleted_at: r.deleted_at,
+      }))
+    });
+  } catch (err) {
+    console.error('debug-bookings error:', err);
+    return res.status(500).json({ error: String(err) });
+  }
+});
