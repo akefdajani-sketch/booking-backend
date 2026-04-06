@@ -57,7 +57,7 @@ async function fetchBusinessContext(tenantId, tenantSlug) {
   const [
     hasDescription, hasMaxParallel, hasMinSlots, hasAllowMem,
     hasCategoryId, hasPriceAmount, hasPrice, hasCurrencyCode,
-    hasSlotInterval, hasMaxConsec, hasDeletedAt,
+    hasSlotInterval, hasMaxConsec, hasDeletedAt, hasIsActive,
     // membership_plans columns
     hasMpBillingType, hasMpIncMins, hasMpIncUses, hasMpValidity,
     hasMpCurrency, hasMpDescription,
@@ -74,6 +74,7 @@ async function fetchBusinessContext(tenantId, tenantSlug) {
     columnExists("services", "slot_interval_minutes"),
     columnExists("services", "max_consecutive_slots"),
     columnExists("services", "deleted_at"),
+    columnExists("services", "is_active"),
     columnExists("membership_plans", "billing_type"),
     columnExists("membership_plans", "included_minutes"),
     columnExists("membership_plans", "included_uses"),
@@ -95,6 +96,7 @@ async function fetchBusinessContext(tenantId, tenantSlug) {
   const slotIntCol    = hasSlotInterval  ? "s.slot_interval_minutes" : "NULL::int AS slot_interval_minutes";
   const maxConsecCol  = hasMaxConsec     ? "s.max_consecutive_slots" : "NULL::int AS max_consecutive_slots";
   const deletedWhere  = hasDeletedAt     ? "AND s.deleted_at IS NULL" : "";
+  const activeWhere   = hasIsActive      ? "AND COALESCE(s.is_active, true) = true" : "";
 
   // membership_plans safe columns
   const mpBillingCol  = hasMpBillingType ? "billing_type"    : "NULL::text AS billing_type";
@@ -113,11 +115,12 @@ async function fetchBusinessContext(tenantId, tenantSlug) {
                 ${priceCol} AS price, ${currCol},
                 ${parallelCol}, ${allowMemCol}, ${categoryCol}
          FROM services s
-         WHERE s.tenant_id = $1 AND COALESCE(s.is_active, true) = true
+         WHERE s.tenant_id = $1
+           ${activeWhere}
            ${deletedWhere}
          ORDER BY s.name ASC`,
         [tenantId]
-      ),
+      ).catch((e) => { console.error("[AI services query error]", e.message); return { rows: [] }; }),
 
       db.query(
         `SELECT id, name, ${mpDescCol}, ${mpBillingCol}, price,
@@ -220,8 +223,33 @@ async function fetchBusinessContext(tenantId, tenantSlug) {
     prepaidProducts = pRes.rows;
   }
 
-  return {
-    services: servicesRes.rows,
+  // If services query returned 0, retry WITHOUT is_active filter (handles inactive=false edge cases)
+  let servicesRows = servicesRes.rows;
+  if (servicesRows.length === 0 && hasIsActive) {
+    try {
+      const retryRes = await db.query(
+        `SELECT s.id, s.name, ${descCol},
+                s.duration_minutes, ${slotIntCol},
+                ${maxConsecCol}, ${minSlotsCol},
+                ${priceCol} AS price, ${currCol},
+                ${parallelCol}, ${allowMemCol}, ${categoryCol}
+         FROM services s
+         WHERE s.tenant_id = $1
+           ${deletedWhere}
+         ORDER BY s.name ASC`,
+        [tenantId]
+      );
+      servicesRows = retryRes.rows;
+      if (servicesRows.length > 0) {
+        console.log(`[AI ctx] Retried services without is_active filter — found ${servicesRows.length} services`);
+      }
+    } catch (e) {
+      console.error("[AI services retry error]", e.message);
+    }
+  }
+
+  const result = {
+    services: servicesRows,
     memberships: membershipsRes.rows,
     rates: ratesRes.rows,
     workingHours: hoursRes.rows,
@@ -229,9 +257,17 @@ async function fetchBusinessContext(tenantId, tenantSlug) {
     staff: staffRes.rows,
     categories: categoriesRes.rows,
     prepaidProducts,
-    resourceLinks: resourceLinksRes.rows,   // resource ↔ service mappings
-    staffLinks: staffLinksRes.rows,         // staff ↔ service mappings
+    resourceLinks: resourceLinksRes.rows,
+    staffLinks: staffLinksRes.rows,
   };
+  // Diagnostic: visible in Render logs — tells us exactly what each tenant's AI context contains
+  console.log(`[AI ctx] tenant=${tenantSlug} services=${result.services.length} memberships=${result.memberships.length} resources=${result.resources.length} isActiveColExists=${hasIsActive} deletedColExists=${hasDeletedAt}`);
+  if (result.services.length > 0) {
+    console.log(`[AI ctx services] ${result.services.map(s => s.name + "[id:" + s.id + "]").join(", ")}`);
+  } else {
+    console.log(`[AI ctx services] EMPTY — tenantId=${tenantId} hasIsActive=${hasIsActive}`);
+  }
+  return result;
 }
 
 // ── Fetch full customer data ──────────────────────────────────────────

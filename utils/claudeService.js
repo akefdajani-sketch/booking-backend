@@ -26,6 +26,9 @@ function buildBusinessContext({ name, services = [], memberships = [], rates = [
     if (!serviceStaffMap[l.service_id]) serviceStaffMap[l.service_id] = [];
     serviceStaffMap[l.service_id].push({ id: l.staff_id, name: l.staff_name });
   });
+  // For dense tenants (many services), omit per-service staff links from services block
+  // — staff section below already lists all staff with their service links
+  const showStaffPerService = services.length <= 10;
 
   // Services — include linked resources and staff per service
   const servicesBlock = services.length > 0
@@ -50,11 +53,16 @@ function buildBusinessContext({ name, services = [], memberships = [], rates = [
 
         // Show which staff can do this service
         const linkedStaff = serviceStaffMap[s.id];
-        const staffStr = linkedStaff && linkedStaff.length > 0
+        const staffStr = (showStaffPerService && linkedStaff && linkedStaff.length > 0)
           ? `staff: ${linkedStaff.map(st => `${st.name} [staff_id:${st.id}]`).join(", ")}`
           : null;
 
-        const details = [duration, interval, price, maxSlots, minSlots, parallel, allowMem, category, resourcesStr, staffStr, desc].filter(Boolean).join(" | ");
+        // For tenants with many services, keep context compact (omit desc to save tokens)
+        const compactMode = services.length > 10;
+        const detailFields = compactMode
+          ? [duration, price, resourcesStr, staffStr]
+          : [duration, interval, price, maxSlots, minSlots, parallel, allowMem, category, resourcesStr, staffStr, desc];
+        const details = detailFields.filter(Boolean).join(" | ");
         return `  - ${s.name} [service_id:${s.id}]: ${details}`;
       }).join("\n")
     : "  No services configured.";
@@ -299,7 +307,7 @@ async function runSupportAgent({ tenantContext, customerData, isSignedIn, histor
 
   const response = await claude.messages.create({
     model: "claude-sonnet-4-6",
-    max_tokens: 1500,
+    max_tokens: 3000,
     system: buildSystemPrompt({ tenantContext, customerData, isSignedIn }),
     messages: [
       ...history,
