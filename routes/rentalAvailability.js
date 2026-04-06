@@ -113,7 +113,9 @@ router.get('/check', async (req, res) => {
     });
 
     // Compute pricing using tenant currency (never hardcoded)
-    const effectivePrice = svc.price_per_night ?? svc.price_amount ?? null;
+    // Use price_amount first (set by rate rules / booking system),
+    // only fall back to price_per_night if price_amount is not set.
+    const effectivePrice = svc.price_amount ?? svc.price_per_night ?? null;
     const currencyCode   = svc.currency_code || 'USD';
     const pricingSummary = getNightlyPriceSummary({ checkIn, checkOut, pricePerNight: effectivePrice });
     const pricing = pricingSummary ? { ...pricingSummary, currencyCode } : null;
