@@ -25,16 +25,21 @@ const pool = require('../db');
 // checkNightlyAvailability
 // Checks whether a resource is available for [checkIn, checkOut).
 //
+// Handles two booking formats:
+//   1. booking_mode = 'nightly'   → uses checkin_date / checkout_date columns
+//   2. booking_mode = 'time_slots' (or NULL, legacy) → derives date from start_time
+//      (start_time is stored as midnight UTC on the check-in day)
+//
 // Returns:
 //   { available: true }
-//   { available: false, conflictingBookings: [{id, checkin_date, checkout_date, status}] }
+//   { available: false, conflictingBookings: [...] }
 // ---------------------------------------------------------------------------
 async function checkNightlyAvailability({
   tenantId,
   resourceId,
-  checkIn,   // YYYY-MM-DD
-  checkOut,  // YYYY-MM-DD  (exclusive end — day guest departs)
-  excludeBookingId = null, // for edit scenarios
+  checkIn,
+  checkOut,
+  excludeBookingId = null,
 }) {
   if (!tenantId || !resourceId || !checkIn || !checkOut) {
     throw new Error('tenantId, resourceId, checkIn, checkOut are all required');
@@ -48,17 +53,29 @@ async function checkNightlyAvailability({
   }
 
   const { rows } = await pool.query(
-    `SELECT b.id, b.checkin_date, b.checkout_date, b.status
+    `SELECT b.id, b.checkin_date, b.checkout_date, b.start_time, b.booking_mode, b.status
      FROM bookings b
-     WHERE b.tenant_id        = $1
-       AND b.resource_id      = $2
-       AND b.booking_mode     = 'nightly'
-       AND b.deleted_at IS NULL
-       AND b.status           NOT IN ('cancelled')
-       AND b.checkin_date     < $4::date
-       AND b.checkout_date    > $3::date
+     WHERE b.tenant_id    = $1
+       AND b.resource_id  = $2
+       AND b.deleted_at   IS NULL
+       AND b.status       NOT IN ('cancelled')
+       AND (
+         -- Nightly bookings: standard half-open interval overlap
+         (b.booking_mode = 'nightly'
+          AND b.checkin_date  IS NOT NULL
+          AND b.checkout_date IS NOT NULL
+          AND b.checkin_date  < $4::date
+          AND b.checkout_date > $3::date)
+         OR
+         -- Timeslot / legacy bookings: start_time falls on a night within the requested range.
+         -- start_time is stored as midnight UTC on the check-in day (UTC+3 = 3:00 AM Amman).
+         (COALESCE(b.booking_mode, 'time_slots') != 'nightly'
+          AND b.start_time IS NOT NULL
+          AND (b.start_time AT TIME ZONE 'UTC')::date >= $3::date
+          AND (b.start_time AT TIME ZONE 'UTC')::date <  $4::date)
+       )
        ${excludeClause}
-     ORDER BY b.checkin_date`,
+     ORDER BY b.checkin_date, b.start_time`,
     params
   );
 
@@ -68,50 +85,68 @@ async function checkNightlyAvailability({
 
 // ---------------------------------------------------------------------------
 // getBlockedDatesForMonth
-// Returns all date strings (YYYY-MM-DD) that are occupied in a given month.
-// Used to disable past dates in the booking calendar.
+// Returns all blocked date strings (YYYY-MM-DD) for a resource in a given month.
+// Handles two booking formats:
+//   1. booking_mode = 'nightly'    → expands checkin_date..checkout_date range
+//   2. booking_mode = 'time_slots' (or NULL, legacy/manual) → blocks the date of start_time
+//      (start_time is stored as midnight UTC = 3:00 AM Amman for same-day bookings)
 //
-// month = YYYY-MM (e.g. "2026-04")
+// month = YYYY-MM
 // ---------------------------------------------------------------------------
 async function getBlockedDatesForMonth({ tenantId, resourceId, month }) {
   if (!tenantId || !resourceId || !month) {
     throw new Error('tenantId, resourceId, month are all required');
   }
 
-  // Compute month window
   const [year, mon] = month.split('-').map(Number);
-  const firstDay = `${year}-${String(mon).padStart(2, '0')}-01`;
-  const lastDay  = new Date(year, mon, 0); // day 0 of next month = last day of this month
+  const firstDay   = `${year}-${String(mon).padStart(2, '0')}-01`;
+  const lastDay    = new Date(year, mon, 0);
   const lastDayStr = `${year}-${String(mon).padStart(2, '0')}-${String(lastDay.getDate()).padStart(2, '0')}`;
 
-  // Fetch all nightly bookings that overlap this month
+  // Fetch all active bookings for this resource that overlap this month.
+  // Two cases handled in a single query:
+  //   - Nightly: date-range overlap with checkin_date/checkout_date
+  //   - Timeslot/legacy: start_time (UTC) falls within the month
   const { rows } = await pool.query(
-    `SELECT checkin_date, checkout_date
+    `SELECT booking_mode, checkin_date, checkout_date, start_time
      FROM bookings
-     WHERE tenant_id     = $1
-       AND resource_id   = $2
-       AND booking_mode  = 'nightly'
-       AND deleted_at    IS NULL
-       AND status        NOT IN ('cancelled')
-       AND checkin_date  <= $4::date
-       AND checkout_date >  $3::date
-     ORDER BY checkin_date`,
+     WHERE tenant_id    = $1
+       AND resource_id  = $2
+       AND deleted_at   IS NULL
+       AND status       NOT IN ('cancelled')
+       AND (
+         -- Nightly bookings with explicit date range
+         (booking_mode = 'nightly'
+          AND checkin_date  IS NOT NULL
+          AND checkout_date IS NOT NULL
+          AND checkin_date  <= $4::date
+          AND checkout_date >  $3::date)
+         OR
+         -- Timeslot / legacy bookings: derive blocked date from start_time (stored UTC)
+         (COALESCE(booking_mode, 'time_slots') != 'nightly'
+          AND start_time IS NOT NULL
+          AND (start_time AT TIME ZONE 'UTC')::date BETWEEN $3::date AND $4::date)
+       )
+     ORDER BY checkin_date, start_time`,
     [tenantId, resourceId, firstDay, lastDayStr]
   );
 
-  // Expand each booking into individual blocked dates
   const blocked = new Set();
 
   for (const row of rows) {
-    const ci = new Date(`${row.checkin_date}T00:00:00Z`);
-    const co = new Date(`${row.checkout_date}T00:00:00Z`);
-
-    // Occupy nights: [checkin, checkout)
-    const cursor = new Date(ci);
-    while (cursor < co) {
-      const iso = cursor.toISOString().slice(0, 10);
-      blocked.add(iso);
-      cursor.setUTCDate(cursor.getUTCDate() + 1);
+    if (row.booking_mode === 'nightly' && row.checkin_date && row.checkout_date) {
+      // Expand nightly range: block each night [checkin, checkout)
+      const ci     = new Date(`${row.checkin_date}T00:00:00Z`);
+      const co     = new Date(`${row.checkout_date}T00:00:00Z`);
+      const cursor = new Date(ci);
+      while (cursor < co) {
+        blocked.add(cursor.toISOString().slice(0, 10));
+        cursor.setUTCDate(cursor.getUTCDate() + 1);
+      }
+    } else if (row.start_time) {
+      // Timeslot / legacy: block the UTC date of the start_time
+      const d = new Date(row.start_time);
+      blocked.add(d.toISOString().slice(0, 10));
     }
   }
 
