@@ -858,4 +858,67 @@ router.post("/:tenantSlug/generate-landing", async (req, res) => {
   }
 });
 
+// ── POST /api/ai/:tenantSlug/transcribe ──────────────────────────────
+// Accepts a multipart audio file (webm/mp4/ogg/wav from MediaRecorder),
+// converts it to text using Claude, returns { transcript: string }.
+// This is the reliable cross-device alternative to Web Speech API,
+// needed because Samsung Chrome silently breaks SpeechRecognition.
+const multer = require("multer");
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 }, // 10 MB max
+});
+
+router.post("/:tenantSlug/transcribe", optionalAuth, upload.single("audio"), async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: "No audio file received" });
+
+    const { buffer, mimetype, originalname } = req.file;
+    if (!buffer || buffer.length < 100) {
+      return res.status(400).json({ error: "Audio file is empty or too short" });
+    }
+
+    // Determine media type — MediaRecorder on Android typically sends webm
+    const mediaType = (mimetype && mimetype.startsWith("audio/")) ? mimetype : "audio/webm";
+
+    // Use Claude to transcribe via the audio document block
+    const Anthropic = require("@anthropic-ai/sdk");
+    const client = new Anthropic();
+
+    const base64Audio = buffer.toString("base64");
+
+    const response = await client.messages.create({
+      model: "claude-opus-4-5",
+      max_tokens: 256,
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "document",
+              source: {
+                type: "base64",
+                media_type: mediaType,
+                data: base64Audio,
+              },
+            },
+            {
+              type: "text",
+              text: "Please transcribe this audio recording exactly as spoken. Return only the transcribed text with no extra commentary, quotes, or formatting.",
+            },
+          ],
+        },
+      ],
+    });
+
+    const transcript = response.content?.[0]?.text?.trim() ?? "";
+    console.log(`[AI transcribe] tenant=${req.params.tenantSlug} bytes=${buffer.length} transcript="${transcript.slice(0, 80)}"`);
+    res.json({ transcript });
+  } catch (err) {
+    console.error("[AI transcribe error]", err?.message ?? err);
+    res.status(500).json({ error: "Transcription failed, please try again" });
+  }
+});
+
+
 module.exports = router;
