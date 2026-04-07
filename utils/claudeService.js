@@ -30,42 +30,64 @@ function buildBusinessContext({ name, services = [], memberships = [], rates = [
   // — staff section below already lists all staff with their service links
   const showStaffPerService = services.length <= 10;
 
-  // Services — include linked resources and staff per service
-  const servicesBlock = services.length > 0
-    ? services.map((s) => {
-        const price = s.price != null
-          ? (Number(s.price) === 0 ? "Free" : `${Number(s.price).toFixed(2)} ${s.currency_code || "JD"}`)
-          : "price on request";
-        const duration   = s.duration_minutes     ? `${s.duration_minutes} min session` : null;
-        const interval   = s.slot_interval_minutes ? `${s.slot_interval_minutes} min slot intervals` : null;
-        const maxSlots   = s.max_consecutive_slots ? `max ${s.max_consecutive_slots} slots per booking` : null;
-        const minSlots   = s.min_consecutive_slots ? `min ${s.min_consecutive_slots} slots` : null;
-        const parallel   = s.max_parallel_bookings > 1 ? `${s.max_parallel_bookings} bookings can run simultaneously` : null;
-        const allowMem   = s.allow_membership ? "membership credits accepted" : null;
-        const category   = s.category_id && catMap[s.category_id] ? `category: ${catMap[s.category_id]}` : null;
-        const desc       = s.description ? `"${s.description}"` : null;
+  // Services — group by category when categories exist, include linked resources and staff per service
+  const buildServiceLine = (s) => {
+    const price = s.price != null
+      ? (Number(s.price) === 0 ? "Free" : `${Number(s.price).toFixed(2)} ${s.currency_code || "JD"}`)
+      : "price on request";
+    const duration   = s.duration_minutes     ? `${s.duration_minutes} min session` : null;
+    const interval   = s.slot_interval_minutes ? `${s.slot_interval_minutes} min slot intervals` : null;
+    const maxSlots   = s.max_consecutive_slots ? `max ${s.max_consecutive_slots} slots per booking` : null;
+    const minSlots   = s.min_consecutive_slots ? `min ${s.min_consecutive_slots} slots` : null;
+    const parallel   = s.max_parallel_bookings > 1 ? `${s.max_parallel_bookings} bookings can run simultaneously` : null;
+    const allowMem   = s.allow_membership ? "membership credits accepted" : null;
+    const desc       = s.description ? `"${s.description}"` : null;
 
-        // Show which resources this service can use
-        const linkedResources = serviceResourceMap[s.id];
-        const resourcesStr = linkedResources && linkedResources.length > 0
-          ? `resources: ${linkedResources.map(r => `${r.name} [resource_id:${r.id}]`).join(", ")}`
-          : null;
+    const linkedResources = serviceResourceMap[s.id];
+    const resourcesStr = linkedResources && linkedResources.length > 0
+      ? `resources: ${linkedResources.map(r => `${r.name} [resource_id:${r.id}]`).join(", ")}`
+      : null;
 
-        // Show which staff can do this service
-        const linkedStaff = serviceStaffMap[s.id];
-        const staffStr = (showStaffPerService && linkedStaff && linkedStaff.length > 0)
-          ? `staff: ${linkedStaff.map(st => `${st.name} [staff_id:${st.id}]`).join(", ")}`
-          : null;
+    const linkedStaff = serviceStaffMap[s.id];
+    const staffStr = (showStaffPerService && linkedStaff && linkedStaff.length > 0)
+      ? `staff: ${linkedStaff.map(st => `${st.name} [staff_id:${st.id}]`).join(", ")}`
+      : null;
 
-        // For tenants with many services, keep context compact (omit desc to save tokens)
-        const compactMode = services.length > 10;
-        const detailFields = compactMode
-          ? [duration, price, resourcesStr, staffStr]
-          : [duration, interval, price, maxSlots, minSlots, parallel, allowMem, category, resourcesStr, staffStr, desc];
-        const details = detailFields.filter(Boolean).join(" | ");
-        return `  - ${s.name} [service_id:${s.id}]: ${details}`;
-      }).join("\n")
-    : "  No services configured.";
+    // Compact mode (>10 services): drop verbose details but always keep resources/staff
+    const compactMode = services.length > 10;
+    const detailFields = compactMode
+      ? [duration, price, resourcesStr, staffStr]
+      : [duration, interval, price, maxSlots, minSlots, parallel, allowMem, resourcesStr, staffStr, desc];
+    const details = detailFields.filter(Boolean).join(" | ");
+    return `  - ${s.name} [service_id:${s.id}]: ${details}`;
+  };
+
+  let servicesBlock;
+  if (services.length === 0) {
+    servicesBlock = "  No services configured.";
+  } else if (categories.length > 0) {
+    // Group services by category
+    const grouped = {};
+    const uncategorized = [];
+    services.forEach(s => {
+      const catName = s.category_id && catMap[s.category_id] ? catMap[s.category_id] : null;
+      if (catName) {
+        if (!grouped[catName]) grouped[catName] = [];
+        grouped[catName].push(s);
+      } else {
+        uncategorized.push(s);
+      }
+    });
+    const sections = Object.entries(grouped).map(([cat, svcs]) =>
+      `  [${cat}]\n${svcs.map(buildServiceLine).join("\n")}`
+    );
+    if (uncategorized.length > 0) {
+      sections.push(`  [Other]\n${uncategorized.map(buildServiceLine).join("\n")}`);
+    }
+    servicesBlock = sections.join("\n\n");
+  } else {
+    servicesBlock = services.map(buildServiceLine).join("\n");
+  }
 
   // Memberships
   const membershipsBlock = memberships.length > 0
@@ -169,12 +191,12 @@ function buildCustomerContext({ profile, bookings = [], memberships = [], packag
   const now = Date.now();
 
   const upcoming = bookings
-    .filter(b => b.start_time && new Date(b.start_time).getTime() >= now && b.status !== "cancelled")
+    .filter(b => b.start_time && new Date(b.start_time).getTime() >= now && b.status !== "cancelled" && b.service_name)
     .sort((a, b) => new Date(a.start_time) - new Date(b.start_time))
     .slice(0, 10);
 
   const past = bookings
-    .filter(b => b.start_time && new Date(b.start_time).getTime() < now)
+    .filter(b => b.start_time && new Date(b.start_time).getTime() < now && b.service_name)
     .sort((a, b) => new Date(b.start_time) - new Date(a.start_time))
     .slice(0, 10);
 

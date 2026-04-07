@@ -58,6 +58,8 @@ async function fetchBusinessContext(tenantId, tenantSlug) {
     hasDescription, hasMaxParallel, hasMinSlots, hasAllowMem,
     hasCategoryId, hasPriceAmount, hasPrice, hasCurrencyCode,
     hasSlotInterval, hasMaxConsec, hasDeletedAt, hasIsActive, hasResourceIsActive,
+    // resource / staff optional columns
+    hasResourceCapacity, hasStaffEmail,
     // membership_plans columns
     hasMpBillingType, hasMpIncMins, hasMpIncUses, hasMpValidity,
     hasMpCurrency, hasMpDescription,
@@ -76,6 +78,8 @@ async function fetchBusinessContext(tenantId, tenantSlug) {
     columnExists("services", "deleted_at"),
     columnExists("services", "is_active"),
     columnExists("resources", "is_active"),
+    columnExists("resources", "capacity"),
+    columnExists("staff", "email"),
     columnExists("membership_plans", "billing_type"),
     columnExists("membership_plans", "included_minutes"),
     columnExists("membership_plans", "included_uses"),
@@ -158,7 +162,7 @@ async function fetchBusinessContext(tenantId, tenantSlug) {
       ).catch(() => ({ rows: [] })),
 
       db.query(
-        `SELECT id, name, capacity
+        `SELECT id, name${hasResourceCapacity ? ", capacity" : ""}
          FROM resources
          WHERE tenant_id = $1${hasResourceIsActive ? " AND COALESCE(is_active, true) = true" : ""}
          ORDER BY name ASC`,
@@ -166,9 +170,9 @@ async function fetchBusinessContext(tenantId, tenantSlug) {
       ).catch(() => ({ rows: [] })),
 
       db.query(
-        `SELECT id, name, email, is_active
+        `SELECT id, name${hasStaffEmail ? ", email" : ""}${hasIsActive ? ", is_active" : ""}
          FROM staff
-         WHERE tenant_id = $1 AND COALESCE(is_active, true) = true
+         WHERE tenant_id = $1${hasIsActive ? " AND COALESCE(is_active, true) = true" : ""}
          ORDER BY name ASC`,
         [tenantId]
       ).catch(() => ({ rows: [] })),
@@ -254,7 +258,7 @@ async function fetchBusinessContext(tenantId, tenantSlug) {
   if (resourcesRows.length === 0) {
     try {
       const retryRes = await db.query(
-        `SELECT id, name, capacity FROM resources WHERE tenant_id = $1 ORDER BY name ASC`,
+        `SELECT id, name${hasResourceCapacity ? ", capacity" : ""} FROM resources WHERE tenant_id = $1 ORDER BY name ASC`,
         [tenantId]
       );
       resourcesRows = retryRes.rows;
@@ -269,7 +273,7 @@ async function fetchBusinessContext(tenantId, tenantSlug) {
   if (staffRows.length === 0) {
     try {
       const retryRes = await db.query(
-        `SELECT id, name, email FROM staff WHERE tenant_id = $1 ORDER BY name ASC`,
+        `SELECT id, name${hasStaffEmail ? ", email" : ""} FROM staff WHERE tenant_id = $1 ORDER BY name ASC`,
         [tenantId]
       );
       staffRows = retryRes.rows;
@@ -391,7 +395,7 @@ async function fetchCustomerData(tenantId, email) {
               mp.included_minutes, mp.included_uses,
               mp.billing_type, mp.validity_days
        FROM customer_memberships cm
-       LEFT JOIN membership_plans mp ON mp.id = ${planIdCol}
+       LEFT JOIN membership_plans mp ON mp.id = ${planIdCol} AND mp.tenant_id = $1
        WHERE cm.tenant_id = $1 AND cm.customer_id = $2
        ORDER BY ${startAtCol} DESC NULLS LAST
        LIMIT 10`,
