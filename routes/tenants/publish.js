@@ -54,7 +54,9 @@ router.get("/publish-status", requireAdmin, requireTenant, async (req, res) => {
     // Load current persisted publish metadata (no mutation in GET)
     const meta = await db.query(
       `
-      SELECT publish_status, publish_errors, published_at, last_validated_at
+      SELECT publish_status, publish_errors, published_at, last_validated_at,
+             (branding_published_prev IS NOT NULL) AS has_rollback_snapshot,
+             branding_published_prev_at
       FROM tenants
       WHERE id = $1
       LIMIT 1
@@ -91,6 +93,8 @@ router.get("/publish-status", requireAdmin, requireTenant, async (req, res) => {
         publish_errors: row.publish_errors || [],
         published_at: row.published_at || null,
         last_validated_at: row.last_validated_at || null,
+        has_rollback_snapshot: Boolean(row.has_rollback_snapshot),
+        branding_published_prev_at: row.branding_published_prev_at || null,
       },
       snapshots: {
         branding: snapRow.branding || {},
@@ -193,14 +197,17 @@ router.post("/publish", maybeEnsureUser, requireTenant, requireAdminOrTenantRole
 
     if (!dryRun) {
       // Copy working branding -> published snapshot.
+      // Preserve current published snapshot as prev for one-step rollback.
       const upd = await db.query(
         `
         UPDATE tenants
-        SET branding_published = COALESCE(branding, '{}'::jsonb),
-            publish_status = 'published',
-            publish_errors = '[]'::jsonb,
-            published_at = NOW(),
-            last_validated_at = NOW()
+        SET branding_published_prev    = branding_published,
+            branding_published_prev_at = published_at,
+            branding_published         = COALESCE(branding, '{}'::jsonb),
+            publish_status             = 'published',
+            publish_errors             = '[]'::jsonb,
+            published_at               = NOW(),
+            last_validated_at          = NOW()
         WHERE id = $1
         RETURNING publish_status, published_at, last_validated_at
         `,
@@ -242,6 +249,63 @@ router.post("/publish", maybeEnsureUser, requireTenant, requireAdminOrTenantRole
   } catch (err) {
     console.error("POST publish error", err);
     return res.status(500).json({ error: "Failed to publish tenant." });
+  }
+});
+
+// POST /api/tenants/rollback?tenantSlug=...
+// Restores branding_published_prev as the live published snapshot.
+// Admin-only, one-step undo of the most recent publish.
+router.post("/rollback", requireAdmin, requireTenant, async (req, res) => {
+  try {
+    const tenantId = Number(req.tenantId);
+
+    // Check that a prev snapshot exists
+    const check = await db.query(
+      `SELECT branding_published_prev, branding_published_prev_at
+         FROM tenants WHERE id = $1 LIMIT 1`,
+      [tenantId]
+    );
+    const row = check.rows?.[0];
+    if (!row?.branding_published_prev) {
+      return res.status(409).json({
+        ok: false,
+        error: "No previous publish snapshot found — nothing to roll back to.",
+      });
+    }
+
+    // Swap: published_prev → published, published → published_prev
+    const upd = await db.query(
+      `UPDATE tenants
+          SET branding_published         = branding_published_prev,
+              branding_published_prev    = branding_published,
+              branding_published_prev_at = published_at,
+              published_at               = branding_published_prev_at,
+              publish_status             = 'published',
+              last_validated_at          = NOW()
+        WHERE id = $1
+        RETURNING published_at, branding_published_prev_at`,
+      [tenantId]
+    );
+
+    // Re-write the appearance snapshot with the restored branding
+    let appearance_snapshot = null;
+    try {
+      appearance_snapshot = await writeTenantAppearanceSnapshot(tenantId);
+    } catch (e) {
+      console.error("rollback snapshot refresh error:", e);
+    }
+
+    const updRow = upd.rows?.[0] || {};
+    return res.json({
+      ok: true,
+      rolled_back_to: updRow.published_at,
+      prev_was: updRow.branding_published_prev_at,
+      appearance_snapshot,
+      serverTime: new Date().toISOString(),
+    });
+  } catch (err) {
+    console.error("POST rollback error", err);
+    return res.status(500).json({ error: "Rollback failed." });
   }
 });
 
