@@ -331,8 +331,8 @@ RULES:
 - AVAILABILITY: Always call check_availability before confirming any slot. Pass the specific resource_id if the customer named a resource.
 - BOOKING FLOW: 1) Check availability → 2) Show available slots → 3) Confirm details + price with customer → 4) Create booking only after explicit customer confirmation.
 - PENDING_BOOKING REQUIRED: Whenever you are presenting booking details and asking "Shall I confirm this booking?", you MUST append this line at the very end of your message (after all other text), on its own line, with no extra characters before or after:
-PENDING_BOOKING:{"service_id":SERVICE_ID_NUMBER,"start_time":"YYYY-MM-DDTHH:MM:00${tzOffsetStr}","resource_id":RESOURCE_ID_OR_NULL,"membership_id":MEMBERSHIP_ID_OR_NULL,"duration_minutes":DURATION_NUMBER}
-Replace values with exact numbers from the business context. ALWAYS append the timezone offset ${tzOffsetStr} to start_time — never omit it. membership_id is null if cash payment. This line is parsed by the system and not displayed.
+PENDING_BOOKING:{"service_id":SERVICE_ID_NUMBER,"start_time":"YYYY-MM-DDTHH:MM:00${tzOffsetStr}","resource_id":RESOURCE_ID_OR_NULL,"staff_id":STAFF_ID_OR_NULL,"membership_id":MEMBERSHIP_ID_OR_NULL,"duration_minutes":DURATION_NUMBER}
+Replace values with exact numbers from the business context. ALWAYS append the timezone offset ${tzOffsetStr} to start_time — never omit it. staff_id is null if no staff is required. membership_id is null if cash payment. This line is parsed by the system and not displayed.
 - CONFIRMATION CRITICAL: When the customer says YES to confirming a booking (any of: "yes", "confirm", "go ahead", "book it", "do it", "yes please", "confirm it"), you MUST output ACTION:{...create_booking...} immediately with all booking details from the conversation. Do NOT just say "I'll do it" or "creating now" - output the ACTION line directly.
 - PACKAGE PAYMENT: If the customer has a prepaid package with remaining sessions, offer to use it. Include prepaid_entitlement_id from their [package id:X] in the ACTION.
 - CANCELLATION: Always show booking details and ask "Shall I go ahead and cancel?" before acting.
@@ -348,7 +348,7 @@ async function runSupportAgent({ tenantContext, customerData, isSignedIn, histor
   const confirmNote = confirmationMode
     ? `
 
-[SYSTEM INSTRUCTION: The customer just confirmed. Output ACTION:{"type":"create_booking","service_id":X,"start_time":"ISO","duration_minutes":N,"resource_id":X,"membership_id":X_or_null,"prepaid_entitlement_id":X_or_null,"slots":N} immediately. Use exact IDs from the business context. Use the time the customer selected. Do NOT ask again.]`
+[SYSTEM INSTRUCTION: The customer just confirmed. Output ACTION:{"type":"create_booking","service_id":X,"start_time":"YYYY-MM-DDTHH:MM:00${tzOffsetStr}","duration_minutes":N,"resource_id":X_or_null,"staff_id":X_or_null,"membership_id":X_or_null,"prepaid_entitlement_id":X_or_null,"slots":N} immediately. Use exact IDs from the business context. Use the exact time the customer selected. ALWAYS include the timezone offset ${tzOffsetStr} in start_time. Do NOT ask again.]`
     : "";
 
   const response = await claude.messages.create({
