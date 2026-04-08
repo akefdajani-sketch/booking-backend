@@ -410,4 +410,74 @@ router.delete("/:id/banner/:slot", requireAdmin, async (req, res) => {
     return res.status(500).json({ error: "Delete failed" });
   }
 });
+
+// -----------------------------------------------------------------------------
+// POST /api/tenants/:id/library
+// Upload an image to the tenant's image library (branding.assets.libraryImages).
+// Each upload appends { id, key, url } to the array — it does NOT overwrite.
+// field name must be: "file"
+// -----------------------------------------------------------------------------
+router.post(
+  "/:id/library",
+  requireAdmin,
+  upload.single("file"),
+  uploadErrorHandler,
+  async (req, res) => {
+    let filePath = null;
+    try {
+      const id = Number(req.params.id);
+      if (!Number.isFinite(id) || id <= 0) {
+        return res.status(400).json({ error: "Invalid tenant id" });
+      }
+      if (!req.file) {
+        return res.status(400).json({ error: "No file uploaded" });
+      }
+
+      filePath = req.file.path;
+
+      const key = `tenants/${id}/branding/library/${Date.now()}-${safeName(req.file.originalname)}`;
+      const { url } = await uploadFileToR2({
+        filePath,
+        contentType: req.file.mimetype,
+        key,
+      });
+
+      // Fetch current library array and append the new entry
+      const row = await db.query(
+        `SELECT COALESCE(branding, '{}'::jsonb) #> '{assets,libraryImages}' AS lib FROM tenants WHERE id = $1 LIMIT 1`,
+        [id]
+      );
+
+      const existing = Array.isArray(row.rows?.[0]?.lib) ? row.rows[0].lib : [];
+      const entry = { id: key.split("/").pop(), key, url };
+      const updated = [...existing, entry];
+
+      const result = await db.query(
+        `UPDATE tenants
+         SET branding = jsonb_set(
+           COALESCE(branding, '{}'::jsonb),
+           '{assets,libraryImages}',
+           $2::jsonb,
+           true
+         )
+         WHERE id = $1
+         RETURNING id, slug`,
+        [id, JSON.stringify(updated)]
+      );
+
+      if (!result.rows.length) {
+        return res.status(404).json({ error: "Tenant not found" });
+      }
+
+      return res.json({ ok: true, url, public_url: url, key });
+    } catch (err) {
+      console.error("Tenant library upload error:", err);
+      return res.status(500).json({ error: "Upload failed" });
+    } finally {
+      if (filePath) await fs.unlink(filePath).catch(() => {});
+    }
+  }
+);
+
+
 };
