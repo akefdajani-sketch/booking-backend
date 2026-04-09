@@ -23,6 +23,15 @@ const {
   validateNightlyRange,
 } = require('../utils/rentalAvailabilityEngine');
 
+// Rates engine — apply tenant rate rules to nightly check-in date
+let computeRateForBookingLike;
+try {
+  ({ computeRateForBookingLike } = require('../utils/ratesEngine'));
+} catch (_) {
+  // Non-fatal: old deployments without ratesEngine will just use base price
+  computeRateForBookingLike = null;
+}
+
 // ---------------------------------------------------------------------------
 // GET /api/rental-availability/check
 // Query params:
@@ -112,11 +121,37 @@ router.get('/check', async (req, res) => {
       excludeBookingId: excludeBookingId ? Number(excludeBookingId) : null,
     });
 
-    // Compute pricing using tenant currency (never hardcoded)
-    // Use price_amount first (set by rate rules / booking system),
-    // only fall back to price_per_night if price_amount is not set.
-    const effectivePrice = svc.price_amount ?? svc.price_per_night ?? null;
-    const currencyCode   = svc.currency_code || 'USD';
+    // Compute pricing — apply rate rules for the check-in date, fall back to base price
+    // Use price_amount first (set directly on service), then price_per_night.
+    const basePricePerNight = svc.price_amount ?? svc.price_per_night ?? null;
+    const currencyCode      = svc.currency_code || 'JOD';
+
+    // Attempt to apply rate rules using the check-in date as the booking start.
+    // durationMinutes = nights × 1440 lets day-of-week and date-window rules fire correctly.
+    let effectivePrice = basePricePerNight;
+    if (computeRateForBookingLike && basePricePerNight != null) {
+      try {
+        const nightsCount    = rangeValidation.nights || 1;
+        const checkInDate    = new Date(`${checkIn}T12:00:00Z`); // noon UTC — avoids DST edge
+        const rateResult     = await computeRateForBookingLike({
+          tenantId,
+          serviceId,
+          staffId:    null,
+          resourceId,
+          start:           checkInDate,
+          durationMinutes: nightsCount * 1440,
+          basePriceAmount: basePricePerNight,
+          serviceSlotMinutes: 1440,           // one day = one "slot" for nightly services
+        });
+        if (rateResult?.adjusted_price_amount != null) {
+          effectivePrice = rateResult.adjusted_price_amount;
+        }
+      } catch (rateErr) {
+        // Non-fatal — fall back to base price
+        console.warn('rentalAvailability: rate engine error (non-fatal):', rateErr?.message || rateErr);
+      }
+    }
+
     const pricingSummary = getNightlyPriceSummary({ checkIn, checkOut, pricePerNight: effectivePrice });
     const pricing = pricingSummary ? { ...pricingSummary, currencyCode } : null;
 
