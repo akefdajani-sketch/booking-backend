@@ -222,6 +222,8 @@ router.post("/me/packages/:prepaidProductId/purchase", requireAppAuth, requireTe
     const tenantId = req.tenantId || req.tenant?.id;
     const email = (req.googleUser?.email || "").toLowerCase();
     const prepaidProductId = Number(req.params.prepaidProductId);
+    const { payment_method } = req.body || {};
+    const paymentMethod = typeof payment_method === "string" && payment_method ? payment_method : null;
     if (!tenantId) return res.status(400).json({ error: "Missing tenant" });
     if (!email) return res.status(401).json({ error: "Unauthorized" });
     if (!prepaidProductId) return res.status(400).json({ error: "Missing product id" });
@@ -285,7 +287,7 @@ router.post("/me/packages/:prepaidProductId/purchase", requireAppAuth, requireTe
         startsAtIso,
         expiresAtIso,
         `Initial grant (${product.name || "Package"})`,
-        JSON.stringify({ purchased_via: "customer_portal" }),
+        JSON.stringify({ purchased_via: "customer_portal", payment_method: paymentMethod }),
       ]
     );
 
@@ -316,7 +318,7 @@ router.post("/me/packages/:prepaidProductId/purchase", requireAppAuth, requireTe
         product.price ?? null,
         product.currency ?? null,
         `Initial grant (${product.name || "Package"})`,
-        JSON.stringify({ source: "purchase" }),
+        JSON.stringify({ source: "purchase", payment_method: paymentMethod }),
       ]
     );
 
