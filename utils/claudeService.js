@@ -343,12 +343,26 @@ Replace values with exact numbers from the business context. ALWAYS append the t
 
 // ── Main agent ────────────────────────────────────────────────────────
 async function runSupportAgent({ tenantContext, customerData, isSignedIn, history, message, confirmationMode = false }) {
+  // Compute tz offset here (same logic as buildSystemPrompt) — tzOffsetStr only
+  // exists in that function's scope and cannot be referenced here directly.
+  const _tz = tenantContext.timezone || "Asia/Amman";
+  const _tzOffsetStr = (() => {
+    try {
+      const offsetPart = new Intl.DateTimeFormat("en", {
+        timeZone: _tz, timeZoneName: "longOffset",
+      }).formatToParts(new Date()).find(p => p.type === "timeZoneName")?.value || "GMT+0";
+      const match = offsetPart.match(/GMT([+\-])(\d+)(?::(\d{2}))?/);
+      if (!match) return "+00:00";
+      return `${match[1]}${match[2].padStart(2, "0")}:${(match[3] || "00").padStart(2, "0")}`;
+    } catch { return "+00:00"; }
+  })();
+
   // When user is confirming a previously-discussed booking, inject an explicit instruction
   // so Claude reliably outputs ACTION:create_booking with the correct IDs from context.
   const confirmNote = confirmationMode
     ? `
 
-[SYSTEM INSTRUCTION: The customer just confirmed. Output ACTION:{"type":"create_booking","service_id":X,"start_time":"YYYY-MM-DDTHH:MM:00${tzOffsetStr}","duration_minutes":N,"resource_id":X_or_null,"staff_id":X_or_null,"membership_id":X_or_null,"prepaid_entitlement_id":X_or_null,"slots":N} immediately. Use exact IDs from the business context. Use the exact time the customer selected. ALWAYS include the timezone offset ${tzOffsetStr} in start_time. Do NOT ask again.]`
+[SYSTEM INSTRUCTION: The customer just confirmed. Output ACTION:{"type":"create_booking","service_id":X,"start_time":"YYYY-MM-DDTHH:MM:00${_tzOffsetStr}","duration_minutes":N,"resource_id":X_or_null,"staff_id":X_or_null,"membership_id":X_or_null,"prepaid_entitlement_id":X_or_null,"slots":N} immediately. Use exact IDs from the business context. Use the exact time the customer selected. ALWAYS include the timezone offset ${_tzOffsetStr} in start_time. Do NOT ask again.]`
     : "";
 
   const response = await claude.messages.create({
