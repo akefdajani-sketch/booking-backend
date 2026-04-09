@@ -154,7 +154,7 @@ module.exports = function attachAmenitiesAndAddons(router, resolveTenantFromReso
 
       // Get tenant currency as fallback
       const { rows } = await db.query(
-        `SELECT a.*, COALESCE(a.currency_code, t.currency_code, 'USD') AS effective_currency
+        `SELECT a.*, COALESCE(a.currency_code, t.currency_code, 'JOD') AS effective_currency
          FROM resource_addons a
          JOIN resources r ON r.id = a.resource_id
          JOIN tenants   t ON t.id = a.tenant_id
