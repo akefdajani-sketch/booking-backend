@@ -238,8 +238,9 @@ router.post("/me/memberships/subscribe", requireAppAuth, requireTenant, async (r
   try {
     const tenantId = req.tenant?.id;
     const email = (req.googleUser?.email || "").toLowerCase();
-    const { planId } = req.body || {};
+    const { planId, payment_method } = req.body || {};
     const planIdNum = Number(planId);
+    const paymentMethod = typeof payment_method === "string" && payment_method ? payment_method : null;
 
     if (!tenantId) return res.status(400).json({ error: "Missing tenant" });
     if (!email) return res.status(401).json({ error: "Unauthorized" });
@@ -334,15 +335,22 @@ router.post("/me/memberships/subscribe", requireAppAuth, requireTenant, async (r
       }
 
       // 3) Create a fresh membership row.
+      // Ensure payment_method column exists (safe, idempotent – same pattern as ensurePaymentMethodColumn.js)
+      await pool.query(`
+        ALTER TABLE customer_memberships
+          ADD COLUMN IF NOT EXISTS payment_method TEXT
+            CHECK (payment_method IS NULL OR payment_method IN ('card','cliq','cash','free'))
+      `).catch(() => { /* column already exists or DB doesn't support CHECK on ADD — non-fatal */ });
+
       let membership;
       try {
         const ins = await pool.query(
           `
           INSERT INTO customer_memberships
-            (tenant_id, customer_id, plan_id, status, start_at, end_at, minutes_remaining, uses_remaining)
+            (tenant_id, customer_id, plan_id, status, start_at, end_at, minutes_remaining, uses_remaining, payment_method)
           VALUES
-            ($1, $2, $3, 'active', $4, $5, $6, $7)
-          RETURNING id, tenant_id, customer_id, plan_id, status, start_at, end_at, minutes_remaining, uses_remaining
+            ($1, $2, $3, 'active', $4, $5, $6, $7, $8)
+          RETURNING id, tenant_id, customer_id, plan_id, status, start_at, end_at, minutes_remaining, uses_remaining, payment_method
           `,
           [
             tenantId,
@@ -353,12 +361,35 @@ router.post("/me/memberships/subscribe", requireAppAuth, requireTenant, async (r
             // Balances are derived from the membership_ledger; initialize to 0.
             0,
             0,
+            paymentMethod,
           ]
         );
         membership = ins.rows[0];
       } catch (eIns) {
-        // If there is a race, the unique constraint may fire. Return the active membership cleanly.
-        if (eIns && eIns.code === "23505" && String(eIns.constraint || "") === "uq_cm_one_active_per_plan") {
+        // payment_method column may not exist yet if the ALTER above was blocked.
+        // Fall back to insert without it.
+        if (eIns && String(eIns.message || "").includes("payment_method")) {
+          const ins2 = await pool.query(
+            `
+            INSERT INTO customer_memberships
+              (tenant_id, customer_id, plan_id, status, start_at, end_at, minutes_remaining, uses_remaining)
+            VALUES
+              ($1, $2, $3, 'active', $4, $5, $6, $7)
+            RETURNING id, tenant_id, customer_id, plan_id, status, start_at, end_at, minutes_remaining, uses_remaining
+            `,
+            [
+              tenantId,
+              customerId,
+              planIdNum,
+              now.toISOString(),
+              endAt ? endAt.toISOString() : null,
+              0,
+              0,
+            ]
+          );
+          membership = ins2.rows[0];
+        } else if (eIns && eIns.code === "23505" && String(eIns.constraint || "") === "uq_cm_one_active_per_plan") {
+          // Race condition — unique constraint fired; return the active membership cleanly.
           const raced = await pool.query(
             `
             SELECT id, tenant_id, customer_id, plan_id, status, start_at, end_at, minutes_remaining, uses_remaining
@@ -373,8 +404,10 @@ router.post("/me/memberships/subscribe", requireAppAuth, requireTenant, async (r
             await pool.query("COMMIT");
             return res.json({ ok: true, alreadyActive: true, membership: raced.rows[0] });
           }
+          throw eIns;
+        } else {
+          throw eIns;
         }
-        throw eIns;
       }
 
       // 4) Create the initial GRANT row in the ledger (money-truth).
