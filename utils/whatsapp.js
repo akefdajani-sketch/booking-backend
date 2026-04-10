@@ -233,6 +233,8 @@ function normalisePhone(raw) {
   // Remove everything except digits and leading +
   let s = String(raw).trim().replace(/[\s\-().]/g, '');
   if (s.startsWith('+')) s = s.slice(1);
+  // Strip leading 00 (international dialling prefix, e.g. 00962 → 962)
+  if (s.startsWith('00')) s = s.slice(2);
   // Must be 7–15 digits (E.164 without the +)
   if (!/^\d{7,15}$/.test(s)) return null;
   return s;
