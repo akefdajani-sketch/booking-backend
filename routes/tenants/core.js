@@ -428,6 +428,12 @@ router.patch(
         optional.rental_mode_enabled = !!body.rental_mode_enabled;
       }
 
+      // BOOKING IDENTITY: allow setting booking_code_prefix via general PATCH
+      if (body.booking_code_prefix !== undefined) {
+        const prefix = String(body.booking_code_prefix || "").trim().toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 4);
+        if (prefix) optional.booking_code_prefix = prefix;
+      }
+
       const sets = ["name = $1", "slug = $2", "kind = $3", "timezone = $4"]; // stable order
       const vals = [name, slug, kind, timezone];
 
@@ -449,6 +455,8 @@ router.patch(
       appendOptional("admin_email", optional.admin_email);
       // RENTAL-1
       if (optional.rental_mode_enabled !== undefined) appendOptional("rental_mode_enabled", optional.rental_mode_enabled);
+      // BOOKING IDENTITY
+      if (optional.booking_code_prefix !== undefined) appendOptional("booking_code_prefix", optional.booking_code_prefix);
 
       vals.push(id);
 
@@ -555,6 +563,149 @@ router.get("/:id/onboarding", requireAdmin, async (req, res) => {
   }
 });
 
+
+// -----------------------------------------------------------------------------
+// PATCH /api/tenants/:id/payment-gateway
+// Owner: update per-tenant MPGS payment gateway credentials.
+// Credentials are stored on the tenants table (migration 018).
+// network_api_password is AES-256-GCM encrypted via TENANT_CREDS_KEY env var.
+// Omitting network_api_password preserves the existing encrypted value.
+// -----------------------------------------------------------------------------
+router.patch(
+  "/:id/payment-gateway",
+  setTenantIdFromParamForRole,
+  requireAdminOrTenantRole("owner"),
+  async (req, res) => {
+    try {
+      const id   = Number(req.params.id);
+      if (!Number.isFinite(id) || id <= 0) return res.status(400).json({ error: "Invalid tenant id" });
+
+      const body = req.body && typeof req.body === "object" ? req.body : {};
+      const cols = await getTenantColumnSet();
+
+      if (!cols.has("network_merchant_id")) {
+        return res.status(503).json({ error: "Payment gateway columns not migrated. Run migration 018." });
+      }
+
+      const sets = [];
+      const vals = [];
+      const add  = (col, val) => { vals.push(val); sets.push(`${col} = $${vals.length}`); };
+
+      if (body.network_merchant_id !== undefined)
+        add("network_merchant_id", String(body.network_merchant_id || "").trim() || null);
+
+      if (body.network_gateway_url !== undefined)
+        add("network_gateway_url", String(body.network_gateway_url || "").trim() || null);
+
+      if (body.network_api_password && String(body.network_api_password).trim()) {
+        const raw    = String(body.network_api_password).trim();
+        let stored   = raw;
+        const encKey = process.env.TENANT_CREDS_KEY || "";
+        if (encKey.length >= 32) {
+          try {
+            const crypto = require("crypto");
+            const key    = Buffer.from(encKey.slice(0, 32));
+            const iv     = crypto.randomBytes(12);
+            const cipher = crypto.createCipheriv("aes-256-gcm", key, iv);
+            const enc    = Buffer.concat([cipher.update(raw, "utf8"), cipher.final()]);
+            const tag    = cipher.getAuthTag();
+            stored = `${iv.toString("hex")}:${tag.toString("hex")}:${enc.toString("hex")}`;
+          } catch (encErr) {
+            console.error("payment-gateway: encryption error:", encErr?.message);
+          }
+        }
+        add("network_api_password", stored);
+      }
+
+      if (body.network_merchant_id !== undefined) {
+        add("payment_gateway_active", !!(String(body.network_merchant_id || "").trim()));
+      }
+
+      if (!sets.length) return res.status(400).json({ error: "No fields to update" });
+
+      vals.push(id);
+      const r = await db.query(
+        `UPDATE tenants SET ${sets.join(", ")} WHERE id = $${vals.length} RETURNING *`,
+        vals
+      );
+      const t = r.rows?.[0] || null;
+      if (!t) return res.status(404).json({ error: "Tenant not found" });
+
+      const safe = { ...t };
+      delete safe.network_api_password; // never return encrypted secret
+      return res.json({ ok: true, tenant: safe });
+    } catch (err) {
+      console.error("PATCH /api/tenants/:id/payment-gateway error:", err);
+      return res.status(500).json({ error: "Failed to save payment gateway settings" });
+    }
+  }
+);
+
+// -----------------------------------------------------------------------------
+// POST /api/tenants/:id/payment-gateway/test
+// Owner: test saved MPGS credentials with a live session create call.
+// Returns { ok: true } on success, error message on failure.
+// -----------------------------------------------------------------------------
+router.post(
+  "/:id/payment-gateway/test",
+  setTenantIdFromParamForRole,
+  requireAdminOrTenantRole("owner"),
+  async (req, res) => {
+    try {
+      const id = Number(req.params.id);
+      if (!Number.isFinite(id) || id <= 0) return res.status(400).json({ error: "Invalid tenant id" });
+
+      let isTenantMpgsEnabled, getCredentials;
+      try {
+        ({ isTenantMpgsEnabled } = require("../utils/network"));
+        ({ getCredentials }      = require("../utils/networkCredentials"));
+      } catch {
+        return res.status(503).json({ error: "Payment gateway module unavailable" });
+      }
+
+      const enabled = await isTenantMpgsEnabled(id);
+      if (!enabled) {
+        return res.status(400).json({ ok: false, error: "No credentials found. Save Merchant ID and API Password first." });
+      }
+
+      const creds = await getCredentials(id);
+      if (!creds?.merchantId || !creds?.apiPassword) {
+        return res.status(400).json({ ok: false, error: "Credentials incomplete. Save Merchant ID and API Password." });
+      }
+
+      const base    = creds.gatewayUrl || process.env.NETWORK_GATEWAY_URL || "https://ap-gateway.mastercard.com";
+      const testUrl = `${base}/api/rest/version/61/merchant/${creds.merchantId}/session`;
+      const auth    = "Basic " + Buffer.from(`merchant.${creds.merchantId}:${creds.apiPassword}`).toString("base64");
+
+      const https   = require("https");
+      const result  = await new Promise((resolve, reject) => {
+        const req2 = https.request(testUrl, {
+          method: "POST",
+          headers: { Authorization: auth, "Content-Type": "application/json" },
+        }, (r) => {
+          let body = "";
+          r.on("data", (c) => { body += c; });
+          r.on("end", () => resolve({ status: r.statusCode, body }));
+        });
+        req2.on("error", reject);
+        req2.setTimeout(8000, () => { req2.destroy(); reject(new Error("Timed out")); });
+        req2.end(JSON.stringify({}));
+      });
+
+      if (result.status === 201 || result.status === 200) {
+        await db.query("UPDATE tenants SET payment_gateway_active = true WHERE id = $1", [id]);
+        return res.json({ ok: true, message: "Connected successfully to Network International gateway." });
+      }
+      if (result.status === 401) {
+        return res.status(400).json({ ok: false, error: "Authentication failed. Check Merchant ID and API Password." });
+      }
+      return res.status(400).json({ ok: false, error: `Gateway returned status ${result.status}.` });
+    } catch (err) {
+      console.error("POST /api/tenants/:id/payment-gateway/test error:", err);
+      return res.status(500).json({ ok: false, error: err?.message || "Connection test failed" });
+    }
+  }
+);
 
 // -----------------------------------------------------------------------------
 // PATCH /api/tenants/:id/theme-key
