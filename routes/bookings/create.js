@@ -1148,6 +1148,32 @@ const charge_amount = (finalCustomerMembershipId || prepaidApplied) ? 0 : price_
         joined.prepaid_quantity_used = prepaidApplied.redeemedQuantity;
         joined.prepaid_quantity_remaining = prepaidApplied.remainingQuantity ?? null;
       }
+
+      // ── WhatsApp booking confirmation (non-fatal, fires after response) ──
+      // Only send on new bookings (not replays), only when phone exists.
+      // Runs after the response is built so it never delays the customer.
+      if (created && joined?.customer_phone) {
+        setImmediate(async () => {
+          try {
+            const { sendBookingConfirmation, isWhatsAppConfigured } = require('../../utils/whatsapp');
+            if (!isWhatsAppConfigured()) return;
+            // Load tenant name for the message
+            const tRes = await require('../../db').query('SELECT name FROM tenants WHERE id = $1', [resolvedTenantId]);
+            const tenantName = tRes.rows?.[0]?.name || 'Flexrz';
+            const waResult = await sendBookingConfirmation({ booking: joined, tenantName });
+            if (waResult.ok) {
+              require('../../utils/logger').info({ bookingId, phone: joined.customer_phone, msgId: waResult.messageId }, 'WhatsApp confirmation sent');
+            } else {
+              require('../../utils/logger').warn({ bookingId, reason: waResult.reason }, 'WhatsApp confirmation skipped');
+            }
+          } catch (waErr) {
+            // Non-fatal — log but never crash the booking response
+            require('../../utils/logger').error({ err: waErr, bookingId }, 'WhatsApp confirmation error (non-fatal)');
+          }
+        });
+      }
+      // ── End WhatsApp ──────────────────────────────────────────────────────
+
       return res.status(created ? 201 : 200).json({
         booking: joined,
         replay: !created,
