@@ -45,6 +45,13 @@ router.get("/", requireTenant, requireAdminOrTenantRole("staff"), async (req, re
         b.start_time,
         b.duration_minutes,
 
+        -- Nightly / rental booking fields (COALESCE so old schemas without the column don't error)
+        COALESCE(b.booking_mode, 'time_slots')                          AS booking_mode,
+        b.checkin_date,
+        b.checkout_date,
+        b.nights_count,
+        b.guests_count,
+
         -- Money + applied Rates snapshot (for booking details modals / receipts)
         b.price_amount,
         b.charge_amount,
