@@ -850,13 +850,63 @@ const charge_amount = (finalCustomerMembershipId || prepaidApplied) ? 0 : price_
         }
       }
 
-      const firstLetter = cleanName.charAt(0).toUpperCase() || "X";
-      const ymd = new Date().toISOString().slice(0, 10).replaceAll("-", "");
-      const bookingCode = `${firstLetter}-${resolvedTenantId}-${resolvedServiceId || 0}-${ymd}-${bookingId}`;
+      // ── Booking code generation ──────────────────────────────────────────────
+      // New format:  {PREFIX}-{TYPE}-{YYMMDD}-{SEQ4}
+      //
+      //   PREFIX  = tenants.booking_code_prefix (e.g. BRD, AQB)
+      //             fallback: first 3 chars of slug, uppercased
+      //   TYPE    = TS (time_slots) | NT (nightly) | LS (lease)
+      //   YYMMDD  = service start date for timeslot; check-in date for nightly
+      //   SEQ4    = per-tenant ever-incrementing counter, zero-padded to 4 digits
+      //
+      // Examples:
+      //   Birdie golf:    BRD-TS-260226-0079
+      //   Aqaba nightly:  AQB-NT-260415-0001
+      //
+      // The seq increment runs inside the same DB transaction so it is atomic.
+      // ────────────────────────────────────────────────────────────────────────
+      let bookingCode;
+      try {
+        const seqResult = await client.query(
+          `UPDATE tenants
+             SET booking_seq = booking_seq + 1
+           WHERE id = $1
+           RETURNING booking_seq, booking_code_prefix, slug`,
+          [resolvedTenantId]
+        );
+        const seqRow = seqResult.rows[0];
+        const seq    = seqRow?.booking_seq ?? 1;
+
+        // Prefix: owner-set value, else first 3 chars of slug
+        const rawPrefix  = (seqRow?.booking_code_prefix || "").trim().toUpperCase();
+        const slugPrefix = (seqRow?.slug || "BKG").replace(/[^a-zA-Z0-9]/g, "").slice(0, 3).toUpperCase();
+        const prefix     = rawPrefix || slugPrefix;
+
+        // Type code
+        const bookingType = isNightlyBooking ? "NT" : "TS";
+
+        // Date — start date for timeslot, check-in date for nightly (YYMMDD)
+        let dateStr;
+        if (isNightlyBooking && checkin_date) {
+          dateStr = String(checkin_date).replace(/-/g, "").slice(2);
+        } else {
+          const startDate = start instanceof Date ? start : new Date(resolvedStartTime);
+          dateStr = startDate.toISOString().slice(0, 10).replace(/-/g, "").slice(2);
+        }
+
+        const seqStr  = String(seq).padStart(4, "0");
+        bookingCode   = `${prefix}-${bookingType}-${dateStr}-${seqStr}`;
+      } catch (codeErr) {
+        // Non-fatal fallback — never fail a booking over a code generation error
+        console.warn("Booking code generation failed (non-fatal), using legacy format:", codeErr?.message);
+        const firstLetter = cleanName.charAt(0).toUpperCase() || "X";
+        const ymd = new Date().toISOString().slice(0, 10).replaceAll("-", "");
+        bookingCode = `${firstLetter}-${resolvedTenantId}-${resolvedServiceId || 0}-${ymd}-${bookingId}`;
+      }
 
       await client.query(
         `UPDATE bookings
-         SET booking_code = COALESCE(booking_code, $1)
+           SET booking_code = COALESCE(booking_code, $1)
          WHERE id = $2 AND tenant_id = $3`,
         [bookingCode, bookingId, resolvedTenantId]
       );

@@ -45,6 +45,53 @@ async function checkNightlyAvailability({
     throw new Error('tenantId, resourceId, checkIn, checkOut are all required');
   }
 
+  // ── Long-term lease guard ────────────────────────────────────────────────
+  // Blocks short-term availability for units under an active long-term lease.
+  // Timeslot engine is completely unaffected — this only runs for nightly checks.
+  try {
+    const unitRes = await pool.query(
+      `SELECT rental_type, lease_start, lease_end, auto_release_on_expiry
+       FROM resources WHERE id = $1 AND tenant_id = $2 LIMIT 1`,
+      [resourceId, tenantId]
+    );
+    if (unitRes.rows.length) {
+      const unit  = unitRes.rows[0];
+      const today = new Date().toISOString().slice(0, 10);
+
+      // Under lease when: long_term, OR flexible with lease not yet expired
+      const isUnderLease =
+        unit.rental_type === 'long_term' ||
+        (unit.rental_type === 'flexible' &&
+          unit.lease_end &&
+          String(unit.lease_end).slice(0, 10) >= today);
+
+      if (isUnderLease) {
+        if (unit.lease_start && unit.lease_end) {
+          const leaseStart = String(unit.lease_start).slice(0, 10);
+          const leaseEnd   = String(unit.lease_end).slice(0, 10);
+          // Half-open interval overlap
+          if (checkIn < leaseEnd && checkOut > leaseStart) {
+            return {
+              available: false,
+              conflictingBookings: [],
+              reason: 'This unit is under a long-term lease and is not available for short-term bookings during this period.',
+            };
+          }
+          // Request is outside lease window — fall through to normal check
+        } else {
+          return {
+            available: false,
+            conflictingBookings: [],
+            reason: 'This unit is not available for short-term bookings.',
+          };
+        }
+      }
+    }
+  } catch (leaseErr) {
+    console.warn('rentalAvailabilityEngine: lease guard failed (non-fatal):', leaseErr?.message);
+  }
+  // ── End lease guard ──────────────────────────────────────────────────────
+
   const params = [tenantId, resourceId, checkIn, checkOut];
   let excludeClause = '';
   if (excludeBookingId) {
@@ -103,6 +150,57 @@ async function getBlockedDatesForMonth({ tenantId, resourceId, month }) {
   const lastDay    = new Date(year, mon, 0);
   const lastDayStr = `${year}-${String(mon).padStart(2, '0')}-${String(lastDay.getDate()).padStart(2, '0')}`;
 
+  // ── Long-term lease: block entire lease period within this month ──────────
+  try {
+    const unitRes = await pool.query(
+      `SELECT rental_type, lease_start, lease_end FROM resources WHERE id = $1 AND tenant_id = $2 LIMIT 1`,
+      [resourceId, tenantId]
+    );
+    if (unitRes.rows.length) {
+      const unit  = unitRes.rows[0];
+      const today = new Date().toISOString().slice(0, 10);
+      const isUnderLease =
+        unit.rental_type === 'long_term' ||
+        (unit.rental_type === 'flexible' && unit.lease_end && String(unit.lease_end).slice(0, 10) >= today);
+
+      if (isUnderLease && unit.lease_start && unit.lease_end) {
+        const leaseStart = String(unit.lease_start).slice(0, 10);
+        const leaseEnd   = String(unit.lease_end).slice(0, 10);
+        const leaseBlocked = new Set();
+        const cursor = new Date(`${firstDay}T00:00:00Z`);
+        const end    = new Date(`${lastDayStr}T00:00:00Z`);
+        while (cursor <= end) {
+          const d = cursor.toISOString().slice(0, 10);
+          if (d >= leaseStart && d < leaseEnd) leaseBlocked.add(d);
+          cursor.setUTCDate(cursor.getUTCDate() + 1);
+        }
+        if (unit.rental_type === 'long_term') {
+          // Pure long-term: return only lease-blocked dates, skip booking query
+          return { blockedDates: Array.from(leaseBlocked).sort() };
+        }
+        // Flexible: merge lease-blocked with booking-blocked
+        if (leaseBlocked.size > 0) {
+          const bookingBlocked = await _getBookingBlockedDates(tenantId, resourceId, firstDay, lastDayStr);
+          return { blockedDates: Array.from(new Set([...leaseBlocked, ...bookingBlocked])).sort() };
+        }
+      } else if (isUnderLease && unit.rental_type === 'long_term') {
+        // long_term with no dates = block every day this month
+        const all = []; const c = new Date(`${firstDay}T00:00:00Z`); const e = new Date(`${lastDayStr}T00:00:00Z`);
+        while (c <= e) { all.push(c.toISOString().slice(0, 10)); c.setUTCDate(c.getUTCDate() + 1); }
+        return { blockedDates: all };
+      }
+    }
+  } catch (leaseErr) {
+    console.warn('getBlockedDatesForMonth: lease guard failed (non-fatal):', leaseErr?.message);
+  }
+  // ── End lease guard — fall through to normal booking-based blocking ───────
+
+  const blocked = await _getBookingBlockedDates(tenantId, resourceId, firstDay, lastDayStr);
+  return { blockedDates: Array.from(blocked).sort() };
+}
+
+// Internal: booking-based blocked dates (extracted so lease path can reuse it)
+async function _getBookingBlockedDates(tenantId, resourceId, firstDay, lastDayStr) {
   // Fetch all active bookings for this resource that overlap this month.
   // Two cases handled in a single query:
   //   - Nightly: date-range overlap with checkin_date/checkout_date
@@ -160,7 +258,7 @@ async function getBlockedDatesForMonth({ tenantId, resourceId, month }) {
     }
   }
 
-  return { blockedDates: Array.from(blocked).sort() };
+  return blocked; // Returns Set<string> for internal callers
 }
 
 // ---------------------------------------------------------------------------

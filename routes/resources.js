@@ -225,29 +225,61 @@ router.delete("/:id/image", resolveTenantFromResourceId, requireAdminOrTenantRol
 
 // ---------------------------------------------------------------------------
 // PATCH /api/resources/:id (admin/manager)
-// Allows updating resource fields (name/type/is_active).
-// `type` is stored as free text (so "Other" can be a custom value).
+// Updates resource fields including rental management columns (migration 027).
+// All rental columns are optional — timeslot resources are unaffected.
 // ---------------------------------------------------------------------------
 router.patch("/:id", resolveTenantFromResourceId, requireAdminOrTenantRole("manager"), async (req, res) => {
   try {
     const id = Number(req.params.id);
     if (!Number.isFinite(id) || id <= 0) return res.status(400).json({ error: "invalid id" });
 
-    const { name, type, is_active, property_details_json } = req.body || {};
+    const {
+      name, type, is_active, property_details_json,
+      // RENTAL MANAGEMENT (migration 027)
+      building_name, rental_type,
+      lease_start, lease_end, lease_tenant_name, lease_tenant_phone,
+      monthly_rate, auto_release_on_expiry,
+    } = req.body || {};
 
     const sets = [];
     const params = [];
-    const add = (col, val) => {
-      params.push(val);
-      sets.push(`${col} = $${params.length}`);
-    };
+    const add = (col, val) => { params.push(val); sets.push(`${col} = $${params.length}`); };
 
-    if (name !== undefined) add("name", name == null ? null : String(name).trim());
-    if (type !== undefined) add("type", type == null ? null : String(type).trim());
+    if (name    !== undefined) add("name",    name    == null ? null : String(name).trim());
+    if (type    !== undefined) add("type",    type    == null ? null : String(type).trim());
     if (is_active !== undefined) add("is_active", !!is_active);
     if (property_details_json !== undefined) {
       add("property_details_json", property_details_json == null ? null : JSON.stringify(property_details_json));
     }
+
+    // Rental management fields — guarded by column existence for forward compat
+    let resCols;
+    try {
+      const cr = await db.query(`SELECT column_name FROM information_schema.columns WHERE table_name='resources'`);
+      resCols  = new Set(cr.rows.map(r => r.column_name));
+    } catch { resCols = new Set(); }
+
+    const addIf = (col, val) => { if (resCols.has(col)) add(col, val); };
+
+    if (building_name !== undefined)
+      addIf("building_name", building_name == null ? null : String(building_name).trim() || null);
+
+    if (rental_type !== undefined) {
+      const safe = ["short_term","long_term","flexible"].includes(String(rental_type)) ? String(rental_type) : "short_term";
+      addIf("rental_type", safe);
+    }
+    if (lease_start !== undefined)
+      addIf("lease_start", !lease_start || lease_start === "" ? null : String(lease_start).slice(0, 10));
+    if (lease_end !== undefined)
+      addIf("lease_end",   !lease_end   || lease_end   === "" ? null : String(lease_end).slice(0, 10));
+    if (lease_tenant_name  !== undefined)
+      addIf("lease_tenant_name",  lease_tenant_name  == null ? null : String(lease_tenant_name).trim()  || null);
+    if (lease_tenant_phone !== undefined)
+      addIf("lease_tenant_phone", lease_tenant_phone == null ? null : String(lease_tenant_phone).trim() || null);
+    if (monthly_rate !== undefined)
+      addIf("monthly_rate", monthly_rate == null || monthly_rate === "" ? null : Number(monthly_rate));
+    if (auto_release_on_expiry !== undefined)
+      addIf("auto_release_on_expiry", !!auto_release_on_expiry);
 
     if (!sets.length) return res.status(400).json({ error: "No fields to update" });
 
