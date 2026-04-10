@@ -173,6 +173,7 @@ app.use("/api/availability", availabilityLimiter, availabilityRouter);
 
 // RENTAL-1: nightly rental availability check + blocked-dates calendar feed.
 app.use("/api/rental-availability", availabilityLimiter, require("./routes/rentalAvailability"));
+app.use("/api/rental-payment-links", require("./routes/rentalPaymentLinks"));
 
 app.use("/api/membership-plans", membershipPlansRouter);
 app.use("/api/customer-memberships", customerMembershipsRouter);
