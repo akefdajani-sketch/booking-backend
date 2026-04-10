@@ -11,6 +11,7 @@ const {
   resolveTenantFromServiceId, normalizeAvailabilityBasis, normalizeAllowMembership,
   getServicesColumns, getTenantsColumns, serviceHoursTableExists,
 } = require("../../utils/servicesHelpers");
+const { assertWithinPlanLimit } = require("../../utils/planEnforcement");
 
 
 module.exports = function mount(router) {
