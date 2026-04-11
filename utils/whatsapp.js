@@ -84,6 +84,7 @@ async function sendMessage({ to, message, messageType = 'text', tenantId = null 
  * Booking confirmation message — sent to customer after booking is created.
  */
 function buildBookingConfirmationMessage({ tenantName, customerName, bookingCode, resourceName, checkinDate, checkoutDate, nightsCount, startTime, serviceName, paymentUrl, amountDue, currency, bookingUrl }) {
+  // bookingUrl is a plain-text URL — WhatsApp auto-makes it tappable.
   const firstName = (customerName || 'Guest').split(' ')[0];
 
   if (checkinDate && checkoutDate) {
@@ -99,8 +100,8 @@ function buildBookingConfirmationMessage({ tenantName, customerName, bookingCode
       `📅 Check-out: ${formatDate(checkoutDate)}`,
       nightsCount ? `🌙 Nights: ${nightsCount}` : '',
       ``,
-      bookingCode ? `📋 Reference: *${bookingCode}*` : '',
-      bookingUrl  ? `🔗 View booking: ${bookingUrl}` : '',
+      bookingCode ? `📋 *${bookingCode}*` : '',
+      bookingUrl  ? bookingUrl : '',
       ``,
       paymentUrl && amountDue ? `💳 Payment due: *${formatAmount(amountDue, currency)}*` : null,
       paymentUrl ? `Pay securely here: ${paymentUrl}` : null,
@@ -120,8 +121,8 @@ function buildBookingConfirmationMessage({ tenantName, customerName, bookingCode
     resourceName ? `📍 At: ${resourceName}` : '',
     startTime    ? `🕐 Time: ${formatDateTime(startTime)}` : '',
     ``,
-    bookingCode ? `📋 Reference: *${bookingCode}*` : '',
-    bookingUrl  ? `🔗 View booking: ${bookingUrl}` : '',
+    bookingCode ? `📋 *${bookingCode}*` : '',
+    bookingUrl  ? bookingUrl : '',
     ``,
     paymentUrl && amountDue ? `💳 Payment due: *${formatAmount(amountDue, currency)}*` : null,
     paymentUrl ? `Pay securely here: ${paymentUrl}` : null,
