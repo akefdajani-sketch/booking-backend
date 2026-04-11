@@ -9,7 +9,7 @@ const { requireTenant } = require("../../middleware/requireTenant");
 const requireAdminOrTenantRole = require("../../middleware/requireAdminOrTenantRole");
 const { ensureBookingMoneyColumns } = require("../../utils/ensureBookingMoneyColumns");
 const { parseBookingListParams, buildBookingListWhere } = require("../../utils/bookingQueryBuilder");
-const { loadJoinedBookingById, decrementSessionCount } = require("../../utils/bookings");
+const { loadJoinedBookingById, decrementSessionCount, reverseMembershipForBooking } = require("../../utils/bookings");
 const {
   shouldUseCustomerHistory, checkBlackoutOverlap, servicesHasColumn, getServiceAllowMembership,
   getIdempotencyKey, mustHaveTenantSlug, canTransitionStatus, bumpTenantBookingChange,
@@ -242,15 +242,38 @@ router.patch("/:id/status", requireTenant, requireAdminOrTenantRole("staff"), as
       return res.json({ booking: joined });
     }
 
-    const upd = await db.query(
-      `UPDATE bookings
-       SET status=$1
-       WHERE id=$2 AND tenant_id=$3
-       RETURNING id`,
-      [nextStatus, bookingId, tenantId]
-    );
+    // Wrap in a transaction so the status update and any membership reversal
+    // are atomic — either both commit or both roll back.
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
 
-    if (!upd.rows.length) return res.status(404).json({ error: "Booking not found." });
+      const upd = await client.query(
+        `UPDATE bookings
+         SET status=$1
+         WHERE id=$2 AND tenant_id=$3
+         RETURNING id`,
+        [nextStatus, bookingId, tenantId]
+      );
+
+      if (!upd.rows.length) {
+        await client.query("ROLLBACK");
+        return res.status(404).json({ error: "Booking not found." });
+      }
+
+      // If the booking is being cancelled, return any membership credits
+      // that were consumed when the booking was originally created.
+      if (nextStatus === "cancelled") {
+        await reverseMembershipForBooking(client, bookingId, tenantId);
+      }
+
+      await client.query("COMMIT");
+    } catch (txErr) {
+      await client.query("ROLLBACK");
+      throw txErr;
+    } finally {
+      client.release();
+    }
 
     await bumpTenantBookingChange(tenantId);
 
@@ -296,14 +319,32 @@ router.delete("/:id", requireTenant, requireAdminOrTenantRole("staff"), async (r
     }
 
     if (currentStatus !== nextStatus) {
-      await db.query(
-        `UPDATE bookings
-         SET status='cancelled'
-         WHERE id=$1 AND tenant_id=$2`,
-        [bookingId, tenantId]
-      );
+      // Wrap in a transaction so the status update, membership reversal, and
+      // session decrement are all atomic.
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN");
 
-      // If this was a parallel booking, decrement the session confirmed_count
+        await client.query(
+          `UPDATE bookings
+           SET status='cancelled'
+           WHERE id=$1 AND tenant_id=$2`,
+          [bookingId, tenantId]
+        );
+
+        // Return any membership credits consumed when this booking was created.
+        await reverseMembershipForBooking(client, bookingId, tenantId);
+
+        await client.query("COMMIT");
+      } catch (txErr) {
+        await client.query("ROLLBACK");
+        throw txErr;
+      } finally {
+        client.release();
+      }
+
+      // If this was a parallel booking, decrement the session confirmed_count.
+      // Done outside the transaction because decrementSessionCount uses pool directly.
       if (bookingSessionId) {
         await decrementSessionCount({ sessionId: bookingSessionId });
       }
