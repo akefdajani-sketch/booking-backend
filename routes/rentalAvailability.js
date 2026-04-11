@@ -144,7 +144,9 @@ router.get('/check', async (req, res) => {
           serviceSlotMinutes: 1440,           // one day = one "slot" for nightly services
         });
         if (rateResult?.adjusted_price_amount != null) {
-          effectivePrice = rateResult.adjusted_price_amount;
+          // adjusted_price_amount is the TOTAL for all nights — convert to per-night
+          const totalAdjusted = Number(rateResult.adjusted_price_amount);
+          effectivePrice = nightsCount > 0 ? totalAdjusted / nightsCount : totalAdjusted;
         }
       } catch (rateErr) {
         // Non-fatal — fall back to base price
