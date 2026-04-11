@@ -110,11 +110,12 @@ async function runReminderEngine() {
       b.customer_phone,
       b.checkin_date,
       b.checkout_date,
-      b.resource_name,
+      r.name AS resource_name,
       t.name AS tenant_name,
       t.slug AS tenant_slug
     FROM rental_payment_links l
     JOIN bookings b ON b.id = l.booking_id
+    LEFT JOIN resources r ON r.id = b.resource_id
     JOIN tenants  t ON t.id = l.tenant_id
     WHERE l.status IN ('pending', 'partial')
       AND b.customer_phone IS NOT NULL
