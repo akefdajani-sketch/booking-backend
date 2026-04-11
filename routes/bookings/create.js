@@ -1160,19 +1160,24 @@ const charge_amount = (finalCustomerMembershipId || prepaidApplied) ? 0 : price_
       // ── WhatsApp booking confirmation (non-fatal, fires after response) ──
       // Only send on new bookings (not replays), only when phone exists.
       // Runs after the response is built so it never delays the customer.
+      // WA-1: tenantId passed so per-tenant DB credentials are used first.
       if (created && joined?.customer_phone) {
         setImmediate(async () => {
           try {
             const { sendBookingConfirmation, isWhatsAppConfigured } = require('../../utils/whatsapp');
-            if (!isWhatsAppConfigured()) return;
+            const { isWhatsAppEnabledForTenant } = require('../../utils/whatsappCredentials');
+            // Check DB credentials first (WA-1), fall back to env var check
+            const waEnabled = await isWhatsAppEnabledForTenant(resolvedTenantId).catch(() => isWhatsAppConfigured());
+            if (!waEnabled) return;
+
             // Load tenant name for the message
             const tRes = await require('../../db').query('SELECT name FROM tenants WHERE id = $1', [resolvedTenantId]);
             const tenantName = tRes.rows?.[0]?.name || 'Flexrz';
 
-            // Check for a pending payment link on this booking — include it in the confirmation if found
-            let paymentUrl  = null;
-            let amountDue   = null;
-            let currency    = joined.currency_code || 'JOD';
+            // Check for a pending payment link on this booking — include in confirmation if found
+            let paymentUrl = null;
+            let amountDue  = null;
+            let currency   = joined.currency_code || 'JOD';
             try {
               const plRes = await require('../../db').query(
                 `SELECT token, amount_requested, currency_code
@@ -1180,8 +1185,7 @@ const charge_amount = (finalCustomerMembershipId || prepaidApplied) ? 0 : price_
                  WHERE booking_id = $1
                    AND status = 'pending'
                    AND (expires_at IS NULL OR expires_at > NOW())
-                 ORDER BY created_at DESC
-                 LIMIT 1`,
+                 ORDER BY created_at DESC LIMIT 1`,
                 [bookingId]
               );
               if (plRes.rows.length) {
@@ -1192,7 +1196,14 @@ const charge_amount = (finalCustomerMembershipId || prepaidApplied) ? 0 : price_
               }
             } catch (_plErr) { /* non-fatal — confirmation still sends without link */ }
 
-            const waResult = await sendBookingConfirmation({ booking: joined, tenantName, paymentUrl, amountDue, currency });
+            const waResult = await sendBookingConfirmation({
+              booking: joined,
+              tenantName,
+              tenantId: resolvedTenantId,
+              paymentUrl,
+              amountDue,
+              currency,
+            });
             if (waResult.ok) {
               require('../../utils/logger').info({ bookingId, phone: joined.customer_phone, msgId: waResult.messageId, hasPaymentLink: !!paymentUrl }, 'WhatsApp confirmation sent');
             } else {

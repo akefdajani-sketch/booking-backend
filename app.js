@@ -68,6 +68,8 @@ const tenantPrepaidAccountingRouter = require("./routes/tenantPrepaidAccounting"
 // PAY-1: Network payment routes
 const networkPaymentsRouter       = require("./routes/networkPayments");
 const tenantPaymentSettingsRouter = require("./routes/tenantPaymentSettings");
+// WA-1: Per-tenant WhatsApp settings
+const tenantWhatsAppSettingsRouter = require("./routes/tenantWhatsAppSettings");
 
 const publicPricingRouter = require("./routes/publicPricing");
 const uploadsRouter = require("./routes/uploads");
@@ -193,6 +195,7 @@ app.use("/api/tenant", tenantBookingsRouter);
 app.use("/api/tenant", tenantPrepaidCatalogRouter);
 app.use("/api/tenant", tenantPrepaidAccountingRouter);
 app.use("/api/tenant", tenantPaymentSettingsRouter); // PAY-1: /:slug/payment-settings
+app.use("/api/tenant", tenantWhatsAppSettingsRouter); // WA-1: /:slug/whatsapp-settings
 app.use("/api/invites", invitesRouter);
 
 // ─── PAY-1: Network payment flow (public — customer checkout) ─────────────────

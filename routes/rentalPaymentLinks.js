@@ -138,6 +138,7 @@ router.post(
             const waResult = await sendPaymentLink({
               customerPhone: booking.customer_phone,
               customerName:  booking.customer_name,
+              tenantId:      tenantId,
               tenantName:    booking.tenant_currency ? booking.tenant_name : link.tenant_name,
               bookingCode:   booking.booking_code,
               resourceName:  booking.resource_name,
@@ -488,6 +489,7 @@ router.post('/public/:token/record-payment', async (req, res) => {
           await sendPaymentReceived({
             customerPhone: det.customer_phone,
             customerName:  det.customer_name,
+            tenantId:      tenantId,
             tenantName:    det.tenant_name,
             bookingCode:   det.booking_code,
             amountPaid:    Number(amountPaid),

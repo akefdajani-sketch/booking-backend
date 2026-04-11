@@ -7,40 +7,37 @@
 // Uses Meta's official Cloud API (no third-party provider needed).
 // Docs: https://developers.facebook.com/docs/whatsapp/cloud-api/
 //
-// Required env vars:
-//   WHATSAPP_ACCESS_TOKEN      — permanent system user token from Meta Business Manager
-//   WHATSAPP_PHONE_NUMBER_ID   — Phone Number ID from Meta → WhatsApp → API Setup
-//   WHATSAPP_BUSINESS_ACCOUNT_ID — optional, for account-level operations
+// Credentials are resolved per-tenant from the DB first (WA-1), falling back
+// to env vars for backward compatibility:
+//   WHATSAPP_ACCESS_TOKEN      — fallback permanent system user token
+//   WHATSAPP_PHONE_NUMBER_ID   — fallback Phone Number ID
 //
 // Message types we send:
 //   1. booking_confirmation  — sent immediately after a booking is created
 //   2. payment_link          — sent when owner creates a payment link
 //   3. payment_received      — sent when payment is marked as paid
-//
-// All messages use template messages (required for business-initiated conversations)
-// OR free-form text if within 24h customer service window.
-//
-// Template names must be pre-approved in Meta Business Manager.
-// During development, we send plain text messages (works within 24h window).
 // ---------------------------------------------------------------------------
 
 const https  = require('https');
 const logger = require('./logger');
+const { getWhatsAppCredentials } = require('./whatsappCredentials');
 
 const META_API_VERSION = 'v19.0';
 
 // ---------------------------------------------------------------------------
 // Core: send a WhatsApp message via Meta Cloud API
+// tenantId is optional — if provided, DB credentials are tried first.
 // ---------------------------------------------------------------------------
 
-async function sendMessage({ to, message, messageType = 'text' }) {
-  const accessToken    = process.env.WHATSAPP_ACCESS_TOKEN || '';
-  const phoneNumberId  = process.env.WHATSAPP_PHONE_NUMBER_ID || '';
+async function sendMessage({ to, message, messageType = 'text', tenantId = null }) {
+  const creds = await getWhatsAppCredentials(tenantId);
 
-  if (!accessToken || !phoneNumberId) {
-    logger.warn({ to }, 'WhatsApp not configured — WHATSAPP_ACCESS_TOKEN or WHATSAPP_PHONE_NUMBER_ID missing');
+  if (!creds) {
+    logger.warn({ to, tenantId }, 'WhatsApp not configured — no credentials in DB or env vars');
     return { ok: false, reason: 'not_configured' };
   }
+
+  const { accessToken, phoneNumberId } = creds;
 
   // Normalise phone number — Meta requires international format without +
   const phone = normalisePhone(to);
@@ -104,7 +101,6 @@ function buildBookingConfirmationMessage({ tenantName, customerName, bookingCode
       ``,
       bookingCode ? `📋 Reference: *${bookingCode}*` : '',
       ``,
-      // Payment link section — only shown when a pending payment link exists
       paymentUrl && amountDue ? `💳 Payment due: *${formatAmount(amountDue, currency)}*` : null,
       paymentUrl ? `Pay securely here: ${paymentUrl}` : null,
       paymentUrl ? `` : null,
@@ -125,7 +121,6 @@ function buildBookingConfirmationMessage({ tenantName, customerName, bookingCode
     ``,
     bookingCode ? `📋 Reference: *${bookingCode}*` : '',
     ``,
-    // Payment link section — only shown when a pending payment link exists
     paymentUrl && amountDue ? `💳 Payment due: *${formatAmount(amountDue, currency)}*` : null,
     paymentUrl ? `Pay securely here: ${paymentUrl}` : null,
     paymentUrl ? `` : null,
@@ -186,7 +181,7 @@ function buildPaymentReceivedMessage({ tenantName, customerName, bookingCode, am
  * Send booking confirmation WhatsApp to customer.
  * Non-fatal — booking proceeds even if WhatsApp fails.
  */
-async function sendBookingConfirmation({ booking, tenantName, paymentUrl, amountDue, currency }) {
+async function sendBookingConfirmation({ booking, tenantName, tenantId = null, paymentUrl, amountDue, currency }) {
   const phone = booking.customer_phone;
   if (!phone) return { ok: false, reason: 'no_phone' };
 
@@ -205,13 +200,13 @@ async function sendBookingConfirmation({ booking, tenantName, paymentUrl, amount
     currency,
   });
 
-  return sendMessage({ to: phone, message });
+  return sendMessage({ to: phone, message, tenantId });
 }
 
 /**
  * Send payment link to customer via WhatsApp.
  */
-async function sendPaymentLink({ customerPhone, customerName, tenantName, bookingCode, resourceName, checkinDate, checkoutDate, amountDue, currency, paymentUrl }) {
+async function sendPaymentLink({ customerPhone, customerName, tenantName, tenantId = null, bookingCode, resourceName, checkinDate, checkoutDate, amountDue, currency, paymentUrl }) {
   if (!customerPhone) return { ok: false, reason: 'no_phone' };
 
   const message = buildPaymentLinkMessage({
@@ -219,20 +214,20 @@ async function sendPaymentLink({ customerPhone, customerName, tenantName, bookin
     checkinDate, checkoutDate, amountDue, currency, paymentUrl,
   });
 
-  return sendMessage({ to: customerPhone, message });
+  return sendMessage({ to: customerPhone, message, tenantId });
 }
 
 /**
  * Send payment received confirmation to customer.
  */
-async function sendPaymentReceived({ customerPhone, customerName, tenantName, bookingCode, amountPaid, currency, resourceName, checkinDate }) {
+async function sendPaymentReceived({ customerPhone, customerName, tenantName, tenantId = null, bookingCode, amountPaid, currency, resourceName, checkinDate }) {
   if (!customerPhone) return { ok: false, reason: 'no_phone' };
 
   const message = buildPaymentReceivedMessage({
     tenantName, customerName, bookingCode, amountPaid, currency, resourceName, checkinDate,
   });
 
-  return sendMessage({ to: customerPhone, message });
+  return sendMessage({ to: customerPhone, message, tenantId });
 }
 
 // ---------------------------------------------------------------------------
@@ -297,6 +292,8 @@ function httpPost(url, headers, body) {
 // Check if WhatsApp is configured (used by routes to decide whether to send)
 // ---------------------------------------------------------------------------
 
+// isWhatsAppConfigured checks env vars only — used as a fast synchronous guard.
+// For tenant-aware checks use isWhatsAppEnabledForTenant(tenantId) from whatsappCredentials.js
 function isWhatsAppConfigured() {
   return !!(process.env.WHATSAPP_ACCESS_TOKEN && process.env.WHATSAPP_PHONE_NUMBER_ID);
 }
