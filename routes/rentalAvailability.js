@@ -123,13 +123,16 @@ router.get('/check', async (req, res) => {
 
     // Compute pricing — apply rate rules for the check-in date, fall back to base price
     // Use price_amount first (set directly on service), then price_per_night.
-    const basePricePerNight = svc.price_amount ?? svc.price_per_night ?? null;
+    // price_amount=0 means "rates control pricing" — treat null and 0 the same as base
+    const rawAmount = svc.price_amount != null ? Number(svc.price_amount) : null;
+    const rawPerNight = svc.price_per_night != null ? Number(svc.price_per_night) : null;
+    const basePricePerNight = rawAmount ?? rawPerNight ?? 0;
     const currencyCode      = svc.currency_code || 'JOD';
 
     // Attempt to apply rate rules using the check-in date as the booking start.
     // durationMinutes = nights × 1440 lets day-of-week and date-window rules fire correctly.
     let effectivePrice = basePricePerNight;
-    if (computeRateForBookingLike && basePricePerNight != null) {
+    if (computeRateForBookingLike) {
       try {
         const nightsCount    = rangeValidation.nights || 1;
         const checkInDate    = new Date(`${checkIn}T12:00:00Z`); // noon UTC — avoids DST edge
