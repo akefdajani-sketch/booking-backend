@@ -1189,7 +1189,7 @@ const charge_amount = (finalCustomerMembershipId || prepaidApplied) ? 0 : price_
                 [bookingId]
               );
               if (plRes.rows.length) {
-                const frontendUrl = process.env.FRONTEND_URL || 'https://app.flexrz.com';
+              const frontendUrl = process.env.FRONTEND_URL || 'https://app.flexrz.com';
                 paymentUrl = `${frontendUrl}/pay/${plRes.rows[0].token}`;
                 amountDue  = plRes.rows[0].amount_requested;
                 currency   = plRes.rows[0].currency_code || currency;
@@ -1203,6 +1203,9 @@ const charge_amount = (finalCustomerMembershipId || prepaidApplied) ? 0 : price_
               paymentUrl,
               amountDue,
               currency,
+              bookingUrl: joined.booking_code
+                ? `${process.env.FRONTEND_URL || 'https://app.flexrz.com'}/book/${slug}?ref=${encodeURIComponent(joined.booking_code)}`
+                : null,
             });
             if (waResult.ok) {
               require('../../utils/logger').info({ bookingId, phone: joined.customer_phone, msgId: waResult.messageId, hasPaymentLink: !!paymentUrl }, 'WhatsApp confirmation sent');
