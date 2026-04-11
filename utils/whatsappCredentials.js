@@ -144,8 +144,7 @@ async function saveWhatsAppCredentials(tenantId, phoneNumberId, accessToken) {
     `UPDATE tenants
      SET whatsapp_phone_number_id = $1,
          whatsapp_access_token    = $2,
-         whatsapp_active          = true,
-         updated_at               = NOW()
+         whatsapp_active          = true
      WHERE id = $3`,
     [
       String(phoneNumberId).trim(),
@@ -164,8 +163,7 @@ async function clearWhatsAppCredentials(tenantId) {
     `UPDATE tenants
      SET whatsapp_phone_number_id = NULL,
          whatsapp_access_token    = NULL,
-         whatsapp_active          = false,
-         updated_at               = NOW()
+         whatsapp_active          = false
      WHERE id = $1`,
     [Number(tenantId)]
   );
