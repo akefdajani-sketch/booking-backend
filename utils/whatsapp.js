@@ -86,7 +86,7 @@ async function sendMessage({ to, message, messageType = 'text' }) {
 /**
  * Booking confirmation message — sent to customer after booking is created.
  */
-function buildBookingConfirmationMessage({ tenantName, customerName, bookingCode, resourceName, checkinDate, checkoutDate, nightsCount, startTime, serviceName }) {
+function buildBookingConfirmationMessage({ tenantName, customerName, bookingCode, resourceName, checkinDate, checkoutDate, nightsCount, startTime, serviceName, paymentUrl, amountDue, currency }) {
   const firstName = (customerName || 'Guest').split(' ')[0];
 
   if (checkinDate && checkoutDate) {
@@ -104,6 +104,10 @@ function buildBookingConfirmationMessage({ tenantName, customerName, bookingCode
       ``,
       bookingCode ? `📋 Reference: *${bookingCode}*` : '',
       ``,
+      // Payment link section — only shown when a pending payment link exists
+      paymentUrl && amountDue ? `💳 Payment due: *${formatAmount(amountDue, currency)}*` : null,
+      paymentUrl ? `Pay securely here: ${paymentUrl}` : null,
+      paymentUrl ? `` : null,
       `Please save this message for your records. We look forward to welcoming you!`,
     ].filter(l => l !== null).join('\n');
   }
@@ -121,6 +125,10 @@ function buildBookingConfirmationMessage({ tenantName, customerName, bookingCode
     ``,
     bookingCode ? `📋 Reference: *${bookingCode}*` : '',
     ``,
+    // Payment link section — only shown when a pending payment link exists
+    paymentUrl && amountDue ? `💳 Payment due: *${formatAmount(amountDue, currency)}*` : null,
+    paymentUrl ? `Pay securely here: ${paymentUrl}` : null,
+    paymentUrl ? `` : null,
     `See you there!`,
   ].filter(l => l !== null).join('\n');
 }
@@ -178,7 +186,7 @@ function buildPaymentReceivedMessage({ tenantName, customerName, bookingCode, am
  * Send booking confirmation WhatsApp to customer.
  * Non-fatal — booking proceeds even if WhatsApp fails.
  */
-async function sendBookingConfirmation({ booking, tenantName }) {
+async function sendBookingConfirmation({ booking, tenantName, paymentUrl, amountDue, currency }) {
   const phone = booking.customer_phone;
   if (!phone) return { ok: false, reason: 'no_phone' };
 
@@ -192,6 +200,9 @@ async function sendBookingConfirmation({ booking, tenantName }) {
     checkoutDate:  booking.checkout_date,
     nightsCount:   booking.nights_count,
     startTime:     booking.start_time,
+    paymentUrl,
+    amountDue,
+    currency,
   });
 
   return sendMessage({ to: phone, message });
