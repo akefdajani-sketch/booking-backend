@@ -156,8 +156,58 @@ function buildPaymentLinkMessage({ tenantName, customerName, bookingCode, resour
 }
 
 /**
- * Payment received message — sent when payment is recorded.
+ * Payment reminder message — sent automatically when a payment link is still pending.
+ * urgency: 'gentle' | 'urgent' | 'final'
  */
+function buildPaymentReminderMessage({ tenantName, customerName, bookingCode, resourceName, checkinDate, checkoutDate, amountDue, currency, paymentUrl, urgency = 'gentle' }) {
+  const firstName = (customerName || 'Guest').split(' ')[0];
+  const amount    = formatAmount(amountDue, currency);
+
+  const header = urgency === 'final'
+    ? `⏰ Final reminder — ${tenantName}`
+    : urgency === 'urgent'
+    ? `🔔 Payment reminder — ${tenantName}`
+    : `💳 Friendly reminder — ${tenantName}`;
+
+  const body = urgency === 'final'
+    ? `Hi ${firstName}, this is a final reminder that your payment of *${amount}* is due today.`
+    : urgency === 'urgent'
+    ? `Hi ${firstName}, your payment of *${amount}* is due soon. Please complete it to secure your booking.`
+    : `Hi ${firstName}, just a friendly reminder that your payment of *${amount}* is still outstanding.`;
+
+  return [
+    header,
+    ``,
+    body,
+    ``,
+    resourceName ? `🏠 Property: ${resourceName}` : '',
+    checkinDate  ? `📅 ${formatDate(checkinDate)} → ${formatDate(checkoutDate)}` : '',
+    bookingCode  ? `📋 Reference: ${bookingCode}` : '',
+    ``,
+    `Pay securely here:`,
+    `${paymentUrl}`,
+    ``,
+    urgency === 'final'
+      ? `Please complete payment today to avoid cancellation.`
+      : `This link accepts card, CliQ, or cash. Reply if you need help.`,
+  ].filter(l => l !== null).join('\n');
+}
+
+/**
+ * Send a payment reminder WhatsApp to a customer.
+ */
+async function sendPaymentReminder({ customerPhone, customerName, tenantName, tenantId = null, bookingCode, resourceName, checkinDate, checkoutDate, amountDue, currency, paymentUrl, urgency = 'gentle' }) {
+  if (!customerPhone) return { ok: false, reason: 'no_phone' };
+
+  const message = buildPaymentReminderMessage({
+    tenantName, customerName, bookingCode, resourceName,
+    checkinDate, checkoutDate, amountDue, currency, paymentUrl, urgency,
+  });
+
+  return sendMessage({ to: customerPhone, message, tenantId });
+}
+
+
 function buildPaymentReceivedMessage({ tenantName, customerName, bookingCode, amountPaid, currency, resourceName, checkinDate }) {
   const firstName = (customerName || 'Guest').split(' ')[0];
   const amount    = formatAmount(amountPaid, currency);
@@ -307,10 +357,12 @@ module.exports = {
   sendBookingConfirmation,
   sendPaymentLink,
   sendPaymentReceived,
+  sendPaymentReminder,
   isWhatsAppConfigured,
   // Exported for testing
   buildBookingConfirmationMessage,
   buildPaymentLinkMessage,
   buildPaymentReceivedMessage,
+  buildPaymentReminderMessage,
   normalisePhone,
 };
