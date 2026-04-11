@@ -1168,9 +1168,33 @@ const charge_amount = (finalCustomerMembershipId || prepaidApplied) ? 0 : price_
             // Load tenant name for the message
             const tRes = await require('../../db').query('SELECT name FROM tenants WHERE id = $1', [resolvedTenantId]);
             const tenantName = tRes.rows?.[0]?.name || 'Flexrz';
-            const waResult = await sendBookingConfirmation({ booking: joined, tenantName });
+
+            // Check for a pending payment link on this booking — include it in the confirmation if found
+            let paymentUrl  = null;
+            let amountDue   = null;
+            let currency    = joined.currency_code || 'JOD';
+            try {
+              const plRes = await require('../../db').query(
+                `SELECT token, amount_requested, currency_code
+                 FROM rental_payment_links
+                 WHERE booking_id = $1
+                   AND status = 'pending'
+                   AND (expires_at IS NULL OR expires_at > NOW())
+                 ORDER BY created_at DESC
+                 LIMIT 1`,
+                [bookingId]
+              );
+              if (plRes.rows.length) {
+                const frontendUrl = process.env.FRONTEND_URL || 'https://app.flexrz.com';
+                paymentUrl = `${frontendUrl}/pay/${plRes.rows[0].token}`;
+                amountDue  = plRes.rows[0].amount_requested;
+                currency   = plRes.rows[0].currency_code || currency;
+              }
+            } catch (_plErr) { /* non-fatal — confirmation still sends without link */ }
+
+            const waResult = await sendBookingConfirmation({ booking: joined, tenantName, paymentUrl, amountDue, currency });
             if (waResult.ok) {
-              require('../../utils/logger').info({ bookingId, phone: joined.customer_phone, msgId: waResult.messageId }, 'WhatsApp confirmation sent');
+              require('../../utils/logger').info({ bookingId, phone: joined.customer_phone, msgId: waResult.messageId, hasPaymentLink: !!paymentUrl }, 'WhatsApp confirmation sent');
             } else {
               require('../../utils/logger').warn({ bookingId, reason: waResult.reason }, 'WhatsApp confirmation skipped');
             }
