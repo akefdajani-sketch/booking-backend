@@ -70,6 +70,7 @@ const networkPaymentsRouter       = require("./routes/networkPayments");
 const tenantPaymentSettingsRouter = require("./routes/tenantPaymentSettings");
 // WA-1: Per-tenant WhatsApp settings
 const tenantWhatsAppSettingsRouter = require("./routes/tenantWhatsAppSettings");
+const reminderJobRouter = require("./routes/reminderJob");
 
 const publicPricingRouter = require("./routes/publicPricing");
 const uploadsRouter = require("./routes/uploads");
@@ -176,6 +177,7 @@ app.use("/api/availability", availabilityLimiter, availabilityRouter);
 // RENTAL-1: nightly rental availability check + blocked-dates calendar feed.
 app.use("/api/rental-availability", availabilityLimiter, require("./routes/rentalAvailability"));
 app.use("/api/rental-payment-links", require("./routes/rentalPaymentLinks"));
+app.use("/api/reminder-job", reminderJobRouter);
 
 app.use("/api/membership-plans", membershipPlansRouter);
 app.use("/api/customer-memberships", customerMembershipsRouter);
