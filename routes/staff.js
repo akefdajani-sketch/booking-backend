@@ -32,8 +32,13 @@ const { uploadFileToR2, safeName } = require("../utils/r2");
 const fs = require("fs/promises");
 
 let __staffColsCache = null;
+let __staffColsCacheAt = 0;
+const STAFF_COLS_TTL_MS = 60_000; // 1 minute — survives hot-reloads, refreshes after migrations
+
 async function getStaffColumnSet() {
-  if (__staffColsCache) return __staffColsCache;
+  if (__staffColsCache && Date.now() - __staffColsCacheAt < STAFF_COLS_TTL_MS) {
+    return __staffColsCache;
+  }
   const cols = [
     "title_prefix",
     "display_name",
@@ -54,6 +59,7 @@ async function getStaffColumnSet() {
     [cols]
   );
   __staffColsCache = new Set(r.rows.map((x) => x.column_name));
+  __staffColsCacheAt = Date.now();
   return __staffColsCache;
 }
 
