@@ -9,6 +9,7 @@ const requireAdminOrTenantRole = require("../../middleware/requireAdminOrTenantR
 const requireAppAuth = require("../../middleware/requireAppAuth");
 const { requireTenant } = require("../../middleware/requireTenant");
 const { getExistingColumns, firstExisting, pickCol, softDeleteClause, safeIntExpr, getErrorCode } = require("../../utils/customerQueryHelpers");
+const { reverseMembershipForBooking } = require("../../utils/bookings");
 
 
 module.exports = function mount(router) {
@@ -214,10 +215,27 @@ router.delete("/me/bookings/:id", requireAppAuth, requireTenant, async (req, res
       return res.json({ ok: true, bookingId, status: "cancelled" });
     }
 
-    await pool.query(
-      `UPDATE bookings SET status='cancelled' WHERE id=$1 AND tenant_id=$2 AND customer_id=$3`,
-      [bookingId, tenantId, customerId]
-    );
+    // Wrap in a transaction so the status update and membership credit
+    // reversal are atomic — both commit or both roll back.
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+
+      await client.query(
+        `UPDATE bookings SET status='cancelled' WHERE id=$1 AND tenant_id=$2 AND customer_id=$3`,
+        [bookingId, tenantId, customerId]
+      );
+
+      // Return any membership credits consumed when this booking was created.
+      await reverseMembershipForBooking(client, bookingId, tenantId);
+
+      await client.query("COMMIT");
+    } catch (txErr) {
+      await client.query("ROLLBACK");
+      throw txErr;
+    } finally {
+      client.release();
+    }
 
     return res.json({ ok: true, bookingId, status: "cancelled" });
   } catch (e) {

@@ -389,10 +389,88 @@ async function loadJoinedBookingById(bookingId, tenantId) {
   return result.rows?.[0] || null;
 }
 
+// ─── reverseMembershipForBooking ──────────────────────────────────────────────
+/**
+ * Reverses the membership credit debit that was applied when a booking was created.
+ * Safe to call on every cancellation — if no membership was used, it exits immediately.
+ * Idempotent — if a credit reversal already exists for this booking it does nothing.
+ *
+ * Must be called inside a DB client transaction (pass `client`, not pool).
+ *
+ * @param {object} client  - pg PoolClient (inside an active transaction)
+ * @param {number} bookingId
+ * @param {number} tenantId
+ */
+async function reverseMembershipForBooking(client, bookingId, tenantId) {
+  // 1. Find the original debit for this booking
+  const ledgerRes = await client.query(
+    `SELECT id, customer_membership_id, minutes_delta, uses_delta
+     FROM membership_ledger
+     WHERE booking_id = $1
+       AND tenant_id  = $2
+       AND type       = 'debit'
+     LIMIT 1`,
+    [bookingId, tenantId]
+  );
+
+  // No membership was used for this booking — nothing to reverse
+  if (!ledgerRes.rows.length) return;
+
+  const { customer_membership_id, minutes_delta, uses_delta } = ledgerRes.rows[0];
+
+  // 2. Idempotency guard — don't double-credit if this is called twice
+  const existingCredit = await client.query(
+    `SELECT id FROM membership_ledger
+     WHERE booking_id = $1
+       AND tenant_id  = $2
+       AND type       = 'credit'
+     LIMIT 1`,
+    [bookingId, tenantId]
+  );
+  if (existingCredit.rows.length) return;
+
+  // 3. Insert the credit reversal.
+  //    The original debit stored NEGATIVE values (e.g. minutes_delta = -60).
+  //    We reverse the sign so the sum moves back up (e.g. +60).
+  await client.query(
+    `INSERT INTO membership_ledger
+       (tenant_id, customer_membership_id, booking_id, type, minutes_delta, uses_delta, note)
+     VALUES ($1, $2, $3, 'credit', $4, $5, $6)`,
+    [
+      tenantId,
+      customer_membership_id,
+      bookingId,
+      minutes_delta != null ? -minutes_delta : null,
+      uses_delta    != null ? -uses_delta    : null,
+      `Credit reversal for cancelled booking ${bookingId}`,
+    ]
+  );
+
+  // 4. Recompute the live balance from the full ledger sum.
+  //    Mirrors the exact pattern used in bookings/create.js so there is one
+  //    source of truth for how balances are derived.
+  await client.query(
+    `UPDATE customer_memberships cm
+     SET
+       minutes_remaining = GREATEST(0, COALESCE(
+         (SELECT SUM(ml.minutes_delta) FROM membership_ledger ml
+          WHERE ml.customer_membership_id = cm.id), 0
+       )),
+       uses_remaining = GREATEST(0, COALESCE(
+         (SELECT SUM(ml.uses_delta) FROM membership_ledger ml
+          WHERE ml.customer_membership_id = cm.id), 0
+       ))
+     WHERE cm.id = $1
+       AND cm.tenant_id = $2`,
+    [customer_membership_id, tenantId]
+  );
+}
+
 module.exports = {
   checkConflicts,
   findOrCreateSession,
   incrementSessionCount,
   decrementSessionCount,
   loadJoinedBookingById,
+  reverseMembershipForBooking,
 };
