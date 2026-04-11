@@ -206,10 +206,11 @@ router.post("/", requireAppAuth, requireTenant, async (req, res) => {
          FROM information_schema.columns
          WHERE table_schema='public'
            AND table_name='services'
-           AND column_name IN ('price_amount','price')`
+           AND column_name IN ('price_amount','price','price_per_night')`
       );
-      const hasPriceAmount = priceCols.rows.some((r) => r.column_name === 'price_amount');
-      const hasPriceLegacy = priceCols.rows.some((r) => r.column_name === 'price');
+      const hasPriceAmount   = priceCols.rows.some((r) => r.column_name === 'price_amount');
+      const hasPriceLegacy   = priceCols.rows.some((r) => r.column_name === 'price');
+      const hasPricePerNight = priceCols.rows.some((r) => r.column_name === 'price_per_night');
       const priceExpr = hasPriceAmount && hasPriceLegacy
         ? "COALESCE(price_amount, price) AS price_amount"
         : hasPriceAmount
@@ -233,7 +234,7 @@ router.post("/", requireAppAuth, requireTenant, async (req, res) => {
       }
 
       const sRes = await db.query(
-        `SELECT id, tenant_id, duration_minutes, max_parallel_bookings, ${priceExpr}${hasReqConf ? ", COALESCE(requires_confirmation,false) AS requires_confirmation" : ""}
+        `SELECT id, tenant_id, duration_minutes, max_parallel_bookings, ${priceExpr}${hasPricePerNight ? ", price_per_night" : ""}${hasReqConf ? ", COALESCE(requires_confirmation,false) AS requires_confirmation" : ""}
          FROM services WHERE id=$1 AND tenant_id=$2 LIMIT 1`,
         [resolvedServiceId, resolvedTenantId]
       );
@@ -245,7 +246,14 @@ router.post("/", requireAppAuth, requireTenant, async (req, res) => {
       }
 
       serviceDurationMinutes = Number(sRes.rows[0].duration_minutes || 0) || null;
-      servicePriceAmount = sRes.rows[0].price_amount != null ? Number(sRes.rows[0].price_amount) : null;
+      // For nightly bookings prefer price_per_night (the per-night rate column)
+      // over price_amount, which may store a legacy flat/session price.
+      // This matches the rental availability engine which also prefers price_per_night.
+      const rawPricePerNight = hasPricePerNight ? sRes.rows[0].price_per_night : null;
+      const rawPriceAmount   = sRes.rows[0].price_amount;
+      servicePriceAmount = isNightlyBooking && rawPricePerNight != null
+        ? Number(rawPricePerNight)
+        : (rawPriceAmount != null ? Number(rawPriceAmount) : null);
 
       if (!duration) {
         duration = Number(sRes.rows[0].duration_minutes || 60) || 60;
