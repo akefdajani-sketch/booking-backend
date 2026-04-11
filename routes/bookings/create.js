@@ -1203,9 +1203,26 @@ const charge_amount = (finalCustomerMembershipId || prepaidApplied) ? 0 : price_
               paymentUrl,
               amountDue,
               currency,
-              bookingUrl: joined.booking_code
-                ? `${process.env.FRONTEND_URL || 'https://app.flexrz.com'}/book/${slug}?ref=${encodeURIComponent(joined.booking_code)}`
-                : null,
+              bookingUrl: await (async () => {
+                if (!joined.booking_code) return null;
+                // Try to use the tenant's primary custom domain first
+                try {
+                  const domainRes = await require('../../db').query(
+                    `SELECT domain FROM tenant_domains
+                     WHERE tenant_id = $1 AND status = 'active' AND is_primary = TRUE
+                     LIMIT 1`,
+                    [resolvedTenantId]
+                  );
+                  if (domainRes.rows.length) {
+                    const d = domainRes.rows[0].domain.replace(/\/$/, '');
+                    const base = d.startsWith('http') ? d : `https://${d}`;
+                    return `${base}?ref=${encodeURIComponent(joined.booking_code)}`;
+                  }
+                } catch (_) { /* non-fatal */ }
+                // Fall back to standard booking URL
+                const bookingBase = process.env.BOOKING_FRONTEND_URL || 'https://flexrz.com';
+                return `${bookingBase}/book/${slug}?ref=${encodeURIComponent(joined.booking_code)}`;
+              })(),
             });
             if (waResult.ok) {
               require('../../utils/logger').info({ bookingId, phone: joined.customer_phone, msgId: waResult.messageId, hasPaymentLink: !!paymentUrl }, 'WhatsApp confirmation sent');
