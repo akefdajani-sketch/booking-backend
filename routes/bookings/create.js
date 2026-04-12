@@ -1170,9 +1170,10 @@ const charge_amount = (finalCustomerMembershipId || prepaidApplied) ? 0 : price_
             const waEnabled = await isWhatsAppEnabledForTenant(resolvedTenantId).catch(() => isWhatsAppConfigured());
             if (!waEnabled) return;
 
-            // Load tenant name for the message
-            const tRes = await require('../../db').query('SELECT name FROM tenants WHERE id = $1', [resolvedTenantId]);
-            const tenantName = tRes.rows?.[0]?.name || 'Flexrz';
+            // Load tenant name + timezone for the message
+            const tRes = await require('../../db').query('SELECT name, timezone FROM tenants WHERE id = $1', [resolvedTenantId]);
+            const tenantName     = tRes.rows?.[0]?.name     || 'Flexrz';
+            const tenantTimezone = tRes.rows?.[0]?.timezone || 'Asia/Amman';
 
             // Check for a pending payment link on this booking — include in confirmation if found
             let paymentUrl = null;
@@ -1199,6 +1200,7 @@ const charge_amount = (finalCustomerMembershipId || prepaidApplied) ? 0 : price_
             const waResult = await sendBookingConfirmation({
               booking: joined,
               tenantName,
+              tenantTimezone,
               tenantId: resolvedTenantId,
               paymentUrl,
               amountDue,

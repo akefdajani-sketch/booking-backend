@@ -83,7 +83,7 @@ async function sendMessage({ to, message, messageType = 'text', tenantId = null 
 /**
  * Booking confirmation message — sent to customer after booking is created.
  */
-function buildBookingConfirmationMessage({ tenantName, customerName, bookingCode, resourceName, checkinDate, checkoutDate, nightsCount, startTime, serviceName, paymentUrl, amountDue, currency, bookingUrl }) {
+function buildBookingConfirmationMessage({ tenantName, customerName, bookingCode, resourceName, checkinDate, checkoutDate, nightsCount, startTime, serviceName, paymentUrl, amountDue, currency, bookingUrl, timezone = 'Asia/Amman' }) {
   // bookingUrl is a plain-text URL — WhatsApp auto-makes it tappable.
   const firstName = (customerName || 'Guest').split(' ')[0];
 
@@ -96,8 +96,8 @@ function buildBookingConfirmationMessage({ tenantName, customerName, bookingCode
       `Your reservation has been confirmed.`,
       ``,
       `🏠 Property: ${resourceName || serviceName || 'Property'}`,
-      `📅 Check-in:  ${formatDate(checkinDate)}`,
-      `📅 Check-out: ${formatDate(checkoutDate)}`,
+      `📅 Check-in:  ${formatDate(checkinDate, timezone)}`,
+      `📅 Check-out: ${formatDate(checkoutDate, timezone)}`,
       nightsCount ? `🌙 Nights: ${nightsCount}` : '',
       ``,
       bookingCode ? `📋 *${bookingCode}*` : '',
@@ -119,7 +119,7 @@ function buildBookingConfirmationMessage({ tenantName, customerName, bookingCode
     ``,
     serviceName  ? `🏷️ Service: ${serviceName}` : '',
     resourceName ? `📍 At: ${resourceName}` : '',
-    startTime    ? `🕐 Time: ${formatDateTime(startTime)}` : '',
+    startTime    ? `🕐 Time: ${formatDateTime(startTime, timezone)}` : '',
     ``,
     bookingCode ? `📋 *${bookingCode}*` : '',
     bookingUrl  ? bookingUrl : '',
@@ -134,7 +134,7 @@ function buildBookingConfirmationMessage({ tenantName, customerName, bookingCode
 /**
  * Payment link message — sent when owner creates a payment link for a guest.
  */
-function buildPaymentLinkMessage({ tenantName, customerName, bookingCode, resourceName, checkinDate, checkoutDate, amountDue, currency, paymentUrl }) {
+function buildPaymentLinkMessage({ tenantName, customerName, bookingCode, resourceName, checkinDate, checkoutDate, amountDue, currency, paymentUrl, timezone = 'Asia/Amman' }) {
   const firstName = (customerName || 'Guest').split(' ')[0];
   const amount    = formatAmount(amountDue, currency);
 
@@ -145,7 +145,7 @@ function buildPaymentLinkMessage({ tenantName, customerName, bookingCode, resour
     `You have a payment of *${amount}* due for your upcoming stay.`,
     ``,
     resourceName ? `🏠 Property: ${resourceName}` : '',
-    checkinDate  ? `📅 ${formatDate(checkinDate)} → ${formatDate(checkoutDate)}` : '',
+    checkinDate  ? `📅 ${formatDate(checkinDate, timezone)} → ${formatDate(checkoutDate, timezone)}` : '',
     bookingCode  ? `📋 Reference: ${bookingCode}` : '',
     ``,
     `Pay securely here:`,
@@ -156,59 +156,9 @@ function buildPaymentLinkMessage({ tenantName, customerName, bookingCode, resour
 }
 
 /**
- * Payment reminder message — sent automatically when a payment link is still pending.
- * urgency: 'gentle' | 'urgent' | 'final'
+ * Payment received message — sent when payment is recorded.
  */
-function buildPaymentReminderMessage({ tenantName, customerName, bookingCode, resourceName, checkinDate, checkoutDate, amountDue, currency, paymentUrl, urgency = 'gentle' }) {
-  const firstName = (customerName || 'Guest').split(' ')[0];
-  const amount    = formatAmount(amountDue, currency);
-
-  const header = urgency === 'final'
-    ? `⏰ Final reminder — ${tenantName}`
-    : urgency === 'urgent'
-    ? `🔔 Payment reminder — ${tenantName}`
-    : `💳 Friendly reminder — ${tenantName}`;
-
-  const body = urgency === 'final'
-    ? `Hi ${firstName}, this is a final reminder that your payment of *${amount}* is due today.`
-    : urgency === 'urgent'
-    ? `Hi ${firstName}, your payment of *${amount}* is due soon. Please complete it to secure your booking.`
-    : `Hi ${firstName}, just a friendly reminder that your payment of *${amount}* is still outstanding.`;
-
-  return [
-    header,
-    ``,
-    body,
-    ``,
-    resourceName ? `🏠 Property: ${resourceName}` : '',
-    checkinDate  ? `📅 ${formatDate(checkinDate)} → ${formatDate(checkoutDate)}` : '',
-    bookingCode  ? `📋 Reference: ${bookingCode}` : '',
-    ``,
-    `Pay securely here:`,
-    `${paymentUrl}`,
-    ``,
-    urgency === 'final'
-      ? `Please complete payment today to avoid cancellation.`
-      : `This link accepts card, CliQ, or cash. Reply if you need help.`,
-  ].filter(l => l !== null).join('\n');
-}
-
-/**
- * Send a payment reminder WhatsApp to a customer.
- */
-async function sendPaymentReminder({ customerPhone, customerName, tenantName, tenantId = null, bookingCode, resourceName, checkinDate, checkoutDate, amountDue, currency, paymentUrl, urgency = 'gentle' }) {
-  if (!customerPhone) return { ok: false, reason: 'no_phone' };
-
-  const message = buildPaymentReminderMessage({
-    tenantName, customerName, bookingCode, resourceName,
-    checkinDate, checkoutDate, amountDue, currency, paymentUrl, urgency,
-  });
-
-  return sendMessage({ to: customerPhone, message, tenantId });
-}
-
-
-function buildPaymentReceivedMessage({ tenantName, customerName, bookingCode, amountPaid, currency, resourceName, checkinDate }) {
+function buildPaymentReceivedMessage({ tenantName, customerName, bookingCode, amountPaid, currency, resourceName, checkinDate, timezone = 'Asia/Amman' }) {
   const firstName = (customerName || 'Guest').split(' ')[0];
   const amount    = formatAmount(amountPaid, currency);
 
@@ -219,7 +169,7 @@ function buildPaymentReceivedMessage({ tenantName, customerName, bookingCode, am
     `We've received your payment of *${amount}*. Thank you!`,
     ``,
     resourceName ? `🏠 ${resourceName}` : '',
-    checkinDate  ? `📅 Check-in: ${formatDate(checkinDate)}` : '',
+    checkinDate  ? `📅 Check-in: ${formatDate(checkinDate, timezone)}` : '',
     bookingCode  ? `📋 Reference: ${bookingCode}` : '',
     ``,
     `Your booking is confirmed and fully paid. We look forward to your stay! 🙏`,
@@ -234,7 +184,7 @@ function buildPaymentReceivedMessage({ tenantName, customerName, bookingCode, am
  * Send booking confirmation WhatsApp to customer.
  * Non-fatal — booking proceeds even if WhatsApp fails.
  */
-async function sendBookingConfirmation({ booking, tenantName, tenantId = null, paymentUrl, amountDue, currency, bookingUrl }) {
+async function sendBookingConfirmation({ booking, tenantName, tenantTimezone = 'Asia/Amman', tenantId = null, paymentUrl, amountDue, currency, bookingUrl }) {
   const phone = booking.customer_phone;
   if (!phone) return { ok: false, reason: 'no_phone' };
 
@@ -252,6 +202,7 @@ async function sendBookingConfirmation({ booking, tenantName, tenantId = null, p
     amountDue,
     currency,
     bookingUrl,
+    timezone:      tenantTimezone,
   });
 
   return sendMessage({ to: phone, message, tenantId });
@@ -300,19 +251,20 @@ function normalisePhone(raw) {
   return s;
 }
 
-function formatDate(d) {
+function formatDate(d, tz = 'Asia/Amman') {
   if (!d) return '';
   try {
-    return new Date(d).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
+    return new Date(d).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric', timeZone: tz });
   } catch { return String(d).slice(0, 10); }
 }
 
-function formatDateTime(d) {
+function formatDateTime(d, tz = 'Asia/Amman') {
   if (!d) return '';
   try {
     return new Date(d).toLocaleString('en-GB', {
       day: 'numeric', month: 'short', year: 'numeric',
       hour: '2-digit', minute: '2-digit',
+      timeZone: tz,
     });
   } catch { return String(d); }
 }
@@ -357,12 +309,10 @@ module.exports = {
   sendBookingConfirmation,
   sendPaymentLink,
   sendPaymentReceived,
-  sendPaymentReminder,
   isWhatsAppConfigured,
   // Exported for testing
   buildBookingConfirmationMessage,
   buildPaymentLinkMessage,
   buildPaymentReceivedMessage,
-  buildPaymentReminderMessage,
   normalisePhone,
 };
