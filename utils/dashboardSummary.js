@@ -1105,7 +1105,7 @@ async function getDashboardSummary({ tenantId, tenantSlug, mode, dateStr }) {
     }
   } catch (nightlyErr) {
     // Non-fatal — nightly dashboard requires migration 024 columns
-    logger.warn({ err: nightlyErr?.message }, 'dashboardSummary: nightly occupancy skipped');
+    console.warn('dashboardSummary: nightly occupancy skipped', nightlyErr?.message);
   }
   // ──────────────────────────────────────────────────────────────────────────
 
