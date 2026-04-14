@@ -1,13 +1,14 @@
 // routes/publicPricing.js
 // Public pricing quote endpoint for the booking UI.
 //
-// Endpoint:
-//   POST /api/public/:slug/pricing/quote
+// Endpoints:
+//   POST /api/public/:slug/pricing/quote   — price + tax breakdown for a booking
+//   GET  /api/public/:slug/packages        — active prepaid products catalog
 //
-// Notes:
-// - Public-safe: returns ONLY computed pricing output (no rate rule list)
-// - Tenant resolved server-side (slug -> tenantId)
-// - Server computes base service price and scales for duration, then applies rate rules.
+// PR-TAX-1 changes:
+//   - After computing rate-rule price, run computeTaxForBooking() from taxEngine.
+//   - Response now includes full tax breakdown (subtotal, vat, service_charge, total).
+//   - Backward-compatible: tax fields are simply 0/null if tenant has no tax config.
 
 const express = require("express");
 
@@ -15,6 +16,11 @@ const { requireTenant } = require("../middleware/requireTenant");
 const { pool } = require("../db");
 const db = pool;
 const { computeRateForBookingLike } = require("../utils/ratesEngine");
+const {
+  computeTaxForBooking,
+  buildPublicTaxSummary,
+  loadTenantTaxConfig,
+} = require("../utils/taxEngine");
 
 const router = express.Router();
 
@@ -60,11 +66,8 @@ router.post("/:slug/pricing/quote", injectTenantSlug, requireTenant, async (req,
       return res.status(400).json({ error: "Invalid start_time." });
     }
 
-    // Load service base price + duration for proportional scaling (match booking create behavior).
-    // Dynamically detect which price column exists to support both schema versions:
-    //   - Newer schemas: price_amount (NUMERIC)
-    //   - Older schemas: price (NUMERIC)
-    // This mirrors the same pattern used in routes/services.js and routes/bookings.js.
+    // Load service base price + duration for proportional scaling.
+    // Dynamically detect which price column exists to support both schema versions.
     const priceCols = await db.query(
       `SELECT column_name
        FROM information_schema.columns
@@ -116,7 +119,7 @@ router.post("/:slug/pricing/quote", injectTenantSlug, requireTenant, async (req,
       }
     }
 
-    // Apply Rates rules (non-fatal if rate_rules missing)
+    // ── Apply rate rules (non-fatal if rate_rules table missing) ──────────────
     let computed = {
       base_price_amount: basePriceAmount,
       adjusted_price_amount: basePriceAmount,
@@ -125,43 +128,77 @@ router.post("/:slug/pricing/quote", injectTenantSlug, requireTenant, async (req,
     };
 
     try {
-  // Apply rate rules even when the service has no base price.
-  // Fixed rules (packages/per-slot) can be used as the primary pricing model.
-  computed = await computeRateForBookingLike({
-    tenantId,
-    serviceId,
-    staffId,
-    resourceId,
-    start,
-    durationMinutes,
-    basePriceAmount,
-    serviceSlotMinutes,
-  });
+      computed = await computeRateForBookingLike({
+        tenantId,
+        serviceId,
+        staffId,
+        resourceId,
+        start,
+        durationMinutes,
+        basePriceAmount,
+        serviceSlotMinutes,
+      });
 
-  // If the engine couldn't compute (e.g. delta/multiplier without base),
-  // fall back to base price.
-  if (computed.adjusted_price_amount == null) {
-    computed.adjusted_price_amount = basePriceAmount;
-  }
-} catch (e) {
-
-      // Keep endpoint resilient; UI can still show base price.
+      if (computed.adjusted_price_amount == null) {
+        computed.adjusted_price_amount = basePriceAmount;
+      }
+    } catch (e) {
       console.warn("ratesEngine non-fatal error (pricing quote):", e?.message || e);
     }
 
-    // Prefer tenant currency if service/rule doesn't define it.
+    // ── Resolve currency ──────────────────────────────────────────────────────
     const tcur = await db.query(`SELECT currency_code FROM tenants WHERE id=$1 LIMIT 1`, [tenantId]);
     const currency_code =
       computed?.applied_rate_snapshot?.rule?.currency_code ||
       tcur.rows?.[0]?.currency_code ||
       "JD";
 
+    // ── PR-TAX-1: Compute tax breakdown ───────────────────────────────────────
+    // chargedAmount is the post-rate-rule price. Tax is applied on top of (or
+    // extracted from, if inclusive) this amount.
+    const chargedAmount = computed.adjusted_price_amount;
+    let taxResult = null;
+
+    if (chargedAmount != null && Number.isFinite(chargedAmount) && chargedAmount > 0) {
+      try {
+        taxResult = await computeTaxForBooking({
+          tenantId,
+          serviceId,
+          chargedAmount,
+        });
+      } catch (taxErr) {
+        // Non-fatal: if tax engine fails, return the base price without tax breakdown
+        console.warn("taxEngine non-fatal error (pricing quote):", taxErr?.message || taxErr);
+      }
+    }
+
+    // Build tax summary for the UI — or return zero-value defaults
+    const taxSummary = taxResult
+      ? buildPublicTaxSummary({ breakdown: taxResult, effective: taxResult.effective, currencyCode: currency_code })
+      : {
+          subtotal:                chargedAmount,
+          vat_amount:              0,
+          vat_label:               "VAT",
+          vat_rate:                0,
+          service_charge_amount:   0,
+          service_charge_label:    "Service Charge",
+          service_charge_rate:     0,
+          total:                   chargedAmount,
+          tax_inclusive:           false,
+          show_breakdown:          false,
+          currency_code,
+        };
+
     return res.json({
-      base_price_amount: computed.base_price_amount,
+      // ── Original fields (backward-compatible) ────────────────────────────
+      base_price_amount:     computed.base_price_amount,
       adjusted_price_amount: computed.adjusted_price_amount,
       currency_code,
-      applied_rate_rule_id: computed.applied_rate_rule_id,
+      applied_rate_rule_id:  computed.applied_rate_rule_id,
       applied_rate_snapshot: computed.applied_rate_snapshot,
+
+      // ── PR-TAX-1: Tax breakdown ───────────────────────────────────────────
+      tax: taxSummary,
     });
   } catch (err) {
     console.error("Public pricing quote error:", err);
