@@ -83,7 +83,14 @@ router.get("/", requireTenant, requireAdminOrTenantRole("staff"), async (req, re
 
         b.status,
         b.booking_code,
-        b.created_at
+        b.created_at,
+
+        -- PR-TAX-1: tax breakdown snapshot (NULL on pre-migration DBs)
+        b.subtotal_amount,
+        b.vat_amount,
+        b.service_charge_amount,
+        b.total_amount,
+        b.tax_snapshot
       FROM bookings b
       JOIN tenants t ON b.tenant_id = t.id
       LEFT JOIN customers c
