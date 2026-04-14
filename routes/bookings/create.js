@@ -11,6 +11,7 @@ const { ensureBookingMoneyColumns } = require("../../utils/ensureBookingMoneyCol
 const { parseBookingListParams, buildBookingListWhere } = require("../../utils/bookingQueryBuilder");
 const { findOrCreateSession, incrementSessionCount, decrementSessionCount, loadJoinedBookingById, checkConflicts } = require("../../utils/bookings");
 const { computeRateForBookingLike } = require("../../utils/ratesEngine");
+const { computeTaxForBooking } = require("../../utils/taxEngine");
 const { ensureBookingRateColumns } = require("../../utils/ensureBookingRateColumns");
 const { ensurePaymentMethodColumn } = require("../../utils/ensurePaymentMethodColumn");
 const {
@@ -668,6 +669,18 @@ router.post("/", requireAppAuth, requireTenant, async (req, res) => {
 
 const charge_amount = (finalCustomerMembershipId || prepaidApplied) ? 0 : price_amount;
 
+      // PR-TAX-1: Compute tax breakdown (non-fatal — never blocks booking creation)
+      let taxData = { subtotal_amount: null, vat_amount: null, service_charge_amount: null, total_amount: null, tax_snapshot: null };
+      const taxableAmount = charge_amount;
+      if (taxableAmount != null && Number.isFinite(taxableAmount) && taxableAmount > 0) {
+        try {
+          const taxResult = await computeTaxForBooking({ tenantId: resolvedTenantId, serviceId: resolvedServiceId, chargedAmount: taxableAmount });
+          taxData = { subtotal_amount: taxResult.subtotal, vat_amount: taxResult.vat_amount, service_charge_amount: taxResult.service_charge_amount, total_amount: taxResult.total, tax_snapshot: taxResult.snapshot };
+        } catch (taxErr) {
+          console.warn("taxEngine non-fatal error (booking create):", taxErr?.message || taxErr);
+        }
+      }
+
       // Derive payment_method for this booking
       // Cash is sent from client and trusted directly.
       // Card/Cliq are set after payment gateway callback.
@@ -683,6 +696,19 @@ const charge_amount = (finalCustomerMembershipId || prepaidApplied) ? 0 : price_
       const hasMoneyCols = await ensureBookingMoneyColumns();
       const hasRateCols = await ensureBookingRateColumns();
       const hasPaymentMethodCol = await ensurePaymentMethodColumn(); // PAY-2
+
+      // PR-TAX-1: detect tax columns (migration 031 guard — safe on old DBs)
+      const hasTaxCols = await (async () => {
+        try {
+          const r = await db.query(
+            `SELECT column_name FROM information_schema.columns
+              WHERE table_schema='public' AND table_name='bookings'
+                AND column_name IN ('subtotal_amount','vat_amount','service_charge_amount','total_amount','tax_snapshot')`,
+            []
+          );
+          return r.rows.length >= 5;
+        } catch (_) { return false; }
+      })();
 
       let bookingId;
       let created = true;
@@ -772,7 +798,26 @@ const charge_amount = (finalCustomerMembershipId || prepaidApplied) ? 0 : price_
           return params.map((_, i) => `$${i + 1}`).join(', ');
         }
 
-        if (hasMoneyCols && hasRateCols) {
+        if (hasMoneyCols && hasRateCols && hasTaxCols) {
+          // PR-TAX-1: full tax columns available
+          insertParams = [
+            ...baseVals,
+            price_amount, charge_amount, tenantCurrencyCode,
+            applied_rate_rule_id, applied_rate_snapshot,
+            taxData.subtotal_amount, taxData.vat_amount,
+            taxData.service_charge_amount, taxData.total_amount,
+            taxData.tax_snapshot ? JSON.stringify(taxData.tax_snapshot) : null,
+          ];
+          insertSql = `
+          INSERT INTO bookings
+            (${baseCols}, price_amount, charge_amount, currency_code,
+             applied_rate_rule_id, applied_rate_snapshot,
+             subtotal_amount, vat_amount, service_charge_amount, total_amount, tax_snapshot)
+          VALUES
+            (${makePlaceholders(insertParams)})
+          RETURNING id;
+          `;
+        } else if (hasMoneyCols && hasRateCols) {
           insertParams = [...baseVals, price_amount, charge_amount, tenantCurrencyCode, applied_rate_rule_id, applied_rate_snapshot];
           insertSql = `
           INSERT INTO bookings
@@ -1242,6 +1287,12 @@ const charge_amount = (finalCustomerMembershipId || prepaidApplied) ? 0 : price_
       return res.status(created ? 201 : 200).json({
         booking: joined,
         replay: !created,
+        tax: {
+          subtotal_amount:       taxData.subtotal_amount,
+          vat_amount:            taxData.vat_amount,
+          service_charge_amount: taxData.service_charge_amount,
+          total_amount:          taxData.total_amount,
+        },
         debug: {
           service: process.env.RENDER_SERVICE_NAME || process.env.SERVICE_NAME || null,
           dbName: (() => {
