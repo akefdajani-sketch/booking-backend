@@ -17,6 +17,7 @@ const router  = express.Router();
 const { requireTenant }         = require('../middleware/requireTenant');
 const { requireTenantRole }     = require('../middleware/requireTenantRole');
 const requireAppAuth            = require('../middleware/requireAppAuth');
+const ensureUser                = require('../middleware/ensureUser'); // PR-TAX-FIX
 const logger                    = require('../utils/logger');
 
 const {
@@ -37,7 +38,7 @@ function injectTenantSlug(req, _res, next) {
 // Returns the full tax config for the owner dashboard.
 // Requires: tenant role (owner / admin / manager).
 
-router.get('/:slug/tax-config', injectTenantSlug, requireAppAuth, requireTenant, requireTenantRole(['owner', 'admin', 'manager']), async (req, res) => {
+router.get('/:slug/tax-config', injectTenantSlug, requireAppAuth, ensureUser, requireTenant, requireTenantRole(['owner', 'admin', 'manager']), async (req, res) => {
   try {
     const tenantId = Number(req.tenantId);
     if (!tenantId) return res.status(400).json({ error: 'Missing tenant context.' });
@@ -56,7 +57,7 @@ router.get('/:slug/tax-config', injectTenantSlug, requireAppAuth, requireTenant,
 // Body shape mirrors DEFAULT_TAX_CONFIG — only send what you want to change.
 // Requires: owner or admin role.
 
-router.put('/:slug/tax-config', injectTenantSlug, requireAppAuth, requireTenant, requireTenantRole(['owner', 'admin']), async (req, res) => {
+router.put('/:slug/tax-config', injectTenantSlug, requireAppAuth, ensureUser, requireTenant, requireTenantRole(['owner', 'admin']), async (req, res) => {
   try {
     const tenantId = Number(req.tenantId);
     if (!tenantId) return res.status(400).json({ error: 'Missing tenant context.' });

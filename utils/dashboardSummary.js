@@ -1016,7 +1016,7 @@ async function getDashboardSummary({ tenantId, tenantSlug, mode, dateStr }) {
       `SELECT COUNT(*)::int AS cnt
        FROM resources
        WHERE tenant_id=$1
-         AND (booking_mode='nightly' OR rental_type IN ('short_term','long_term','flexible'))`,
+         AND rental_type IN ('short_term','long_term','flexible')`,
       [tenantId]
     );
     const hasNightlyUnits = Number(nightlyCheck.rows?.[0]?.cnt || 0) > 0;
