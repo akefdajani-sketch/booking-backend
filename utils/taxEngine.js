@@ -106,7 +106,7 @@ async function saveTenantTaxConfig(tenantId, updates) {
   const merged = { ...current, ...validated };
 
   await db.query(
-    `UPDATE tenants SET tax_config = $1, updated_at = NOW() WHERE id = $2`,
+    `UPDATE tenants SET tax_config = $1 WHERE id = $2`,
     [JSON.stringify(merged), tenantId]
   );
   return merged;
