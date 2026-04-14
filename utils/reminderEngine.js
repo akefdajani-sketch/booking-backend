@@ -24,7 +24,7 @@
 
 const db     = require('../db');
 const logger = require('./logger');
-const { sendPaymentReminder } = require('./whatsapp');
+const { sendPaymentReminder, sendMessage } = require('./whatsapp');
 const { getWhatsAppCredentials } = require('./whatsappCredentials');
 
 const FRONTEND_URL = process.env.BOOKING_FRONTEND_URL || 'https://flexrz.com';
@@ -242,4 +242,203 @@ async function runReminderEngine() {
   return result;
 }
 
-module.exports = { runReminderEngine };
+
+// ---------------------------------------------------------------------------
+// PR-LEASE-1: Lease renewal reminder schedule
+//
+//   renewal_30d — 30 days before lease_end
+//   renewal_14d — 14 days before lease_end
+//   renewal_7d  — 7 days before lease_end
+//   renewal_1d  — 1 day  before lease_end
+//
+// Only fires for resources where:
+//   - rental_type IN ('long_term', 'flexible')
+//   - lease_end IS NOT NULL
+//   - lease_tenant_phone IS NOT NULL
+//   - lease_end is in the future (within 31 days)
+//
+// Dedup: lease_renewal_reminders has UNIQUE(resource_id, reminder_type, lease_end_date)
+// ---------------------------------------------------------------------------
+
+const LEASE_URGENCY_MAP = {
+  renewal_30d: 'gentle',
+  renewal_14d: 'gentle',
+  renewal_7d:  'urgent',
+  renewal_1d:  'final',
+};
+
+function getDueLeaseReminderTypes(resource, alreadySent, nowMs) {
+  const leaseEndMs = new Date(resource.lease_end).getTime();
+  const dayMs      = 24 * 60 * 60 * 1000;
+  const msUntil    = leaseEndMs - nowMs;
+  const due        = [];
+
+  // Only process leases ending within the next 31 days (or already passed within 1 day)
+  if (msUntil > 31 * dayMs || msUntil < -dayMs) return due;
+
+  const key = (type) => `${type}:${resource.lease_end}`;
+
+  if (!alreadySent.has(key('renewal_30d')) && msUntil <= 30 * dayMs && msUntil > 14 * dayMs)
+    due.push('renewal_30d');
+
+  if (!alreadySent.has(key('renewal_14d')) && msUntil <= 14 * dayMs && msUntil > 7 * dayMs)
+    due.push('renewal_14d');
+
+  if (!alreadySent.has(key('renewal_7d'))  && msUntil <= 7  * dayMs && msUntil > 1 * dayMs)
+    due.push('renewal_7d');
+
+  if (!alreadySent.has(key('renewal_1d'))  && msUntil <= 1  * dayMs && msUntil > -dayMs)
+    due.push('renewal_1d');
+
+  return due;
+}
+
+function buildLeaseRenewalMessage({ tenantName, resourceName, leaseTenantName, leaseEndDate, daysUntilExpiry, urgency }) {
+  const dayLabel = daysUntilExpiry <= 1
+    ? 'tomorrow'
+    : daysUntilExpiry <= 7
+    ? `in ${daysUntilExpiry} days`
+    : `on ${leaseEndDate}`;
+
+  const greeting = leaseTenantName ? `Hello ${leaseTenantName},` : 'Hello,';
+
+  if (urgency === 'final') {
+    return `${greeting}\n\nThis is a reminder that the lease for *${resourceName}* at *${tenantName}* expires ${dayLabel} (${leaseEndDate}).\n\nPlease contact us to arrange renewal or make alternative arrangements.`;
+  }
+  if (urgency === 'urgent') {
+    return `${greeting}\n\nYour lease for *${resourceName}* at *${tenantName}* is expiring ${dayLabel}.\n\nPlease reach out to renew your lease.\n\nLease end date: ${leaseEndDate}`;
+  }
+  return `${greeting}\n\nThis is a courtesy reminder that the lease for *${resourceName}* at *${tenantName}* will expire on ${leaseEndDate}.\n\nPlease contact us if you would like to renew.`;
+}
+
+async function runLeaseRenewalReminders() {
+  const nowMs  = Date.now();
+  const result = { processed: 0, sent: 0, skipped: 0, errors: 0 };
+  const dayMs  = 24 * 60 * 60 * 1000;
+
+  // Fetch resources with active leases expiring within 31 days
+  let resources;
+  try {
+    const { rows } = await db.query(`
+      SELECT
+        r.id, r.name AS resource_name, r.tenant_id,
+        r.lease_end, r.lease_tenant_name, r.lease_tenant_phone,
+        t.name AS tenant_name, t.slug AS tenant_slug
+      FROM resources r
+      JOIN tenants t ON t.id = r.tenant_id
+      WHERE r.rental_type IN ('long_term', 'flexible')
+        AND r.lease_end IS NOT NULL
+        AND r.lease_tenant_phone IS NOT NULL
+        AND r.lease_tenant_phone != ''
+        AND r.lease_end >= CURRENT_DATE - INTERVAL '1 day'
+        AND r.lease_end <= CURRENT_DATE + INTERVAL '31 days'
+    `);
+    resources = rows;
+  } catch (err) {
+    // Table may not exist on older DBs — non-fatal
+    logger.warn({ err: err.message }, 'LeaseRenewalReminders: could not query resources (migration pending?)');
+    return result;
+  }
+
+  if (!resources.length) return result;
+
+  // Batch-fetch already-sent reminders
+  const resourceIds = resources.map(r => r.id);
+  let sentRows = [];
+  try {
+    const { rows } = await db.query(
+      `SELECT resource_id, reminder_type, lease_end_date::text AS lease_end_date
+       FROM lease_renewal_reminders WHERE resource_id = ANY($1)`,
+      [resourceIds]
+    );
+    sentRows = rows;
+  } catch {
+    // Table missing — continue, dedup will fail gracefully below
+  }
+
+  // Build map: resourceId → Set of "type:lease_end" keys
+  const sentMap = new Map();
+  for (const row of sentRows) {
+    if (!sentMap.has(row.resource_id)) sentMap.set(row.resource_id, new Set());
+    sentMap.get(row.resource_id).add(`${row.reminder_type}:${row.lease_end_date}`);
+  }
+
+  for (const resource of resources) {
+    result.processed++;
+    const alreadySent  = sentMap.get(resource.id) || new Set();
+    const dueTypes     = getDueLeaseReminderTypes(resource, alreadySent, nowMs);
+
+    if (!dueTypes.length) { result.skipped++; continue; }
+
+    let creds;
+    try { creds = await getWhatsAppCredentials(resource.tenant_id); } catch { creds = null; }
+
+    if (!creds) { result.skipped++; continue; }
+
+    const leaseEndMs    = new Date(resource.lease_end).getTime();
+    const daysUntil     = Math.ceil((leaseEndMs - nowMs) / dayMs);
+
+    for (const reminderType of dueTypes) {
+      const urgency = LEASE_URGENCY_MAP[reminderType] || 'gentle';
+      const message = buildLeaseRenewalMessage({
+        tenantName:      resource.tenant_name,
+        resourceName:    resource.resource_name,
+        leaseTenantName: resource.lease_tenant_name,
+        leaseEndDate:    String(resource.lease_end).slice(0, 10),
+        daysUntilExpiry: daysUntil,
+        urgency,
+      });
+
+      try {
+        const waResult = await sendMessage({
+          to:      resource.lease_tenant_phone,
+          message,
+          messageType: 'text',
+          tenantId: resource.tenant_id,
+        });
+
+        try {
+          await db.query(
+            `INSERT INTO lease_renewal_reminders
+               (resource_id, tenant_id, reminder_type, lease_end_date, sent_to, whatsapp_msg_id, ok, error_reason)
+             VALUES ($1,$2,$3,$4::date,$5,$6,$7,$8)
+             ON CONFLICT (resource_id, reminder_type, lease_end_date) DO NOTHING`,
+            [
+              resource.id, resource.tenant_id, reminderType,
+              String(resource.lease_end).slice(0, 10),
+              resource.lease_tenant_phone,
+              waResult?.messageId || null,
+              waResult?.ok ?? false,
+              waResult?.ok ? null : (waResult?.reason || 'unknown'),
+            ]
+          );
+        } catch (_) {}
+
+        if (waResult?.ok) {
+          result.sent++;
+          logger.info({ resourceId: resource.id, reminderType }, 'LeaseRenewalReminders: sent');
+        } else {
+          result.errors++;
+        }
+      } catch (err) {
+        result.errors++;
+        logger.error({ err, resourceId: resource.id, reminderType }, 'LeaseRenewalReminders: error');
+        try {
+          await db.query(
+            `INSERT INTO lease_renewal_reminders
+               (resource_id, tenant_id, reminder_type, lease_end_date, ok, error_reason)
+             VALUES ($1,$2,$3,$4::date,false,$5)
+             ON CONFLICT (resource_id, reminder_type, lease_end_date) DO NOTHING`,
+            [resource.id, resource.tenant_id, reminderType,
+             String(resource.lease_end).slice(0, 10), String(err.message || 'error')]
+          );
+        } catch (_) {}
+      }
+    }
+  }
+
+  logger.info(result, 'LeaseRenewalReminders: run complete');
+  return result;
+}
+
+module.exports = { runReminderEngine, runLeaseRenewalReminders };

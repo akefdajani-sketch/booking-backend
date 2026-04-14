@@ -27,7 +27,7 @@
 const express = require('express');
 const router  = express.Router();
 const logger  = require('../utils/logger');
-const { runReminderEngine } = require('../utils/reminderEngine');
+const { runReminderEngine, runLeaseRenewalReminders } = require('../utils/reminderEngine');
 
 const SECRET = process.env.REMINDER_JOB_SECRET || '';
 
@@ -52,8 +52,15 @@ router.post('/', async (req, res) => {
   logger.info({ ip: req.ip }, 'ReminderJob: triggered');
 
   try {
-    const summary = await runReminderEngine();
-    return res.json({ ok: true, summary });
+    const [paymentSummary, leaseSummary] = await Promise.allSettled([
+      runReminderEngine(),
+      runLeaseRenewalReminders(), // PR-LEASE-1
+    ]);
+    return res.json({
+      ok: true,
+      summary: paymentSummary.status === 'fulfilled' ? paymentSummary.value : { error: paymentSummary.reason?.message },
+      leaseSummary: leaseSummary.status === 'fulfilled' ? leaseSummary.value : { error: leaseSummary.reason?.message },
+    });
   } catch (err) {
     logger.error({ err }, 'ReminderJob: engine failed');
     return res.status(500).json({ ok: false, error: 'Reminder engine error' });
