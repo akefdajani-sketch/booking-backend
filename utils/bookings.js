@@ -330,6 +330,13 @@ async function loadJoinedBookingById(bookingId, tenantId) {
       b.applied_rate_snapshot,
       rr.name AS applied_rate_rule_name,
 
+      -- PR-TAX-1: tax breakdown snapshot (NULL on pre-migration DBs)
+      b.subtotal_amount,
+      b.vat_amount,
+      b.service_charge_amount,
+      b.total_amount,
+      b.tax_snapshot,
+
       mp.name AS membership_plan_name,
       cm.minutes_remaining AS membership_minutes_remaining,
       cm.uses_remaining AS membership_uses_remaining,
