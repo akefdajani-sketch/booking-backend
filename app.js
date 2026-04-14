@@ -24,7 +24,6 @@ const {
   tenantLookupLimiter,
 } = require("./middleware/rateLimiter");
 const apiVersion = require("./middleware/apiVersion");
-// PR-14: OpenAPI
 // PR-14: OpenAPI / Swagger docs — served at /api/docs
 const swaggerUi  = require('swagger-ui-express');
 const YAML        = require('js-yaml');
@@ -72,6 +71,10 @@ const tenantPaymentSettingsRouter = require("./routes/tenantPaymentSettings");
 const tenantWhatsAppSettingsRouter = require("./routes/tenantWhatsAppSettings");
 const reminderJobRouter = require("./routes/reminderJob");
 
+// PR-TAX-1: Tax & service charge configuration
+const tenantTaxRouter = require("./routes/tenantTax");
+const { publicTaxRouter } = require("./routes/tenantTax");
+
 const publicPricingRouter = require("./routes/publicPricing");
 const uploadsRouter = require("./routes/uploads");
 const mediaLibraryRoutes = require("./routes/mediaLibrary");
@@ -100,9 +103,6 @@ const ENABLE_DEBUG_ROUTES =
   String(process.env.ENABLE_DEBUG_ROUTES || "").toLowerCase() === "true";
 
 // ─── Trust proxy (Render sits behind a load balancer) ────────────────────────
-// Without this, express-rate-limit throws ERR_ERL_UNEXPECTED_X_FORWARDED_FOR
-// which disrupts the request pipeline and causes auth middleware to fail,
-// producing random 401s on the tenant dashboard and booking app.
 app.set("trust proxy", 1);
 
 // ─── Observability (must be first) ───────────────────────────────────────────
@@ -116,7 +116,6 @@ app.use(corsMiddleware);
 app.options("*", cors(corsOptions));
 
 // ─── PR-4: Stripe webhook (raw body — MUST be before express.json()) ─────────
-// Stripe requires the raw Buffer for signature verification.
 app.use("/api/billing", stripeWebhookRouter);
 
 // ─── Body parsers ────────────────────────────────────────────────────────────
@@ -150,8 +149,6 @@ if (process.env.NODE_ENV !== 'test') {
 app.get('/api/csrf-token', getCsrfToken);
 
 // ─── Core APIs ───────────────────────────────────────────────────────────────
-// PR-2: tenants router — GET / is now admin-protected (see routes/tenants.js).
-//       by-slug endpoints remain public but are rate-limited.
 app.use("/api/tenants", tenantLookupLimiter, tenantsRouter);
 
 app.use("/api/tenant-hours", tenantHoursRouter);
@@ -162,16 +159,8 @@ app.use("/api/resources", resourcesRouter);
 app.use("/api/tenant-categories", tenantCategoriesRouter); // PR-CAT1
 app.use("/api/customers", customersRouter);
 
-// PR-2: bookings — rate limit POST (public booking creation) only.
-// GET paths already require admin/tenant role auth so no limiter needed there.
-// NOTE: csrfProtection removed from this route (PR-16 fix):
-//   - Requests arrive via the Next.js server-side proxy (server-to-server),
-//     so no browser CSRF cookie is ever sent alongside them.
-//   - Bearer-token authenticated routes don't need CSRF per csrf.js design note.
-//   - The route is already guarded by bookingCreateLimiter + CORS.
 app.use("/api/bookings", bookingCreateLimiter, bookingsRouter);
 
-// PR-2: availability is fully public — rate-limit it.
 app.use("/api/availability", availabilityLimiter, availabilityRouter);
 
 // RENTAL-1: nightly rental availability check + blocked-dates calendar feed.
@@ -198,6 +187,7 @@ app.use("/api/tenant", tenantPrepaidCatalogRouter);
 app.use("/api/tenant", tenantPrepaidAccountingRouter);
 app.use("/api/tenant", tenantPaymentSettingsRouter); // PAY-1: /:slug/payment-settings
 app.use("/api/tenant", tenantWhatsAppSettingsRouter); // WA-1: /:slug/whatsapp-settings
+app.use("/api/tenant", tenantTaxRouter);              // PR-TAX-1: /:slug/tax-config
 app.use("/api/invites", invitesRouter);
 
 // ─── PAY-1: Network payment flow (public — customer checkout) ─────────────────
@@ -205,11 +195,11 @@ app.use("/api/network-payment", networkPaymentsRouter);
 
 // ─── PR-4: Billing REST endpoints (checkout, portal, status) ─────────────────
 app.use("/api/billing", billingRouter);
-app.use("/api/dsr", csrfProtection, dsrRouter); // PR-16        // PR-8: GDPR Data Subject Requests
+app.use("/api/dsr", csrfProtection, dsrRouter); // PR-16 // PR-8: GDPR Data Subject Requests
 
 // ─── Public APIs ─────────────────────────────────────────────────────────────
-// PR-2: rate-limit public pricing/theme browsing
 app.use("/api/public", publicApiLimiter, publicPricingRouter);
+app.use("/api/public", publicApiLimiter, publicTaxRouter); // PR-TAX-1: /:slug/tax-info
 
 // ─── Uploads ─────────────────────────────────────────────────────────────────
 app.use("/api/uploads", uploadsRouter);
@@ -220,7 +210,6 @@ app.use("/api/media-library", mediaLibraryRoutes);
 // ─── Theme system ─────────────────────────────────────────────────────────────
 app.use("/api/admin/themes", adminThemesRouter);
 app.use("/api/admin/tenants", adminTenantsThemeRouter);
-// PR-2: public tenant theme is rate-limited (called on every booking page load)
 app.use("/api/public/tenant-theme", publicApiLimiter, publicTenantThemeRouter);
 
 // ─── Misc ─────────────────────────────────────────────────────────────────────
@@ -238,7 +227,6 @@ if (ENABLE_DEBUG_ROUTES && process.env.NODE_ENV !== "production") {
 app.use("/api", (req, res) => res.status(404).json({ error: "Not found" }));
 
 // ─── Central error handler (must be last) ────────────────────────────────────
-// Replaces the old inline (err, req, res, next) block.
 app.use(errorHandler);
 
 module.exports = app;

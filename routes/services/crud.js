@@ -1,6 +1,7 @@
 // routes/services/crud.js
 // GET/, POST/, PATCH/:id, DELETE/:id
 // Mounted by routes/services.js
+// PR-TAX-1: Added vat_rate, vat_label, service_charge_rate to GET SELECT, POST INSERT, PATCH UPDATE.
 
 const db = require("../../db");
 const { pool } = require("../../db");
@@ -55,8 +56,6 @@ router.get("/", async (req, res) => {
       : whereSql;
 
     // Pricing:
-    // Your current DB uses services.price_amount (numeric).
-    // Keep backward compatibility with older schemas that used services.price.
     const priceExpr =
       svcCols.has("price_amount") && svcCols.has("price")
         ? "COALESCE(s.price_amount, s.price) AS price_amount"
@@ -80,8 +79,6 @@ router.get("/", async (req, res) => {
       : "NULL::int AS slot_interval_minutes";
 
     const maxConsecutiveExpr = svcCols.has("max_consecutive_slots")
-      ? "s.max_consecutive_slots AS max_consecutive_slots"
-      : svcCols.has("max_consecutive_slots")
       ? "s.max_consecutive_slots AS max_consecutive_slots"
       : "NULL::int AS max_consecutive_slots";
 
@@ -130,6 +127,17 @@ router.get("/", async (req, res) => {
       ? "s.price_per_night AS price_per_night"
       : "NULL::numeric AS price_per_night";
 
+    // PR-TAX-1: per-service VAT override columns (added by migration 031)
+    const vatRateExpr = svcCols.has("vat_rate")
+      ? "s.vat_rate AS vat_rate"
+      : "NULL::numeric AS vat_rate";
+    const vatLabelExpr = svcCols.has("vat_label")
+      ? "s.vat_label AS vat_label"
+      : "NULL::text AS vat_label";
+    const svcChargeRateExpr = svcCols.has("service_charge_rate")
+      ? "s.service_charge_rate AS service_charge_rate"
+      : "NULL::numeric AS service_charge_rate";
+
     const q = `
       SELECT
         s.id,
@@ -156,7 +164,10 @@ router.get("/", async (req, res) => {
         ${maxNightsExpr},
         ${checkinTimeExpr},
         ${checkoutTimeExpr},
-        ${pricePerNightExpr}
+        ${pricePerNightExpr},
+        ${vatRateExpr},
+        ${vatLabelExpr},
+        ${svcChargeRateExpr}
       FROM services s
       JOIN tenants t ON t.id = s.tenant_id
       ${softDeleteWhere}
@@ -172,12 +183,7 @@ router.get("/", async (req, res) => {
     const paginatedQ = q + `\n      LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
     const { rows } = await db.query(paginatedQ, [...params, limit, offset]);
 
-    // ---------------------------------------------------------------------------
-    // Attach per-service available_hours (from service_hours table, migration 008).
-    // This tells the booking UI which days-of-week each service runs on, so it
-    // can disable the service in the dropdown when the chosen date doesn't match.
-    // If the table doesn't exist yet (pre-migration env), we skip silently.
-    // ---------------------------------------------------------------------------
+    // Attach per-service available_hours
     if (hasServiceHours && rows.length > 0) {
       const serviceIds = rows.map((r) => r.id);
       const { rows: hoursRows } = await db.query(
@@ -187,7 +193,6 @@ router.get("/", async (req, res) => {
          ORDER BY service_id, day_of_week`,
         [serviceIds]
       );
-      // Group by service_id for O(n) attachment
       const hoursMap = {};
       for (const h of hoursRows) {
         if (!hoursMap[h.service_id]) hoursMap[h.service_id] = [];
@@ -201,7 +206,6 @@ router.get("/", async (req, res) => {
         row.available_hours = hoursMap[row.id] || [];
       }
     } else {
-      // Ensure field is always present so frontend type is consistent
       for (const row of rows) {
         row.available_hours = [];
       }
@@ -224,10 +228,6 @@ router.get("/", async (req, res) => {
 
 // ---------------------------------------------------------------------------
 // POST /api/services
-// Admin-only create
-// Body: { tenantSlug | tenantId, name, description, duration_minutes, price,
-//         slot_interval_minutes, max_consecutive_slots, max_parallel_bookings,
-//         requires_staff, requires_resource, availability_basis, is_active }
 // ---------------------------------------------------------------------------
 router.post("/", requireTenant, requireAdminOrTenantRole("manager"), async (req, res) => {
   try {
@@ -237,7 +237,6 @@ router.post("/", requireTenant, requireAdminOrTenantRole("manager"), async (req,
       name,
       description,
       duration_minutes,
-      // accept multiple names for backwards compatibility:
       price,
       price_amount,
       price_jd,
@@ -259,6 +258,10 @@ router.post("/", requireTenant, requireAdminOrTenantRole("manager"), async (req,
       checkin_time,
       checkout_time,
       price_per_night,
+      // PR-TAX-1: per-service VAT overrides
+      vat_rate,
+      vat_label,
+      service_charge_rate,
     } = req.body || {};
 
     const ab = normalizeAvailabilityBasis(availability_basis);
@@ -297,7 +300,6 @@ router.post("/", requireTenant, requireAdminOrTenantRole("manager"), async (req,
 
     const svcCols = await getServicesColumns();
 
-    // Build INSERT dynamically so it never breaks during schema cleanup
     const cols = [];
     const vals = [];
     const params = [];
@@ -314,8 +316,6 @@ router.post("/", requireTenant, requireAdminOrTenantRole("manager"), async (req,
     if (svcCols.has("description")) add("description", description == null ? null : String(description).trim());
     if (svcCols.has("duration_minutes")) add("duration_minutes", duration_minutes == null ? null : Number(duration_minutes));
 
-    // Price: your current schema uses price_amount.
-    // Accept legacy fields (price, price_jd) to avoid breaking older UIs.
     const incomingPrice =
       price_amount !== undefined ? price_amount : price !== undefined ? price : price_jd;
     if (incomingPrice !== undefined) {
@@ -329,7 +329,6 @@ router.post("/", requireTenant, requireAdminOrTenantRole("manager"), async (req,
       add("max_consecutive_slots", max_consecutive_slots == null ? null : Number(max_consecutive_slots));
     }
 
-    // Parallel: write to max_parallel_bookings if present, else legacy max_parallel
     if (svcCols.has("max_parallel_bookings")) add("max_parallel_bookings", max_parallel_bookings == null ? null : Number(max_parallel_bookings));
     else if (svcCols.has("max_parallel")) add("max_parallel", max_parallel_bookings == null ? null : Number(max_parallel_bookings));
 
@@ -344,11 +343,10 @@ router.post("/", requireTenant, requireAdminOrTenantRole("manager"), async (req,
     }
     if (svcCols.has("availability_basis")) add("availability_basis", ab);
     if (svcCols.has("is_active")) add("is_active", is_active == null ? true : !!is_active);
-    // PR-CAT1: category assignment
     if (svcCols.has("category_id") && category_id !== undefined) {
       add("category_id", category_id == null ? null : Number(category_id));
     }
-    // RENTAL-1: nightly rental columns (safe — only written if migration 023 has run)
+    // RENTAL-1: nightly rental columns
     if (svcCols.has("booking_mode") && booking_mode !== undefined) {
       const safeMode = booking_mode === "nightly" ? "nightly" : "time_slots";
       add("booking_mode", safeMode);
@@ -359,6 +357,16 @@ router.post("/", requireTenant, requireAdminOrTenantRole("manager"), async (req,
         if (svcCols.has("checkout_time"))   add("checkout_time",   checkout_time   || "11:00");
         if (svcCols.has("price_per_night")) add("price_per_night", price_per_night != null ? Number(price_per_night)          : null);
       }
+    }
+    // PR-TAX-1: per-service VAT overrides (migration 031 guard)
+    if (svcCols.has("vat_rate") && vat_rate !== undefined) {
+      add("vat_rate", vat_rate == null ? null : Number(vat_rate));
+    }
+    if (svcCols.has("vat_label") && vat_label !== undefined) {
+      add("vat_label", vat_label == null ? null : String(vat_label).trim().slice(0, 50));
+    }
+    if (svcCols.has("service_charge_rate") && service_charge_rate !== undefined) {
+      add("service_charge_rate", service_charge_rate == null ? null : Number(service_charge_rate));
     }
 
     const q = `
@@ -377,10 +385,6 @@ router.post("/", requireTenant, requireAdminOrTenantRole("manager"), async (req,
 
 // ---------------------------------------------------------------------------
 // PATCH /api/services/:id
-// Admin-only update (used by Owner Setup UI)
-// Body: any of { name, description, duration_minutes, price, slot_interval_minutes,
-//                max_consecutive_slots, max_parallel_bookings,
-//                requires_staff, requires_resource, availability_basis, is_active }
 // ---------------------------------------------------------------------------
 router.patch("/:id", resolveTenantFromServiceId, requireAdminOrTenantRole("manager"), async (req, res) => {
   try {
@@ -412,6 +416,10 @@ router.patch("/:id", resolveTenantFromServiceId, requireAdminOrTenantRole("manag
       checkin_time,
       checkout_time,
       price_per_night,
+      // PR-TAX-1: per-service VAT overrides
+      vat_rate,
+      vat_label,
+      service_charge_rate,
     } = req.body || {};
 
     const ab = normalizeAvailabilityBasis(availability_basis);
@@ -447,7 +455,6 @@ router.patch("/:id", resolveTenantFromServiceId, requireAdminOrTenantRole("manag
 
     if (max_consecutive_slots !== undefined) {
       if (svcCols.has("max_consecutive_slots")) add("max_consecutive_slots", max_consecutive_slots == null ? null : Number(max_consecutive_slots));
-      else if (svcCols.has("max_consecutive_slots")) add("max_consecutive_slots", max_consecutive_slots == null ? null : Number(max_consecutive_slots));
     }
 
     if (max_parallel_bookings !== undefined) {
@@ -485,6 +492,17 @@ router.patch("/:id", resolveTenantFromServiceId, requireAdminOrTenantRole("manag
     if (price_per_night !== undefined && svcCols.has("price_per_night"))
       add("price_per_night", price_per_night == null ? null : Number(price_per_night));
 
+    // PR-TAX-1: per-service VAT overrides (migration 031 guard)
+    if (vat_rate !== undefined && svcCols.has("vat_rate")) {
+      add("vat_rate", vat_rate === null ? null : Number(vat_rate));
+    }
+    if (vat_label !== undefined && svcCols.has("vat_label")) {
+      add("vat_label", vat_label === null ? null : String(vat_label).trim().slice(0, 50));
+    }
+    if (service_charge_rate !== undefined && svcCols.has("service_charge_rate")) {
+      add("service_charge_rate", service_charge_rate === null ? null : Number(service_charge_rate));
+    }
+
     if (!sets.length) return res.status(400).json({ error: "No fields to update" });
 
     params.push(id);
@@ -507,7 +525,6 @@ router.patch("/:id", resolveTenantFromServiceId, requireAdminOrTenantRole("manag
 
 // ---------------------------------------------------------------------------
 // DELETE /api/services/:id
-// Admin-only delete
 // ---------------------------------------------------------------------------
 router.delete("/:id", resolveTenantFromServiceId, requireAdminOrTenantRole("manager"), async (req, res) => {
   try {
