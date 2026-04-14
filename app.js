@@ -167,6 +167,8 @@ app.use("/api/availability", availabilityLimiter, availabilityRouter);
 app.use("/api/rental-availability", availabilityLimiter, require("./routes/rentalAvailability"));
 app.use("/api/rental-payment-links", require("./routes/rentalPaymentLinks"));
 app.use("/api/maintenance-tickets", require("./routes/maintenanceTickets")); // PR-MAINT-1
+app.use("/api/booking-contracts",   require("./routes/bookingContracts"));   // PR-CONTRACT-1
+
 app.use("/api/reminder-job", reminderJobRouter);
 
 app.use("/api/membership-plans", membershipPlansRouter);
@@ -201,6 +203,7 @@ app.use("/api/dsr", csrfProtection, dsrRouter); // PR-16 // PR-8: GDPR Data Subj
 // ─── Public APIs ─────────────────────────────────────────────────────────────
 app.use("/api/public", publicApiLimiter, publicPricingRouter);
 app.use("/api/public", publicApiLimiter, publicTaxRouter); // PR-TAX-1: /:slug/tax-info
+app.use("/api/guest",  publicApiLimiter, require("./routes/guestPortal")); // PR-GUEST-1
 
 // ─── Uploads ─────────────────────────────────────────────────────────────────
 app.use("/api/uploads", uploadsRouter);
