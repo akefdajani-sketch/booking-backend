@@ -121,6 +121,10 @@ router.post('/:slug/initiate', async (req, res) => {
       // and interaction display settings. All payment details (amount, currency,
       // returnUrl) are already stored in the session server-side.
       checkoutConfig: {
+        // PAY-FIX: top-level merchant ID is REQUIRED by MPGS Checkout.configure().
+        // Without it, Checkout.showPaymentPage() silently does nothing.
+        // interaction.merchant.name is a display label only — it is NOT the auth credential.
+        merchant: session.merchantId,
         session:  { id: session.sessionId },
         interaction: {
           operation: 'PURCHASE',
