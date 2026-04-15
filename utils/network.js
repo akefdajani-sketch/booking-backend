@@ -21,8 +21,29 @@ function buildAuthHeader(merchantId, apiPassword) {
   return `Basic ${credentials}`;
 }
 
+/**
+ * Sanitize a gateway URL to origin-only so buildApiUrl never doubles the path.
+ *
+ * Users sometimes paste the full API base (e.g. "https://test-network.../api"
+ * or "https://ap-gateway.mastercard.com/api") which would make buildApiUrl
+ * produce ".../api/api/rest/..." and return an HTML 404.
+ *
+ * Strategy: extract only scheme+host+port (URL.origin).
+ * If URL parsing fails, strip any trailing /api[/*] manually.
+ */
+function sanitizeGatewayUrl(raw) {
+  const s = String(raw || '').trim().replace(/\/+$/, '');
+  try {
+    return new URL(s).origin; // e.g. "https://test-network.mtf.gateway.mastercard.com"
+  } catch {
+    // Fallback: strip any /api path suffix
+    return s.replace(/\/api(\/.*)?$/, '');
+  }
+}
+
 function buildApiUrl(gatewayUrl, merchantId, resource) {
-  return `${gatewayUrl}/api/rest/version/100/merchant/${merchantId}/${resource}`;
+  const base = sanitizeGatewayUrl(gatewayUrl);
+  return `${base}/api/rest/version/100/merchant/${merchantId}/${resource}`;
 }
 
 function mpgsRequest({ method, url, auth, body }) {
@@ -178,7 +199,8 @@ async function refundTransaction(tenantId, orderId, transactionId, refundTransac
  */
 async function testCredentials(merchantId, apiPassword, gatewayUrl) {
   const DEFAULT_GW = 'https://test-network.mtf.gateway.mastercard.com';
-  const gw   = (gatewayUrl || DEFAULT_GW).replace(/\/$/, '');
+  // sanitizeGatewayUrl strips any /api path the user accidentally included.
+  const gw   = sanitizeGatewayUrl(gatewayUrl || DEFAULT_GW);
   const url  = buildApiUrl(gw, merchantId, 'session');
   const auth = buildAuthHeader(merchantId, apiPassword);
 
