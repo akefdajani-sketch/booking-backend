@@ -346,6 +346,13 @@ router.get("/:id", requireAdmin, async (req, res) => {
 	    cols.has("country_code") ? "country_code" : "NULL::text AS country_code",
 	    cols.has("admin_name") ? "admin_name" : "NULL::text AS admin_name",
 	    cols.has("admin_email") ? "admin_email" : "NULL::text AS admin_email",
+	    // Payment gateway fields — needed by GeneralSection to pre-populate the UI
+	    cols.has("network_merchant_id") ? "network_merchant_id" : "NULL::text AS network_merchant_id",
+	    cols.has("network_gateway_url")  ? "network_gateway_url"  : "NULL::text AS network_gateway_url",
+	    cols.has("payment_gateway_active") ? "payment_gateway_active" : "false::boolean AS payment_gateway_active",
+	    // booking_code_prefix / seq — shown in the General section
+	    cols.has("booking_code_prefix") ? "booking_code_prefix" : "NULL::text AS booking_code_prefix",
+	    cols.has("booking_seq") ? "booking_seq" : "0::int AS booking_seq",
 	    "created_at",
 	  ].join(",\n        ");
 
