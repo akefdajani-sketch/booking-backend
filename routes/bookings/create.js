@@ -50,6 +50,7 @@ router.post("/", requireAppAuth, requireTenant, async (req, res) => {
       autoConsumePrepaid,
       requirePrepaid,
       paymentMethod: requestedPaymentMethod, // PAY-2: cash | card | cliq from client
+      networkPaymentOrderId, // PAY-1: MPGS order ID when booking follows card payment
       // RENTAL-1: nightly booking fields
       booking_mode: incomingBookingMode,
       checkin_date,
@@ -682,16 +683,23 @@ const charge_amount = (finalCustomerMembershipId || prepaidApplied) ? 0 : price_
       }
 
       // Derive payment_method for this booking
+      // Membership/package/free are always derived server-side.
       // Cash is sent from client and trusted directly.
-      // Card/Cliq are set after payment gateway callback.
-      // Membership/package/free are derived server-side.
+      // Card/Cliq: when sent alongside a networkPaymentOrderId (i.e., the result
+      // page is creating the booking AFTER the gateway confirmed payment), trust
+      // the client value. Without an orderId, card/cliq stay null (legacy path
+      // where payment_method is updated post-capture by the gateway webhook).
       const payment_method = finalCustomerMembershipId
         ? 'membership'
         : prepaidApplied
           ? 'package'
           : (price_amount == null || price_amount === 0)
             ? 'free'
-            : (requestedPaymentMethod === 'cash' ? 'cash' : null); // cash set by client; card/cliq set after gateway
+            : requestedPaymentMethod === 'cash'
+              ? 'cash'
+              : (requestedPaymentMethod === 'card' || requestedPaymentMethod === 'cliq') && networkPaymentOrderId
+                ? requestedPaymentMethod  // PAY-FIX: trust card/cliq when order ID proves gateway payment
+                : null;
 
       const hasMoneyCols = await ensureBookingMoneyColumns();
       const hasRateCols = await ensureBookingRateColumns();
@@ -848,6 +856,28 @@ const charge_amount = (finalCustomerMembershipId || prepaidApplied) ? 0 : price_
 
         const insert = await client.query(insertSql, insertParams);
         bookingId = insert.rows[0].id;
+
+        // PAY-FIX: link this booking back to the MPGS payment record.
+        // When the result page creates the booking after gateway confirmation,
+        // it passes networkPaymentOrderId so we can close the loop:
+        //   network_payments.booking_id → this booking
+        //   bookings.payment_method    → already set to 'card' above
+        if (networkPaymentOrderId && bookingId) {
+          try {
+            await client.query(
+              `UPDATE network_payments
+               SET booking_id  = $1,
+                   updated_at  = NOW()
+               WHERE order_id  = $2
+                 AND tenant_id = $3`,
+              [bookingId, String(networkPaymentOrderId).trim(), resolvedTenantId]
+            );
+          } catch (linkErr) {
+            // Non-fatal — booking is created; just the payment linkage failed.
+            // The payment record and booking both exist and can be reconciled manually.
+            console.warn('[PAY] Could not link network_payment to booking:', linkErr?.message);
+          }
+        }
 
         // Increment session confirmed_count atomically with the booking INSERT
         if (resolvedSessionId) {
