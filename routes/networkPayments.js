@@ -23,6 +23,15 @@ const { requireTenantRole } = require('../middleware/requireTenantRole');
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
+// PAY-FIX: Strip any path suffix from the gateway URL so checkoutJsUrl is always
+// a clean origin. DB may store "https://ap-gateway.../api" which would produce
+// "https://ap-gateway.../api/static/checkout/..." — wrong domain AND doubled path.
+// Defined locally so it works regardless of how utils/network is mocked in tests.
+function sanitizeGatewayUrlForCheckout(raw) {
+  const s = String(raw || '').trim().replace(/\/+$/, '');
+  try { return new URL(s).origin; } catch { return s.replace(/\/api(\/.*)?$/, ''); }
+}
+
 async function mpgsGuard(tenantId, res) {
   const enabled = await isTenantMpgsEnabled(tenantId);
   if (!enabled) {
@@ -116,7 +125,7 @@ router.post('/:slug/initiate', async (req, res) => {
       paymentId,
       sessionId:     session.sessionId,
       merchantId:    session.merchantId,
-      checkoutJsUrl: `${session.gatewayUrl}/static/checkout/checkout.min.js`, // PAY-1: updated URL for MPGS v63+
+      checkoutJsUrl: `${sanitizeGatewayUrlForCheckout(session.gatewayUrl)}/static/checkout/checkout.min.js`,
       // For MPGS Hosted Checkout v63+, configure() only needs session.id
       // and interaction display settings. All payment details (amount, currency,
       // returnUrl) are already stored in the session server-side.

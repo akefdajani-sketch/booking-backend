@@ -25,6 +25,7 @@
 const crypto = require('crypto');
 const db     = require('../db');
 const logger = require('./logger');
+const { sanitizeGatewayUrl } = require('./network');
 
 const ALGO        = 'aes-256-gcm';
 const DEFAULT_GW  = 'https://test-network.mtf.gateway.mastercard.com';
@@ -106,7 +107,9 @@ async function getNetworkCredentials(tenantId) {
           return {
             merchantId:  row.network_merchant_id.trim(),
             apiPassword: decrypted,
-            gatewayUrl:  (row.network_gateway_url || DEFAULT_GW).trim().replace(/\/$/, ''),
+            // PAY-FIX: sanitize on read — strips any /api path suffix stored in old records
+            // (e.g. "https://ap-gateway.../api" → "https://ap-gateway....")
+            gatewayUrl:  sanitizeGatewayUrl(row.network_gateway_url || DEFAULT_GW) || DEFAULT_GW,
           };
         }
         logger.warn({ tenantId }, 'Tenant has payment credentials but decryption failed — falling back to env vars');
@@ -119,7 +122,7 @@ async function getNetworkCredentials(tenantId) {
   // ── Step 2: Env var fallback (covers Birdie while setup UI is built) ───────
   const merchantId  = String(process.env.NETWORK_MERCHANT_ID  || '').trim();
   const apiPassword = String(process.env.NETWORK_API_PASSWORD || '').trim();
-  const gatewayUrl  = String(process.env.NETWORK_GATEWAY_URL  || DEFAULT_GW).trim().replace(/\/$/, '');
+  const gatewayUrl  = sanitizeGatewayUrl(process.env.NETWORK_GATEWAY_URL || DEFAULT_GW) || DEFAULT_GW;
 
   if (merchantId && apiPassword) {
     return { merchantId, apiPassword, gatewayUrl };
@@ -161,7 +164,8 @@ async function saveNetworkCredentials(tenantId, merchantId, apiPassword, gateway
     [
       String(merchantId).trim(),
       encrypted,
-      (gatewayUrl || DEFAULT_GW).trim().replace(/\/$/, ''),
+      // PAY-FIX: sanitize before saving — prevents /api suffix being stored in DB
+      sanitizeGatewayUrl(gatewayUrl || DEFAULT_GW) || DEFAULT_GW,
       Number(tenantId),
     ]
   );
