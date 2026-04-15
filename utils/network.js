@@ -226,6 +226,7 @@ async function testCredentials(merchantId, apiPassword, gatewayUrl) {
 }
 
 module.exports = {
+  sanitizeGatewayUrl,   // exported so networkPayments.js can build a clean checkoutJsUrl
   isTenantMpgsEnabled,
   createCheckoutSession,
   retrieveOrder,

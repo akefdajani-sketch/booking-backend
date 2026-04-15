@@ -14,6 +14,7 @@ const {
   createCheckoutSession,
   retrieveOrder,
   refundTransaction,
+  sanitizeGatewayUrl,
 } = require('../utils/network');
 const { getTenantIdFromSlug, getTenantBySlug } = require('../utils/tenants');
 const requireGoogleAuth = require('../middleware/requireGoogleAuth');
@@ -111,12 +112,18 @@ router.post('/:slug/initiate', async (req, res) => {
 
     logger.info({ tenantId: tenant.id, orderId, paymentId, amount, currency }, 'MPGS checkout session created');
 
+    // PAY-FIX: sanitize the gateway URL before building checkoutJsUrl.
+    // The DB may store a URL with a path suffix (e.g. "https://ap-gateway.../api")
+    // which would produce "https://ap-gateway.../api/static/checkout/..." — wrong
+    // domain AND doubled path. sanitizeGatewayUrl() strips to origin-only.
+    const cleanGatewayUrl = sanitizeGatewayUrl(session.gatewayUrl);
+
     return res.json({
       orderId,
       paymentId,
       sessionId:     session.sessionId,
       merchantId:    session.merchantId,
-      checkoutJsUrl: `${session.gatewayUrl}/static/checkout/checkout.min.js`, // PAY-1: updated URL for MPGS v63+
+      checkoutJsUrl: `${cleanGatewayUrl}/static/checkout/checkout.min.js`,
       // For MPGS Hosted Checkout v63+, configure() only needs session.id
       // and interaction display settings. All payment details (amount, currency,
       // returnUrl) are already stored in the session server-side.
