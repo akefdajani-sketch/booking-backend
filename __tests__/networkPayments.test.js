@@ -27,6 +27,11 @@ jest.mock('../utils/network', () => ({
     transaction: [{ id: '1', result: 'SUCCESS', authorizationCode: 'AUTH123' }],
   }),
   refundTransaction: jest.fn().mockResolvedValue({ result: 'SUCCESS' }),
+  // Export sanitizeGatewayUrl so tests don't break if networkPayments.js imports it
+  sanitizeGatewayUrl: jest.fn(url => {
+    const s = String(url || '').trim().replace(/\/+$/, '');
+    try { return new URL(s).origin; } catch { return s.replace(/\/api(\/.*)?$/, ''); }
+  }),
 }));
 
 // ─── Mock db for payment record inserts/updates ───────────────────────────────
