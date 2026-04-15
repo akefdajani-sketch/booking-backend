@@ -85,13 +85,27 @@ router.get("/", async (req, res) => {
       where += where ? " AND st.is_active = true" : " WHERE st.is_active = true";
     }
 
-    // SELECT * already picks up the new profile columns (title_prefix, display_name,
-    // headline, bio, certifications, languages, years_experience) once the
-    // migration has run — no query change needed.
+    // SELECT * + service_ids array from staff_service_links join.
+    // service_ids lets the public booking page know which services each
+    // specialist can perform, powering the carousel deep-link (PR-LC2).
     const q = `
       SELECT
         st.*,
-        t.slug AS tenant_slug
+        t.slug AS tenant_slug,
+        COALESCE(
+          (SELECT ARRAY_AGG(ssl.service_id ORDER BY ssl.service_id)
+           FROM staff_service_links ssl
+           WHERE ssl.tenant_id = st.tenant_id
+             AND ssl.staff_id  = st.id),
+          ARRAY[]::int[]
+        ) AS service_ids,
+        (SELECT s.name
+         FROM staff_service_links ssl2
+         JOIN services s ON s.id = ssl2.service_id
+         WHERE ssl2.tenant_id = st.tenant_id
+           AND ssl2.staff_id  = st.id
+         ORDER BY ssl2.service_id
+         LIMIT 1) AS primary_service_name
       FROM staff st
       JOIN tenants t ON t.id = st.tenant_id
       ${where}
