@@ -129,6 +129,7 @@ async function createCheckoutSession(tenantId, {
     apiOperation: 'INITIATE_CHECKOUT',
     order: {
       id:          orderId,
+      reference:   orderId,   // PAY-FIX: Network International requires order.reference
       amount:      String(amount),
       currency:    currency || 'JOD',
       description: description || 'Flexrz booking',
