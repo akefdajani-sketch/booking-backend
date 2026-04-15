@@ -96,7 +96,24 @@ router.post('/:slug/initiate', async (req, res) => {
 
     const orderId     = generateOrderId(slug);
     const description = String(req.body?.description || `Booking at ${tenant.name}`).slice(0, 127);
-    const frontendUrl = String(process.env.FRONTEND_URL || 'https://flexrz.com').replace(/\/$/, '');
+
+    // PAY-FIX: Use returnOrigin sent by the browser if present.
+    // sessionStorage is domain-scoped — if we redirect to a different domain
+    // than where the booking started (e.g. birdiegolf-jo.com vs flexrz.com),
+    // the booking intent in sessionStorage is lost and no booking gets created.
+    const rawReturnOrigin = String(req.body?.returnOrigin || '').trim();
+    let safeReturnOrigin;
+    try {
+      // Only use it if it's a valid https origin (prevents open-redirect abuse)
+      const parsed = new URL(rawReturnOrigin);
+      safeReturnOrigin = (parsed.protocol === 'https:' || parsed.protocol === 'http:')
+        ? parsed.origin
+        : null;
+    } catch {
+      safeReturnOrigin = null;
+    }
+    const frontendUrl = safeReturnOrigin
+      || String(process.env.FRONTEND_URL || 'https://flexrz.com').replace(/\/$/, '');
     const returnUrl   = `${frontendUrl}/book/${slug}/payment/result?orderId=${encodeURIComponent(orderId)}`;
 
     const session = await createCheckoutSession(tenant.id, {
