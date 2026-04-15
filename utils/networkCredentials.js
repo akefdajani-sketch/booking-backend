@@ -156,8 +156,7 @@ async function saveNetworkCredentials(tenantId, merchantId, apiPassword, gateway
      SET network_merchant_id    = $1,
          network_api_password   = $2,
          network_gateway_url    = $3,
-         payment_gateway_active = true,
-         updated_at             = NOW()
+         payment_gateway_active = true
      WHERE id = $4`,
     [
       String(merchantId).trim(),
@@ -178,8 +177,7 @@ async function clearNetworkCredentials(tenantId) {
      SET network_merchant_id    = NULL,
          network_api_password   = NULL,
          network_gateway_url    = NULL,
-         payment_gateway_active = false,
-         updated_at             = NOW()
+         payment_gateway_active = false
      WHERE id = $1`,
     [Number(tenantId)]
   );
