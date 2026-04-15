@@ -25,10 +25,18 @@
 const crypto = require('crypto');
 const db     = require('../db');
 const logger = require('./logger');
-const { sanitizeGatewayUrl } = require('./network');
 
 const ALGO        = 'aes-256-gcm';
 const DEFAULT_GW  = 'https://test-network.mtf.gateway.mastercard.com';
+
+// PAY-FIX: Local sanitize helper — strips any /api path suffix the user may have
+// entered (e.g. "https://ap-gateway.mastercard.com/api" → "https://ap-gateway.mastercard.com").
+// Defined here so networkCredentials.js has no dependency on utils/network.js,
+// which avoids circular-require issues and test-mock problems.
+function sanitizeGatewayUrl(raw) {
+  const s = String(raw || '').trim().replace(/\/+$/, '');
+  try { return new URL(s).origin; } catch { return s.replace(/\/api(\/.*)?$/, ''); }
+}
 
 // ─── Encryption helpers ───────────────────────────────────────────────────────
 
@@ -107,8 +115,6 @@ async function getNetworkCredentials(tenantId) {
           return {
             merchantId:  row.network_merchant_id.trim(),
             apiPassword: decrypted,
-            // PAY-FIX: sanitize on read — strips any /api path suffix stored in old records
-            // (e.g. "https://ap-gateway.../api" → "https://ap-gateway....")
             gatewayUrl:  sanitizeGatewayUrl(row.network_gateway_url || DEFAULT_GW) || DEFAULT_GW,
           };
         }
@@ -164,7 +170,6 @@ async function saveNetworkCredentials(tenantId, merchantId, apiPassword, gateway
     [
       String(merchantId).trim(),
       encrypted,
-      // PAY-FIX: sanitize before saving — prevents /api suffix being stored in DB
       sanitizeGatewayUrl(gatewayUrl || DEFAULT_GW) || DEFAULT_GW,
       Number(tenantId),
     ]
