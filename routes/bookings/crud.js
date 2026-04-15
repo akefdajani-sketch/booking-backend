@@ -368,6 +368,120 @@ router.delete("/:id", requireTenant, requireAdminOrTenantRole("staff"), async (r
 });
 
 // ---------------------------------------------------------------------------
+// GET /api/bookings/stats?tenantSlug=&days=30
+// ADMIN: rich analytics snapshot for the owner dashboard.
+//
+// Returns:
+//   revenue_total        — sum of charge_amount for confirmed bookings in window
+//   revenue_by_day       — [{date: "YYYY-MM-DD", amount: number}] last N days
+//   bookings_by_day      — [{date: "YYYY-MM-DD", count: number}] last N days
+//   bookings_by_service  — [{service_name, count}] top 8
+//   cancelled_count      — cancelled bookings in window
+//   confirmed_count      — confirmed bookings in window
+//   pending_count        — pending bookings in window
+//   cancellation_rate    — 0-100 percentage
+// ---------------------------------------------------------------------------
+router.get("/stats", requireTenant, requireAdminOrTenantRole("staff"), async (req, res) => {
+  try {
+    const tenantId = req.tenantId;
+    const daysRaw = req.query.days ? Number(req.query.days) : 30;
+    const days = Math.max(1, Math.min(365, Number.isFinite(daysRaw) ? daysRaw : 30));
+
+    // Window: last N days up to end of today
+    const now = new Date();
+    const windowStart = new Date(now);
+    windowStart.setDate(windowStart.getDate() - days);
+    windowStart.setHours(0, 0, 0, 0);
+
+    const params = [tenantId, windowStart.toISOString()];
+
+    // --- Status counts + revenue in window ---
+    const summaryRes = await db.query(
+      `SELECT
+         COUNT(*) FILTER (WHERE status = 'confirmed')::int  AS confirmed_count,
+         COUNT(*) FILTER (WHERE status = 'cancelled')::int  AS cancelled_count,
+         COUNT(*) FILTER (WHERE status = 'pending')::int    AS pending_count,
+         COALESCE(SUM(charge_amount) FILTER (WHERE status = 'confirmed'), 0)::numeric AS revenue_total
+       FROM bookings
+       WHERE tenant_id = $1
+         AND start_time >= $2
+         AND deleted_at IS NULL`,
+      params
+    );
+
+    const summary = summaryRes.rows[0] || {};
+    const confirmedCount = Number(summary.confirmed_count || 0);
+    const cancelledCount = Number(summary.cancelled_count || 0);
+    const pendingCount   = Number(summary.pending_count   || 0);
+    const revenueTotal   = parseFloat(summary.revenue_total || 0);
+    const totalBookings  = confirmedCount + cancelledCount + pendingCount;
+    const cancellationRate = totalBookings > 0
+      ? Math.round((cancelledCount / totalBookings) * 100)
+      : 0;
+
+    // --- Bookings by day (last N days) ---
+    const byDayRes = await db.query(
+      `SELECT
+         TO_CHAR(start_time AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS date,
+         COUNT(*)::int AS count
+       FROM bookings
+       WHERE tenant_id = $1
+         AND start_time >= $2
+         AND deleted_at IS NULL
+       GROUP BY date
+       ORDER BY date ASC`,
+      params
+    );
+
+    // --- Revenue by day (confirmed only) ---
+    const revByDayRes = await db.query(
+      `SELECT
+         TO_CHAR(start_time AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS date,
+         COALESCE(SUM(charge_amount), 0)::numeric AS amount
+       FROM bookings
+       WHERE tenant_id = $1
+         AND start_time >= $2
+         AND status = 'confirmed'
+         AND deleted_at IS NULL
+       GROUP BY date
+       ORDER BY date ASC`,
+      params
+    );
+
+    // --- Top services ---
+    const byServiceRes = await db.query(
+      `SELECT
+         COALESCE(s.name, 'Unknown') AS service_name,
+         COUNT(b.id)::int AS count
+       FROM bookings b
+       LEFT JOIN services s ON s.id = b.service_id
+       WHERE b.tenant_id = $1
+         AND b.start_time >= $2
+         AND b.deleted_at IS NULL
+       GROUP BY COALESCE(s.name, 'Unknown')
+       ORDER BY count DESC
+       LIMIT 8`,
+      params
+    );
+
+    return res.json({
+      window_days:        days,
+      confirmed_count:    confirmedCount,
+      cancelled_count:    cancelledCount,
+      pending_count:      pendingCount,
+      revenue_total:      revenueTotal,
+      cancellation_rate:  cancellationRate,
+      bookings_by_day:    byDayRes.rows,
+      revenue_by_day:     revByDayRes.rows.map((r) => ({ date: r.date, amount: parseFloat(r.amount) })),
+      bookings_by_service: byServiceRes.rows,
+    });
+  } catch (err) {
+    console.error("Error loading booking stats:", err);
+    return res.status(500).json({ error: "Failed to load booking stats." });
+  }
+});
+
+// ---------------------------------------------------------------------------
 // POST /api/bookings
 // Public booking creation (tenantSlug required)
 // ---------------------------------------------------------------------------
