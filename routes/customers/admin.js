@@ -164,6 +164,46 @@ router.post("/", requireTenant, requireAdminOrTenantRole("staff"), async (req, r
 });
 
 
+
+// Update customer details (name, phone, email, notes)
+router.patch("/:customerId", requireTenant, requireAdminOrTenantRole("staff"), async (req, res) => {
+  try {
+    const tenantId = req.tenantId;
+    const customerId = Number(req.params.customerId);
+    if (!Number.isFinite(customerId)) {
+      return res.status(400).json({ error: "Invalid customerId" });
+    }
+
+    const { name, phone, email, notes } = req.body || {};
+    if (!name || !String(name).trim()) {
+      return res.status(400).json({ error: "Customer name is required." });
+    }
+
+    const result = await db.query(
+      `UPDATE customers
+       SET name = \$1, phone = \$2, email = \$3, notes = \$4, updated_at = NOW()
+       WHERE id = \$5 AND tenant_id = \$6 AND deleted_at IS NULL
+       RETURNING id, tenant_id, name, phone, email, notes, created_at, updated_at`,
+      [
+        String(name).trim(),
+        phone ? String(phone).trim() : null,
+        email ? String(email).trim() : null,
+        notes ? String(notes).trim() : null,
+        customerId,
+        tenantId,
+      ]
+    );
+
+    if (!result.rowCount) {
+      return res.status(404).json({ error: "Customer not found." });
+    }
+    return res.json({ customer: result.rows[0] });
+  } catch (err) {
+    console.error("Error updating customer:", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
 // Delete a customer (tenant staff/admin)
 // PR-10: soft-delete (sets deleted_at) instead of hard DELETE
 router.delete("/:customerId", requireTenant, requireAdminOrTenantRole("staff"), async (req, res) => {
