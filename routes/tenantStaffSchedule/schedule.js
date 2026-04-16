@@ -10,6 +10,8 @@ const {
 } = require("../../utils/staffScheduleHelpers");
 
 
+const resolveStaffScope = require("../../middleware/resolveStaffScope");
+
 module.exports = function mount(router) {
 router.get(
   "/:slug/staff/:staffId/schedule",
@@ -17,10 +19,16 @@ router.get(
   maybeEnsureUser,
   resolveTenantIdFromParam,
   maybeRequireManagerRole,
+  resolveStaffScope,
   async (req, res) => {
     try {
       const tenantId = req.tenantId;
       const staffId = asInt(req.params.staffId);
+
+      // Staff scope: staff members can only view their own schedule
+      if (req.isStaffScoped && req.staffId && req.staffId !== staffId) {
+        return res.status(403).json({ error: "You can only view your own schedule." });
+      }
       if (!staffId) return res.status(400).json({ error: "Invalid staff id." });
 
       const ok = await assertStaffInTenant(tenantId, staffId);
@@ -191,10 +199,16 @@ router.get(
   maybeEnsureUser,
   resolveTenantIdFromParam,
   maybeRequireManagerRole,
+  resolveStaffScope,
   async (req, res) => {
     try {
       const tenantId = req.tenantId;
       const staffId = asInt(req.params.staffId);
+
+      // Staff scope: staff members can only view their own schedule
+      if (req.isStaffScoped && req.staffId && req.staffId !== staffId) {
+        return res.status(403).json({ error: "You can only view your own schedule." });
+      }
       if (!staffId) return res.status(400).json({ error: "Invalid staff id." });
       const ok = await assertStaffInTenant(tenantId, staffId);
       if (!ok) return res.status(404).json({ error: "Staff not found." });

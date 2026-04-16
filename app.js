@@ -52,6 +52,8 @@ const tenantUsersRouter = require("./routes/tenantUsers");
 const invitesRouter = require("./routes/invites");
 const tenantPlanRouter = require("./routes/tenantPlan");
 const tenantDashboardRouter = require("./routes/tenantDashboard");
+const tenantStaffPortalRouter = require("./routes/tenantStaffPortal");
+const tenantUserPermissionsRouter = require("./routes/tenantUserPermissions");
 const tenantStaffScheduleRouter = require("./routes/tenantStaffSchedule");
 const serviceHoursRouter = require("./routes/serviceHours");
 const tenantHomeLandingRouter = require("./routes/tenantHomeLanding");
@@ -176,6 +178,8 @@ app.use("/api/customer-memberships", customerMembershipsRouter);
 
 // ─── Tenant-scoped APIs ───────────────────────────────────────────────────────
 app.use("/api/tenant", tenantUsersRouter);
+app.use("/api/tenant", tenantStaffPortalRouter);
+app.use("/api/tenant", tenantUserPermissionsRouter);
 app.use("/api/tenant", tenantPlanRouter);
 app.use("/api/tenant", tenantDashboardRouter);
 app.use("/api/tenant", tenantStaffScheduleRouter);
