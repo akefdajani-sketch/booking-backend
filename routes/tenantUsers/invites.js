@@ -16,6 +16,8 @@ const {
   sha256Hex, base64Url, toIso, computeInviteStatus, countOwners,
 } = require("../../utils/tenantUsersHelpers");
 
+const ALLOWED_ROLES = new Set(['viewer', 'staff', 'manager', 'owner']);
+
 
 module.exports = function mount(router) {
 router.post(
