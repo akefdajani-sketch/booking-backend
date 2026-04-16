@@ -128,11 +128,11 @@ async function createCheckoutSession(tenantId, {
   const body = {
     apiOperation: 'INITIATE_CHECKOUT',
     order: {
-      id:          orderId,
+      id:          'test4',   // PAY-TEST: using short id like provider's test3 to rule out order ID format issues
       amount:      String(amount),
       currency:    currency || 'JOD',
       description: description || 'Flexrz booking',
-      reference:   orderId,   // PAY-FIX: Network International requires order.reference (after description)
+      reference:   orderId,   // keep our real reference for tracking
     },
     interaction: {
       operation: 'PURCHASE',
