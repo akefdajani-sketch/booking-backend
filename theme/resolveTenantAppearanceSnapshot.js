@@ -556,6 +556,11 @@ async function resolveTenantAppearanceSnapshot(tenantId) {
     coverImageUrl: firstNonEmpty(brandingAssets.coverImageUrl, row.cover_image_url),
     membershipsImageUrl: firstNonEmpty(brandingAssets.membershipsImageUrl),
     packagesImageUrl: firstNonEmpty(brandingAssets.packagesImageUrl),
+    // Logo sizing — saved by the Images tab, must be in snapshot so
+    // the public page can read them without waiting for a client fetch.
+    logoHeroSize:   firstNonEmpty(brandingAssets.logoHeroSize,   brandingAssets.logoSize) || null,
+    logoDrawerSize: firstNonEmpty(brandingAssets.logoDrawerSize, brandingAssets.logoSize) || null,
+    logoPosition:   firstNonEmpty(brandingAssets.logoPosition) || null,
     banners: {
       home: firstNonEmpty(brandingBanners.home, row.banner_home_url),
       book: firstNonEmpty(brandingBanners.book, row.banner_book_url),
