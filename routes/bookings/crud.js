@@ -9,6 +9,7 @@ const { requireTenant } = require("../../middleware/requireTenant");
 const requireAdminOrTenantRole = require("../../middleware/requireAdminOrTenantRole");
 const { ensureBookingMoneyColumns } = require("../../utils/ensureBookingMoneyColumns");
 const { parseBookingListParams, buildBookingListWhere } = require("../../utils/bookingQueryBuilder");
+const resolveStaffScope = require("../../middleware/resolveStaffScope");
 const { loadJoinedBookingById, decrementSessionCount, reverseMembershipForBooking } = require("../../utils/bookings");
 const {
   shouldUseCustomerHistory, checkBlackoutOverlap, servicesHasColumn, getServiceAllowMembership,
@@ -20,7 +21,7 @@ const {
 
 
 module.exports = function mount(router) {
-router.get("/", requireTenant, requireAdminOrTenantRole("staff"), async (req, res) => {
+router.get("/", requireTenant, requireAdminOrTenantRole("staff"), resolveStaffScope, async (req, res) => {
   try {
     const tenantId = req.tenantId;
 
@@ -28,6 +29,17 @@ router.get("/", requireTenant, requireAdminOrTenantRole("staff"), async (req, re
     if (parsed.error) return res.status(400).json({ error: parsed.error });
 
     const { where, params, orderBy, isLatest } = buildBookingListWhere(parsed, tenantId);
+
+    // Staff scope: only show bookings for this staff member
+    if (req.isStaffScoped) {
+      if (req.staffId) {
+        where.push(`b.staff_id = $${params.length + 1}`);
+        params.push(req.staffId);
+      } else {
+        // Staff role but no linked staff record — return empty
+        return res.json({ bookings: [], cursor: null, has_more: false });
+      }
+    }
     const { limit } = parsed;
 
     const sql = `

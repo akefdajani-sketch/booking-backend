@@ -40,7 +40,7 @@ const {
   roundPct
 } = require("./dashboardHelpers");
 
-async function getDashboardSummary({ tenantId, tenantSlug, mode, dateStr }) {
+async function getDashboardSummary({ tenantId, tenantSlug, mode, dateStr, staffId = null }) {
   const hasMoneyCols = await ensureBookingMoneyColumns();
 
   // bookings start column compatibility (start_time vs start_at vs start_datetime...)
@@ -58,6 +58,8 @@ async function getDashboardSummary({ tenantId, tenantSlug, mode, dateStr }) {
   }
 
   const safeMode = mode === "week" || mode === "month" ? mode : "day";
+  // Staff scope: only show their own data when staffId is provided
+  const staffClause = (staffId && Number.isFinite(Number(staffId))) ? `AND b.staff_id = ${Number(staffId)}` : "";
   const safeDate = parseISODateOnly(dateStr) || new Date().toISOString().slice(0, 10);
 
   const { rangeStart, rangeEnd } = computeRange(safeMode, safeDate);
@@ -74,6 +76,7 @@ async function getDashboardSummary({ tenantId, tenantSlug, mode, dateStr }) {
       COALESCE(SUM(duration_minutes) FILTER (WHERE status='confirmed'), 0)::int AS booked_minutes
     FROM bookings b
     WHERE b.tenant_id=$1
+      ${staffClause}
       AND ${startCol} >= $2
       AND ${startCol} < $3
     `,
@@ -100,6 +103,7 @@ async function getDashboardSummary({ tenantId, tenantSlug, mode, dateStr }) {
     FROM bookings b
     LEFT JOIN services s ON s.id=b.service_id
     WHERE b.tenant_id=$1
+      ${staffClause}
       AND ${startCol} >= NOW()
       AND b.status IN ('confirmed','pending')
     ORDER BY ${startCol} ASC
@@ -114,12 +118,14 @@ async function getDashboardSummary({ tenantId, tenantSlug, mode, dateStr }) {
       SELECT customer_id, MIN(${startCol}) AS first_booking_at, COUNT(*)::int AS lifetime_bookings
       FROM bookings b
       WHERE b.tenant_id=$1
+        ${staffClause}
         AND b.customer_id IS NOT NULL
       GROUP BY customer_id
     ), in_range AS (
       SELECT DISTINCT b.customer_id
       FROM bookings b
       WHERE b.tenant_id=$1
+        ${staffClause}
         AND ${startCol} >= $2
         AND ${startCol} < $3
         AND b.customer_id IS NOT NULL
@@ -161,6 +167,7 @@ async function getDashboardSummary({ tenantId, tenantSlug, mode, dateStr }) {
         COUNT(*) FILTER (WHERE LOWER(COALESCE(status, '')) IN ('no_show','noshow','completed_absent'))::int AS no_show_count
       FROM bookings b
       WHERE b.tenant_id=$1
+        ${staffClause}
         AND ${startCol} >= $2
         AND ${startCol} < $3
       `,
@@ -188,6 +195,7 @@ async function getDashboardSummary({ tenantId, tenantSlug, mode, dateStr }) {
       FROM bookings b
       JOIN first_seen fs ON fs.customer_id=b.customer_id
       WHERE b.tenant_id=$1
+        ${staffClause}
         AND ${startCol} >= $2
         AND ${startCol} < $3
         AND b.customer_id IS NOT NULL
@@ -291,6 +299,7 @@ async function getDashboardSummary({ tenantId, tenantSlug, mode, dateStr }) {
         COUNT(*) FILTER (WHERE LOWER(COALESCE(status, '')) = ANY($5::text[]))::int AS eligible_count
       FROM bookings b
       WHERE b.tenant_id=$1
+        ${staffClause}
         AND ${startCol} >= $2
         AND ${startCol} < $3
       `,
@@ -465,6 +474,7 @@ async function getDashboardSummary({ tenantId, tenantSlug, mode, dateStr }) {
         ${hasMoneyCols ? "COALESCE(SUM(charge_amount) FILTER (WHERE status='confirmed'), 0)::numeric" : "0::numeric"} AS revenue
       FROM bookings b
       WHERE b.tenant_id=$1
+        ${staffClause}
         AND ${startCol} >= $2
         AND ${startCol} < $3
       GROUP BY 1
@@ -490,6 +500,7 @@ async function getDashboardSummary({ tenantId, tenantSlug, mode, dateStr }) {
       FROM bookings b
       LEFT JOIN services s ON s.id=b.service_id
       WHERE b.tenant_id=$1
+        ${staffClause}
         AND ${startCol} >= $2
         AND ${startCol} < $3
       GROUP BY 1
@@ -593,6 +604,7 @@ async function getDashboardSummary({ tenantId, tenantSlug, mode, dateStr }) {
       LEFT JOIN customers c ON c.tenant_id=b.tenant_id AND c.id=b.customer_id
       JOIN first_seen fs ON fs.customer_id=b.customer_id
       WHERE b.tenant_id=$1
+        ${staffClause}
         AND ${startCol} >= $2
         AND ${startCol} < $3
         AND b.customer_id IS NOT NULL
@@ -801,6 +813,7 @@ async function getDashboardSummary({ tenantId, tenantSlug, mode, dateStr }) {
       FROM bookings b
       LEFT JOIN services s ON s.id=b.service_id
       WHERE b.tenant_id=$1
+        ${staffClause}
         AND ${startCol} >= $2
         AND ${startCol} < $3
       GROUP BY 1, 2
@@ -828,6 +841,7 @@ async function getDashboardSummary({ tenantId, tenantSlug, mode, dateStr }) {
         COALESCE(SUM(duration_minutes) FILTER (WHERE status='confirmed'), 0)::int AS booked_minutes
       FROM bookings b
       WHERE b.tenant_id=$1
+        ${staffClause}
         AND ${startCol} >= $2
         AND ${startCol} < $3
       GROUP BY 1
