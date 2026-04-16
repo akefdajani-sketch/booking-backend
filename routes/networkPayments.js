@@ -145,8 +145,9 @@ router.post('/:slug/initiate', async (req, res) => {
       // PAY-FIX: Direct payment URL — frontend navigates here instead of using
       // checkout.js + showPaymentPage() which silently fails for unknown reasons.
       // This is exactly the URL checkout.js constructs internally and navigates to.
-      // Format: https://GATEWAY/checkout/pay?session.id=SESSION_ID
-      paymentUrl: `${sanitizeGatewayUrlForCheckout(session.gatewayUrl)}/checkout/pay?session.id=${encodeURIComponent(session.sessionId)}`,
+      // PAY-FIX: v63+ uses /static/checkout/pay (same path as checkout.min.js)
+      // Older format /checkout/pay returns the error page on ap-gateway.
+      paymentUrl: `${sanitizeGatewayUrlForCheckout(session.gatewayUrl)}/static/checkout/pay?session.id=${encodeURIComponent(session.sessionId)}`,
       checkoutJsUrl: `${sanitizeGatewayUrlForCheckout(session.gatewayUrl)}/static/checkout/checkout.min.js`,
       // For MPGS Hosted Checkout v63+, configure() only needs session.id
       // and interaction display settings. All payment details (amount, currency,
