@@ -195,7 +195,7 @@ router.get(
 
       // Resolve the customer record for this tenant + Google user
       const customerRes = await db.query(
-        `SELECT id FROM customers WHERE tenant_id=$1 AND email=$2 LIMIT 1`,
+        `SELECT id FROM customers WHERE tenant_id=$1 AND LOWER(email)=LOWER($2) LIMIT 1`,
         [tenantId, email]
       );
       const customerId = customerRes.rows?.[0]?.id;
