@@ -128,11 +128,15 @@ async function createCheckoutSession(tenantId, {
   const body = {
     apiOperation: 'INITIATE_CHECKOUT',
     order: {
-      id:          'test4',   // PAY-TEST: using short id like provider's test3 to rule out order ID format issues
+      // PAY-FIX: use the generated orderId as MPGS's unique order identifier.
+      // A prior debug leftover hardcoded this to 'test4' which caused every
+      // subsequent checkout to collide against the first order, and broke
+      // server-side verification (retrieveOrder by our orderId would 404).
+      id:          orderId,
       amount:      String(amount),
       currency:    currency || 'JOD',
       description: description || 'Flexrz booking',
-      reference:   orderId,   // keep our real reference for tracking
+      reference:   orderId,
     },
     interaction: {
       operation: 'PURCHASE',
