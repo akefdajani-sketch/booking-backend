@@ -135,7 +135,21 @@ router.post('/:slug/initiate', async (req, res) => {
       currency,
     });
 
-    logger.info({ tenantId: tenant.id, orderId, paymentId, amount, currency }, 'MPGS checkout session created');
+    const paymentUrlBuilt = `${sanitizeGatewayUrlForCheckout(session.gatewayUrl)}/api/page/version/100/pay?session.id=${encodeURIComponent(session.sessionId)}`;
+
+    // ── DIAGNOSTIC: log the exact payment URL we hand to the browser ──────────
+    logger.info({
+      tenantId:  tenant.id,
+      orderId,
+      paymentId,
+      amount,
+      currency,
+      sessionId: session.sessionId,
+      returnUrl,
+      paymentUrl: paymentUrlBuilt,
+      merchantId: session.merchantId,
+      gatewayUrl: session.gatewayUrl,
+    }, '[MPGS-DIAG] checkout session created — paymentUrl handed to browser');
 
     return res.json({
       orderId,
@@ -148,7 +162,7 @@ router.post('/:slug/initiate', async (req, res) => {
       // PAY-FIX: The correct MPGS hosted payment page path is /api/page/version/100/pay
       // This was confirmed working (showed payment page, even with config error).
       // /static/checkout/pay = 404. /checkout/pay = also wrong.
-      paymentUrl: `${sanitizeGatewayUrlForCheckout(session.gatewayUrl)}/api/page/version/100/pay?session.id=${encodeURIComponent(session.sessionId)}`,
+      paymentUrl: paymentUrlBuilt,
       checkoutJsUrl: `${sanitizeGatewayUrlForCheckout(session.gatewayUrl)}/static/checkout/checkout.min.js`,
       // For MPGS Hosted Checkout v63+, configure() only needs session.id
       // and interaction display settings. All payment details (amount, currency,

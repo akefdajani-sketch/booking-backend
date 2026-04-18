@@ -51,6 +51,17 @@ function mpgsRequest({ method, url, auth, body }) {
     const bodyStr   = body ? JSON.stringify(body) : null;
     const parsedUrl = new URL(url);
 
+    // ── DIAGNOSTIC LOGGING (remove after debugging MPGS 400s) ─────────────────
+    // Logs the full request body we send to MPGS. Auth header is NOT logged
+    // (contains API password). Safe for production logs.
+    logger.info({
+      mpgs_request: {
+        method,
+        url,
+        body: body || null,
+      },
+    }, '[MPGS-DIAG] outgoing request');
+
     const options = {
       hostname: parsedUrl.hostname,
       port:     parsedUrl.port || 443,
@@ -68,6 +79,17 @@ function mpgsRequest({ method, url, auth, body }) {
       let data = '';
       res.on('data', (chunk) => { data += chunk; });
       res.on('end', () => {
+        // ── DIAGNOSTIC LOGGING ────────────────────────────────────────────────
+        // Logs the raw response body from MPGS (first 4 KB to avoid log bloat).
+        logger.info({
+          mpgs_response: {
+            url,
+            statusCode: res.statusCode,
+            headers:    res.headers,
+            body:       String(data).slice(0, 4096),
+          },
+        }, '[MPGS-DIAG] incoming response');
+
         try {
           const parsed = JSON.parse(data);
           if (parsed.result === 'ERROR') {
