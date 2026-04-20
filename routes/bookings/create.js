@@ -12,6 +12,8 @@ const { parseBookingListParams, buildBookingListWhere } = require("../../utils/b
 const { findOrCreateSession, incrementSessionCount, decrementSessionCount, loadJoinedBookingById, checkConflicts } = require("../../utils/bookings");
 const { computeRateForBookingLike } = require("../../utils/ratesEngine");
 const { computeTaxForBooking } = require("../../utils/taxEngine");
+// PR 149: server-side booking policy gates (working hours + require-charge)
+const { getBookingPolicy, validateWithinWorkingHours, validateRequireCharge } = require("../../utils/bookingPolicy");
 const { ensureBookingRateColumns } = require("../../utils/ensureBookingRateColumns");
 const { ensurePaymentMethodColumn } = require("../../utils/ensurePaymentMethodColumn");
 const {
@@ -325,6 +327,43 @@ router.post("/", requireAppAuth, requireTenant, async (req, res) => {
         conflicts,
       });
     }
+
+    // ─── PR 149: Gate A — working-hours validation ─────────────────────────
+    // Resolve tenant timezone + policy, then re-check startTime against
+    // tenant_hours for the LOCAL day-of-week in the tenant's zone. The
+    // availability endpoint enforces this at slot-generation time, but
+    // nothing was re-validating it on create — so a client could POST any
+    // startTime and the server happily accepted it (see bug with BRD-TS-
+    // 260420-0069, booked from Malaysia for 06:00 Asia/Amman while Birdie
+    // opens at 10:00). Admin/owner bypass is exempt.
+    const bookingPolicy = await getBookingPolicy(resolvedTenantId);
+
+    if (!isAdminBypass && bookingPolicy.enforceWorkingHours) {
+      let tenantTzForPolicy = 'UTC';
+      try {
+        const tzRow = await db.query(
+          `SELECT timezone FROM tenants WHERE id = $1 LIMIT 1`,
+          [resolvedTenantId]
+        );
+        tenantTzForPolicy = tzRow.rows?.[0]?.timezone || 'UTC';
+      } catch { /* fall through with UTC */ }
+
+      const hoursCheck = await validateWithinWorkingHours({
+        tenantId:        resolvedTenantId,
+        tenantTz:        tenantTzForPolicy,
+        startTime:       start.toISOString(),
+        durationMinutes: duration,
+      });
+
+      if (!hoursCheck.ok) {
+        return res.status(422).json({
+          error:   hoursCheck.message,
+          code:    hoursCheck.code,
+          details: hoursCheck.details,
+        });
+      }
+    }
+    // ─── End Gate A ────────────────────────────────────────────────────────
 
     const client = await db.connect();
     try {
@@ -669,6 +708,37 @@ router.post("/", requireAppAuth, requireTenant, async (req, res) => {
       }
 
 const charge_amount = (finalCustomerMembershipId || prepaidApplied) ? 0 : price_amount;
+
+      // ─── PR 149: Gate B — require-charge validation ─────────────────────
+      // For tenants who've opted into requireCharge (e.g., Birdie), reject
+      // any booking where no rate rule matched and the service has no base
+      // price — price_amount ends up null, charge_amount ends up null, and
+      // the later payment_method derivation silently downgrades to 'free'.
+      // Membership/prepaid-covered bookings are exempt (they legitimately
+      // go to 0 via a different path).
+      //
+      // Defaults off (requireCharge=false in DEFAULT_POLICY). Birdie opts in
+      // via:  UPDATE tenants SET branding = jsonb_set(
+      //         COALESCE(branding, '{}'::jsonb),
+      //         '{booking_policy,require_charge}', 'true'
+      //       ) WHERE slug = 'birdie-golf';
+      if (!isAdminBypass && bookingPolicy.requireCharge) {
+        const chargeCheck = validateRequireCharge({
+          priceAmount:               price_amount,
+          finalCustomerMembershipId,
+          prepaidApplied,
+          serviceId:                 resolvedServiceId,
+        });
+        if (!chargeCheck.ok) {
+          await client.query("ROLLBACK");
+          return res.status(422).json({
+            error:   chargeCheck.message,
+            code:    chargeCheck.code,
+            details: chargeCheck.details,
+          });
+        }
+      }
+      // ─── End Gate B ─────────────────────────────────────────────────────
 
       // PR-TAX-1: Compute tax breakdown (non-fatal — never blocks booking creation)
       let taxData = { subtotal_amount: null, vat_amount: null, service_charge_amount: null, total_amount: null, tax_snapshot: null };
