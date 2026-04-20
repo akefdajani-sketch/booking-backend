@@ -39,7 +39,7 @@ router.post("/me", requireAppAuth, async (req, res) => {
         name = EXCLUDED.name,
         -- Preserve existing phone if client sends null/empty
         phone = COALESCE(NULLIF(EXCLUDED.phone, ''), customers.phone)
-      RETURNING id, tenant_id, name, phone, email, created_at
+      RETURNING id, tenant_id, name, phone, email, avatar_url, created_at
       `,
       [
         Number(tenantId),
@@ -80,7 +80,7 @@ router.get("/me", requireAppAuth, requireTenant, async (req, res) => {
     if (!email) return res.status(401).json({ error: "Unauthorized" });
 
     const cust = await pool.query(
-      `SELECT id, tenant_id, name, phone, email, created_at
+      `SELECT id, tenant_id, name, phone, email, avatar_url, created_at
        FROM customers
        WHERE tenant_id=$1 AND LOWER(email)=LOWER($2)
        LIMIT 1`,
