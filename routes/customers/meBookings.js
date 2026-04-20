@@ -128,7 +128,16 @@ router.get("/me/bookings", requireAppAuth, requireTenant, async (req, res) => {
         ${nightsCount}  AS nights_count,
         ${guestsCount}  AS guests_count,
         ${addonsJson}   AS addons_json,
-        ${addonsTotal}  AS addons_total
+        ${addonsTotal}  AS addons_total,
+        -- PR-TAX-2 (Patch 142): tax breakdown columns from bookings row.
+        -- Without these, the customer-side Reservations → click-in modal
+        -- ("Booking Details") can't render the VAT/service-charge breakdown
+        -- that the backend stored at booking-create time.
+        b.subtotal_amount,
+        b.vat_amount,
+        b.service_charge_amount,
+        b.total_amount,
+        b.tax_snapshot
       FROM bookings b
       LEFT JOIN customers c ON c.id = b.customer_id
       LEFT JOIN services s ON s.id = b.service_id
