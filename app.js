@@ -71,6 +71,8 @@ const networkPaymentsRouter       = require("./routes/networkPayments");
 const tenantPaymentSettingsRouter = require("./routes/tenantPaymentSettings");
 // WA-1: Per-tenant WhatsApp settings
 const tenantWhatsAppSettingsRouter = require("./routes/tenantWhatsAppSettings");
+// PR 145: Per-tenant Twilio settings
+const tenantTwilioSettingsRouter = require("./routes/tenantTwilioSettings");
 const reminderJobRouter = require("./routes/reminderJob");
 
 // PR-TAX-1: Tax & service charge configuration
@@ -194,6 +196,7 @@ app.use("/api/tenant", tenantPrepaidCatalogRouter);
 app.use("/api/tenant", tenantPrepaidAccountingRouter);
 app.use("/api/tenant", tenantPaymentSettingsRouter); // PAY-1: /:slug/payment-settings
 app.use("/api/tenant", tenantWhatsAppSettingsRouter); // WA-1: /:slug/whatsapp-settings
+app.use("/api/tenant", tenantTwilioSettingsRouter);   // PR 145: /:slug/twilio-settings
 app.use("/api/tenant", tenantTaxRouter);              // PR-TAX-1: /:slug/tax-config
 app.use("/api/invites", invitesRouter);
 
