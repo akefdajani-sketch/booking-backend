@@ -264,4 +264,116 @@ router.patch("/:customerId/restore", requireTenant, requireAdminOrTenantRole("st
 // - Uses existing prepaid tables: prepaid_products, customer_prepaid_entitlements, prepaid_transactions.
 // - Normalizes response fields to keep frontend stable.
 // -----------------------------------------------------------------------------
+
+// -----------------------------------------------------------------------------
+// PR 124 — companion to frontend B3.2 (Customer detail drawer).
+// GET /api/customers/:customerId/bookings
+//
+// Admin-scoped: tenant owner / staff can see a specific customer's booking
+// history. Used by the customer drawer to render Bookings sub-tab.
+//
+// Query params:
+//   tenantSlug  — required (resolved to tenantId via requireTenant)
+//   limit       — 1-100, default 25
+//   offset      — default 0
+//   status      — optional filter (confirmed, cancelled, pending, no_show)
+// -----------------------------------------------------------------------------
+router.get(
+  "/:customerId/bookings",
+  requireTenant,
+  requireAdminOrTenantRole("staff"),
+  async (req, res) => {
+    try {
+      const tenantId = req.tenantId;
+      const customerId = Number(req.params.customerId);
+      if (!Number.isInteger(customerId) || customerId <= 0) {
+        return res.status(400).json({ error: "Invalid customerId." });
+      }
+
+      const limitRaw = req.query.limit ? Number(req.query.limit) : 25;
+      const limit = Math.max(1, Math.min(100, Number.isFinite(limitRaw) ? limitRaw : 25));
+      const offsetRaw = req.query.offset ? Number(req.query.offset) : 0;
+      const offset = Math.max(0, Number.isFinite(offsetRaw) ? offsetRaw : 0);
+
+      const status = req.query.status ? String(req.query.status).trim().toLowerCase() : null;
+      const validStatuses = new Set(["confirmed", "cancelled", "pending", "no_show"]);
+      const statusFilter = status && validStatuses.has(status) ? status : null;
+
+      // Verify the customer belongs to this tenant (defence-in-depth — the
+      // tenantId filter below would already scope correctly, but this
+      // returns a cleaner 404 if a stale ID is used cross-tenant).
+      const ownerCheck = await db.query(
+        `SELECT id FROM customers WHERE id = $1 AND tenant_id = $2 LIMIT 1`,
+        [customerId, tenantId]
+      );
+      if (ownerCheck.rowCount === 0) {
+        return res.status(404).json({ error: "Customer not found for this tenant." });
+      }
+
+      const params = [tenantId, customerId];
+      let whereStatus = "";
+      if (statusFilter) {
+        params.push(statusFilter);
+        whereStatus = ` AND b.status = $${params.length}`;
+      }
+
+      params.push(limit, offset);
+
+      const q = `
+        SELECT
+          b.id, b.tenant_id, b.customer_id,
+          b.service_id, COALESCE(s.name, 'Unknown') AS service_name,
+          b.staff_id,   COALESCE(st.name, NULL)    AS staff_name,
+          b.resource_id, COALESCE(r.name, NULL)    AS resource_name,
+          b.start_time, b.end_time,
+          b.status, b.charge_amount, b.booking_code,
+          b.created_at, b.updated_at
+        FROM bookings b
+        LEFT JOIN services  s  ON s.id  = b.service_id
+        LEFT JOIN staff     st ON st.id = b.staff_id
+        LEFT JOIN resources r  ON r.id  = b.resource_id
+        WHERE b.tenant_id = $1
+          AND b.customer_id = $2
+          AND b.deleted_at IS NULL
+          ${whereStatus}
+        ORDER BY b.start_time DESC
+        LIMIT $${params.length - 1}
+        OFFSET $${params.length}
+      `;
+
+      const result = await db.query(q, params);
+
+      // Total count (same filters, no pagination) — for "hasMore" UI
+      const countParams = [tenantId, customerId];
+      let countWhere = "";
+      if (statusFilter) {
+        countParams.push(statusFilter);
+        countWhere = ` AND status = $${countParams.length}`;
+      }
+      const countRes = await db.query(
+        `SELECT COUNT(*)::int AS total
+           FROM bookings
+          WHERE tenant_id = $1
+            AND customer_id = $2
+            AND deleted_at IS NULL
+            ${countWhere}`,
+        countParams
+      );
+      const total = Number(countRes.rows[0]?.total || 0);
+      const hasMore = offset + result.rows.length < total;
+
+      return res.json({
+        bookings: result.rows,
+        total,
+        limit,
+        offset,
+        hasMore,
+      });
+    } catch (err) {
+      console.error("GET /customers/:customerId/bookings error:", err?.message);
+      return res.status(500).json({ error: "Failed to load customer bookings." });
+    }
+  }
+);
+
 };
