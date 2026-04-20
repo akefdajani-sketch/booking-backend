@@ -238,6 +238,11 @@ router.get("/by-slug/:slug", async (req, res) => {
       cols.has("country_code") ? "country_code" : "NULL::text AS country_code",
       cols.has("admin_name") ? "admin_name" : "NULL::text AS admin_name",
       cols.has("admin_email") ? "admin_email" : "NULL::text AS admin_email",
+      // PR-TAX-3 (Patch 143) — expose tax_config on the public tenant
+      // response so the booking page can compute + render tax breakdowns
+      // on the package / membership purchase modals. Schema-compat guard
+      // kept for safety; column landed in migration 031.
+      cols.has("tax_config") ? "tax_config" : "NULL::jsonb AS tax_config",
       "created_at",
     ].join(",\n        ");
 
