@@ -17,7 +17,7 @@ async function hasTenantColumn(col) {
           AND table_name = 'tenants'
           AND column_name = ANY($1::text[])
         `,
-        [["default_phone_country_code", "appearance_snapshot_published_json", "appearance_snapshot_version", "appearance_snapshot_published_at", "cover_image_url"]]
+        [["default_phone_country_code", "appearance_snapshot_published_json", "appearance_snapshot_version", "appearance_snapshot_published_at", "cover_image_url", "tax_config"]]
       );
       __tenantColCache = new Set(r.rows.map((x) => x.column_name));
     } catch {
@@ -119,6 +119,16 @@ router.get("/:slug", async (req, res) => {
     ? "default_phone_country_code"
     : "NULL::text AS default_phone_country_code";
 
+  // PR 131 — expose tax_config to the public booking UI so client-side
+  // VAT/service-charge breakdowns on the Membership + Package purchase modals
+  // work. Patch 143 previously added tax_config to /tenants/by-slug only;
+  // the frontend actually uses THIS endpoint (useTenantData calls
+  // /public/tenant-theme/:slug), so the earlier fix never reached the UI.
+  // Schema-compat guard kept in case an older env predates migration 031.
+  const taxConfigSel = (await hasTenantColumn("tax_config"))
+    ? "tax_config"
+    : "NULL::jsonb AS tax_config";
+
   const t = await db.query(
     `SELECT id, slug, theme_key, brand_overrides_json,
             branding,
@@ -131,6 +141,7 @@ router.get("/:slug", async (req, res) => {
             appearance_snapshot_published_at,
             banner_home_url, banner_book_url, banner_account_url, banner_reservations_url, banner_memberships_url,
             logo_url, cover_image_url,
+            ${taxConfigSel},
             branding_published_at
      FROM tenants
      WHERE slug = $1`,
@@ -316,6 +327,10 @@ module.exports = router;
       slug: tenant.slug,
       logo_url: tenant.logo_url,
       cover_image_url: tenant.cover_image_url || null,
+      // PR 131 — forward tenant tax_config so the public booking UI can
+      // render VAT / service-charge rows on the membership + package
+      // purchase/summary modals. Null when the tenant has no tax config.
+      tax_config: tenant.tax_config || null,
       settings: {
         require_phone: (() => {
           const b = effectiveBranding || {};
