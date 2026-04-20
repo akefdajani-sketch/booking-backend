@@ -165,7 +165,9 @@ router.get("/", requireTenant, requireAdminOrTenantRole("staff"), resolveStaffSc
 // (unchanged)
 // ---------------------------------------------------------------------------
 // ADMIN: bookings count (owner dashboard)
-router.get("/count", requireTenant, requireAdminOrTenantRole("staff"), async (req, res) => {
+// PR 134 — staff scoping: staff-role users with linked staff_id only count
+// their own bookings. Staff-role users without a linked staff record get 0.
+router.get("/count", requireTenant, requireAdminOrTenantRole("staff"), resolveStaffScope, async (req, res) => {
   try {
     const tenantId = req.tenantId;
 
@@ -174,6 +176,17 @@ router.get("/count", requireTenant, requireAdminOrTenantRole("staff"), async (re
 
     const { where, params } = buildBookingListWhere(parsed, tenantId);
     const needsCustomerJoin = Boolean(parsed.searchQuery);
+
+    // PR 134 — apply staff scope
+    if (req.isStaffScoped) {
+      if (req.staffId) {
+        where.push(`b.staff_id = $${params.length + 1}`);
+        params.push(req.staffId);
+      } else {
+        // Staff role but no linked staff record — return zero count
+        return res.json({ total: 0 });
+      }
+    }
 
     const sql = `
       SELECT COUNT(*)::int AS total
@@ -195,7 +208,11 @@ router.get("/count", requireTenant, requireAdminOrTenantRole("staff"), async (re
 // IMPORTANT: Do NOT bump heartbeat on reads.
 // ---------------------------------------------------------------------------
 // ADMIN: booking detail (owner dashboard)
-router.get("/:id", requireTenant, requireAdminOrTenantRole("staff"), async (req, res) => {
+// PR 134 — staff scoping: staff-role users with linked staff_id can only
+// fetch bookings where b.staff_id matches theirs. Returns 404 (not 403)
+// for scoped users requesting other staff's bookings, to avoid leaking
+// the existence of those records.
+router.get("/:id", requireTenant, requireAdminOrTenantRole("staff"), resolveStaffScope, async (req, res) => {
   try {
     const tenantId = req.tenantId;
     const bookingId = Number(req.params.id);
@@ -204,10 +221,20 @@ router.get("/:id", requireTenant, requireAdminOrTenantRole("staff"), async (req,
       return res.status(400).json({ error: "Invalid booking id." });
     }
 
-    const result = await db.query(
-      `SELECT id FROM bookings WHERE id=$1 AND tenant_id=$2 AND deleted_at IS NULL LIMIT 1`, // PR-19
-      [bookingId, tenantId]
-    );
+    // PR 134 — staff-scoped existence check: include staff_id in the WHERE
+    // when the user is scoped, so cross-staff probes 404 cleanly.
+    let existsSql = `SELECT id FROM bookings WHERE id=$1 AND tenant_id=$2 AND deleted_at IS NULL`;
+    const existsParams = [bookingId, tenantId];
+    if (req.isStaffScoped) {
+      if (!req.staffId) {
+        return res.status(404).json({ error: "Booking not found." });
+      }
+      existsSql += ` AND staff_id = $3`;
+      existsParams.push(req.staffId);
+    }
+    existsSql += ` LIMIT 1`;
+
+    const result = await db.query(existsSql, existsParams); // PR-19
     if (!result.rows.length) {
       return res.status(404).json({ error: "Booking not found." });
     }
@@ -224,7 +251,9 @@ router.get("/:id", requireTenant, requireAdminOrTenantRole("staff"), async (req,
 // PATCH /api/bookings/:id/status?tenantSlug|tenantId=
 // ---------------------------------------------------------------------------
 // ADMIN: change booking status
-router.patch("/:id/status", requireTenant, requireAdminOrTenantRole("staff"), async (req, res) => {
+// PR 134 — staff scoping: staff-role users with linked staff_id can only
+// update bookings where b.staff_id matches theirs. Cross-staff updates 404.
+router.patch("/:id/status", requireTenant, requireAdminOrTenantRole("staff"), resolveStaffScope, async (req, res) => {
   try {
     if (!mustHaveTenantSlug(req, res)) return;
 
@@ -241,10 +270,19 @@ router.patch("/:id/status", requireTenant, requireAdminOrTenantRole("staff"), as
       return res.status(400).json({ error: "Invalid booking id." });
     }
 
-    const curRes = await db.query(
-      `SELECT status FROM bookings WHERE id=$1 AND tenant_id=$2 AND deleted_at IS NULL LIMIT 1`, // PR-19
-      [bookingId, tenantId]
-    );
+    // PR 134 — scoped existence + status lookup
+    let curSql = `SELECT status FROM bookings WHERE id=$1 AND tenant_id=$2 AND deleted_at IS NULL`;
+    const curParams = [bookingId, tenantId];
+    if (req.isStaffScoped) {
+      if (!req.staffId) {
+        return res.status(404).json({ error: "Booking not found." });
+      }
+      curSql += ` AND staff_id = $3`;
+      curParams.push(req.staffId);
+    }
+    curSql += ` LIMIT 1`;
+
+    const curRes = await db.query(curSql, curParams); // PR-19
     if (!curRes.rows.length) {
       return res.status(404).json({ error: "Booking not found." });
     }
@@ -393,7 +431,7 @@ router.delete("/:id", requireTenant, requireAdminOrTenantRole("staff"), async (r
 //   pending_count        — pending bookings in window
 //   cancellation_rate    — 0-100 percentage
 // ---------------------------------------------------------------------------
-router.get("/stats", requireTenant, requireAdminOrTenantRole("staff"), async (req, res) => {
+router.get("/stats", requireTenant, requireAdminOrTenantRole("staff"), resolveStaffScope, async (req, res) => {
   try {
     const tenantId = req.tenantId;
     const daysRaw = req.query.days ? Number(req.query.days) : 30;
@@ -407,6 +445,29 @@ router.get("/stats", requireTenant, requireAdminOrTenantRole("staff"), async (re
 
     const params = [tenantId, windowStart.toISOString()];
 
+    // PR 134 — staff scope. When active, append staff_id filter to every
+    // query and short-circuit with zeros when the staff-role user has no
+    // linked staff record (so the dashboard shows empty state, not errors).
+    if (req.isStaffScoped && !req.staffId) {
+      return res.json({
+        window_days:        days,
+        confirmed_count:    0,
+        cancelled_count:    0,
+        pending_count:      0,
+        revenue_total:      0,
+        cancellation_rate:  0,
+        bookings_by_day:    [],
+        revenue_by_day:     [],
+        bookings_by_service: [],
+      });
+    }
+    // Use a helper fragment + param append so each query shares the same scope
+    let staffFilter = "";
+    if (req.isStaffScoped && req.staffId) {
+      params.push(req.staffId);
+      staffFilter = ` AND staff_id = $${params.length}`;
+    }
+
     // --- Status counts + revenue in window ---
     const summaryRes = await db.query(
       `SELECT
@@ -417,7 +478,7 @@ router.get("/stats", requireTenant, requireAdminOrTenantRole("staff"), async (re
        FROM bookings
        WHERE tenant_id = $1
          AND start_time >= $2
-         AND deleted_at IS NULL`,
+         AND deleted_at IS NULL${staffFilter}`,
       params
     );
 
@@ -439,7 +500,7 @@ router.get("/stats", requireTenant, requireAdminOrTenantRole("staff"), async (re
        FROM bookings
        WHERE tenant_id = $1
          AND start_time >= $2
-         AND deleted_at IS NULL
+         AND deleted_at IS NULL${staffFilter}
        GROUP BY date
        ORDER BY date ASC`,
       params
@@ -454,7 +515,7 @@ router.get("/stats", requireTenant, requireAdminOrTenantRole("staff"), async (re
        WHERE tenant_id = $1
          AND start_time >= $2
          AND status = 'confirmed'
-         AND deleted_at IS NULL
+         AND deleted_at IS NULL${staffFilter}
        GROUP BY date
        ORDER BY date ASC`,
       params
@@ -469,7 +530,7 @@ router.get("/stats", requireTenant, requireAdminOrTenantRole("staff"), async (re
        LEFT JOIN services s ON s.id = b.service_id
        WHERE b.tenant_id = $1
          AND b.start_time >= $2
-         AND b.deleted_at IS NULL
+         AND b.deleted_at IS NULL${staffFilter ? staffFilter.replace(/staff_id/g, "b.staff_id") : ""}
        GROUP BY COALESCE(s.name, 'Unknown')
        ORDER BY count DESC
        LIMIT 8`,
