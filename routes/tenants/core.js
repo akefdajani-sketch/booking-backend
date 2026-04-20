@@ -431,6 +431,11 @@ router.patch(
         region: String(body.region ?? "").trim() || null,
         postal_code: String(body.postal_code ?? "").trim() || null,
         country_code: String(body.country_code ?? "").trim() || null,
+        // PR 123 — companion to frontend Patch 112e (Currency picker in
+        // General setup). Uppercased + trimmed. Empty input → null so the
+        // tenant can clear back to the default. Validation against the
+        // currency catalog happens on the frontend; the BE trusts + stores.
+        currency_code: String(body.currency_code ?? "").trim().toUpperCase() || null,
         admin_name: String(body.admin_name ?? "").trim() || null,
         admin_email: String(body.admin_email ?? "").trim() || null,
       };
@@ -463,6 +468,9 @@ router.patch(
       appendOptional("region", optional.region);
       appendOptional("postal_code", optional.postal_code);
       appendOptional("country_code", optional.country_code);
+      // PR 123 — currency_code column. Already present on the tenants
+      // table by default, so cols.has() returns true on every environment.
+      appendOptional("currency_code", optional.currency_code);
       appendOptional("admin_name", optional.admin_name);
       appendOptional("admin_email", optional.admin_email);
       // RENTAL-1

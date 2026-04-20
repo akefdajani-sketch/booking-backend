@@ -537,6 +537,91 @@ router.get("/stats", requireTenant, requireAdminOrTenantRole("staff"), resolveSt
       params
     );
 
+    // PR 122 (v2 §3.1 + companion to frontend Patch 106 B1.2):
+    // ----------------------------------------------------------------
+    // Staff & resource breakdown for the utilization widget.
+    // staffSupported = tenant has at least one staff row AND at least
+    //                  one booking references staff_id in the window.
+    // resourceSupported = same question for resources.
+    // When false, the frontend can hide the corresponding section of
+    // the utilization card without computing anything — matches the
+    // "only show staff who actually deliver services" rule from §3.1.
+    //
+    // Note: the staff/resource count queries don't apply staffFilter —
+    // staffSupported/resourceSupported are about the TENANT's shape,
+    // not the scoped user's view. The topStaff / topResources queries
+    // DO apply staffFilter (via b.staff_id) to keep list consistency
+    // with scoped users.
+    const staffCountRes = await db.query(
+      `SELECT
+         (SELECT COUNT(*) FROM staff WHERE tenant_id = $1) AS staff_total,
+         COUNT(DISTINCT b.staff_id) FILTER (WHERE b.staff_id IS NOT NULL)::int AS staff_with_bookings
+       FROM bookings b
+       WHERE b.tenant_id = $1
+         AND b.start_time >= $2
+         AND b.deleted_at IS NULL`,
+      params
+    );
+    const staffTotal = Number(staffCountRes.rows[0]?.staff_total || 0);
+    const staffWithBookings = Number(staffCountRes.rows[0]?.staff_with_bookings || 0);
+    const staffSupported = staffTotal > 0 && staffWithBookings > 0;
+
+    const resourceCountRes = await db.query(
+      `SELECT
+         (SELECT COUNT(*) FROM resources WHERE tenant_id = $1) AS resource_total,
+         COUNT(DISTINCT b.resource_id) FILTER (WHERE b.resource_id IS NOT NULL)::int AS resources_with_bookings
+       FROM bookings b
+       WHERE b.tenant_id = $1
+         AND b.start_time >= $2
+         AND b.deleted_at IS NULL`,
+      params
+    );
+    const resourceTotal = Number(resourceCountRes.rows[0]?.resource_total || 0);
+    const resourcesWithBookings = Number(resourceCountRes.rows[0]?.resources_with_bookings || 0);
+    const resourceSupported = resourceTotal > 0 && resourcesWithBookings > 0;
+
+    // Top staff — only if supported
+    let topStaff = [];
+    if (staffSupported) {
+      const staffRes = await db.query(
+        `SELECT
+           COALESCE(st.name, 'Unknown') AS staff_name,
+           COUNT(b.id)::int AS count
+         FROM bookings b
+         LEFT JOIN staff st ON st.id = b.staff_id
+         WHERE b.tenant_id = $1
+           AND b.start_time >= $2
+           AND b.deleted_at IS NULL
+           AND b.staff_id IS NOT NULL${staffFilter ? staffFilter.replace(/staff_id/g, "b.staff_id") : ""}
+         GROUP BY COALESCE(st.name, 'Unknown')
+         ORDER BY count DESC
+         LIMIT 5`,
+        params
+      );
+      topStaff = staffRes.rows;
+    }
+
+    // Top resources — only if supported
+    let topResources = [];
+    if (resourceSupported) {
+      const resRes = await db.query(
+        `SELECT
+           COALESCE(r.name, 'Unknown') AS resource_name,
+           COUNT(b.id)::int AS count
+         FROM bookings b
+         LEFT JOIN resources r ON r.id = b.resource_id
+         WHERE b.tenant_id = $1
+           AND b.start_time >= $2
+           AND b.deleted_at IS NULL
+           AND b.resource_id IS NOT NULL${staffFilter ? staffFilter.replace(/staff_id/g, "b.staff_id") : ""}
+         GROUP BY COALESCE(r.name, 'Unknown')
+         ORDER BY count DESC
+         LIMIT 5`,
+        params
+      );
+      topResources = resRes.rows;
+    }
+
     return res.json({
       window_days:        days,
       confirmed_count:    confirmedCount,
@@ -547,6 +632,13 @@ router.get("/stats", requireTenant, requireAdminOrTenantRole("staff"), resolveSt
       bookings_by_day:    byDayRes.rows,
       revenue_by_day:     revByDayRes.rows.map((r) => ({ date: r.date, amount: parseFloat(r.amount) })),
       bookings_by_service: byServiceRes.rows,
+      // PR 122: utilization breakdown — consumed by frontend Patch 106
+      breakdown: {
+        staffSupported,
+        resourceSupported,
+        topStaff,
+        topResources,
+      },
     });
   } catch (err) {
     console.error("Error loading booking stats:", err);
