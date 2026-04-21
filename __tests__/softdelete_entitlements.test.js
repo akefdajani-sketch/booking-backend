@@ -145,9 +145,8 @@ describe("PATCH /api/customers/:customerId/restore", () => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe("hasFeature()", () => {
-  // D4 FINISH adds a third query path: when neither the trial check nor the
-  // tenant_entitlements cache returns a row, hasFeature() falls through to
-  // saas_plans → saas_plan_features. Tests below mock all 3 query layers.
+  // D4 FINISH v2: 3-tier lookup — trial bypass → entitlements cache → plan
+  // features fallback. Tests below mock each tier independently.
 
   test("returns true if tenant is on trialing subscription", async () => {
     mockQuery.mockResolvedValueOnce({ rows: [{ status: "trialing" }] });
@@ -156,22 +155,21 @@ describe("hasFeature()", () => {
     expect(mockQuery).toHaveBeenCalledTimes(1);
   });
 
-  test("returns true if entitlement feature_value is 'true'", async () => {
+  test("returns true if entitlement cache says enabled=true", async () => {
     mockQuery.mockResolvedValueOnce({ rows: [] }); // no trial
-    mockQuery.mockResolvedValueOnce({ rows: [{ feature_value: "true" }] });
+    mockQuery.mockResolvedValueOnce({ rows: [{ enabled: true }] });
     const result = await hasFeature(2, "memberships");
     expect(result).toBe(true);
   });
 
-  test("returns false if entitlement feature_value is 'false'", async () => {
+  test("returns false if entitlement cache says enabled=false", async () => {
     mockQuery.mockResolvedValueOnce({ rows: [] });
-    mockQuery.mockResolvedValueOnce({ rows: [{ feature_value: "false" }] });
+    mockQuery.mockResolvedValueOnce({ rows: [{ enabled: false }] });
     const result = await hasFeature(2, "memberships");
     expect(result).toBe(false);
   });
 
-  test("returns false if no entitlement row exists AND no plan-feature match", async () => {
-    // No trial, no cache, no saas_plans fallback match → false
+  test("returns false when trial absent, cache empty, and no plan-feature match", async () => {
     mockQuery.mockResolvedValueOnce({ rows: [] });  // trial check
     mockQuery.mockResolvedValueOnce({ rows: [] });  // entitlements cache
     mockQuery.mockResolvedValueOnce({ rows: [] });  // D4.6 saas_plans fallback
@@ -180,9 +178,9 @@ describe("hasFeature()", () => {
   });
 
   test("returns true via D4.6 fallback when plan-feature is enabled", async () => {
-    // Tenant has a subscription to a plan that enables the feature via
-    // saas_plan_features, but the tenant_entitlements cache hasn't been
-    // populated yet (grandfathered tenants, pre-webhook-run tenants).
+    // Grandfathered tenant path: subscription on Enterprise plan which has
+    // memberships enabled in saas_plan_features, but tenant_entitlements cache
+    // is empty because no Stripe webhook has run.
     mockQuery.mockResolvedValueOnce({ rows: [] });  // trial check
     mockQuery.mockResolvedValueOnce({ rows: [] });  // entitlements cache
     mockQuery.mockResolvedValueOnce({ rows: [{ enabled: true }] });  // fallback
@@ -198,17 +196,11 @@ describe("hasFeature()", () => {
     expect(result).toBe(false);
   });
 
-  test("returns true for numeric feature_value '1'", async () => {
-    mockQuery.mockResolvedValueOnce({ rows: [] });
-    mockQuery.mockResolvedValueOnce({ rows: [{ feature_value: "1" }] });
-    const result = await hasFeature(4, "api_access");
-    expect(result).toBe(true);
-  });
-
-  test("returns false for numeric feature_value '0'", async () => {
-    mockQuery.mockResolvedValueOnce({ rows: [] });
-    mockQuery.mockResolvedValueOnce({ rows: [{ feature_value: "0" }] });
-    const result = await hasFeature(4, "api_access");
+  test("returns false on DB error (fail-closed)", async () => {
+    // hasFeature() catches its own errors and returns false — safer than
+    // opening all gates when the DB hiccups.
+    mockQuery.mockRejectedValueOnce(new Error("connection refused"));
+    const result = await hasFeature(5, "memberships");
     expect(result).toBe(false);
   });
 });
