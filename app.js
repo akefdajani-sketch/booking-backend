@@ -95,6 +95,7 @@ const debugGoogleAuthRouter = require("./routes/debugGoogleAuth");
 
 // PR-1: health router (replaces inline /health + old /health/db route)
 const healthRouter = require("./routes/health");
+const plansRouter = require("./routes/plans"); // Patch D4: public pricing data
 
 // PR-4: Billing — webhook MUST be mounted before express.json() (needs raw body)
 const stripeWebhookRouter = require("./routes/stripeWebhook");
@@ -133,6 +134,7 @@ app.use("/uploads", express.static(uploadDir));
 
 // ─── Health (before API routes — no auth required, no rate limit) ────────────
 app.use("/health", healthRouter);
+app.use("/api/plans", plansRouter); // Patch D4: public pricing data (no auth)
 
 
 // PR-14: Swagger UI — /api/docs (disabled in test env)
