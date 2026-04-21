@@ -7,6 +7,7 @@ const db = pool;
 const requireAdminOrTenantRole = require("../../middleware/requireAdminOrTenantRole");
 const requireAppAuth = require("../../middleware/requireAppAuth");
 const { requireTenant } = require("../../middleware/requireTenant");
+const { requireFeature } = require("../../utils/entitlements"); // D4.6: plan-gated features
 const { getExistingColumns, firstExisting, pickCol, safeIntExpr } = require("../../utils/customerQueryHelpers");
 
 
@@ -80,8 +81,9 @@ router.patch("/:id/status", requireTenant, requireAdminOrTenantRole("staff"), as
 
 // POST /api/customer-memberships/subscribe?tenantSlug=...
 // Body: { customerId, membershipPlanId } or { customerId, planId }
+// D4.6: gated by 'memberships' feature — Starter-tier tenants get 403.
 
-router.post("/subscribe", requireTenant, requireAdminOrTenantRole("staff"), async (req, res) => {
+router.post("/subscribe", requireTenant, requireFeature("memberships"), requireAdminOrTenantRole("staff"), async (req, res) => {
   try {
     const tenantId = req.tenantId;
     const customerId = Number(req.body?.customerId);

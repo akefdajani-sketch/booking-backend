@@ -85,25 +85,53 @@ async function hasFeature(tenantId, featureKey) {
   );
   if (trialCheck.rows.length) return true;
 
+  // D4.2 / D4.6: primary lookup is the entitlements cache (populated by
+  // ensureEntitlements() in the Stripe webhook path).
   const result = await db.query(
     `SELECT feature_value FROM tenant_entitlements
      WHERE tenant_id = $1 AND feature_key = $2
      LIMIT 1`,
     [tenantId, featureKey]
   );
-  if (!result.rows.length) return false;
 
-  const val = result.rows[0].feature_value;
-  // Boolean-like: "true", true, 1, "1", numeric string > 0
-  if (typeof val === "boolean") return val;
-  if (typeof val === "number") return val > 0;
-  if (typeof val === "string") {
-    if (val.toLowerCase() === "true") return true;
-    if (val.toLowerCase() === "false") return false;
-    const n = Number(val);
-    return !isNaN(n) && n > 0;
+  if (result.rows.length) {
+    const val = result.rows[0].feature_value;
+    // Boolean-like: "true", true, 1, "1", numeric string > 0
+    if (typeof val === "boolean") return val;
+    if (typeof val === "number") return val > 0;
+    if (typeof val === "string") {
+      if (val.toLowerCase() === "true") return true;
+      if (val.toLowerCase() === "false") return false;
+      const n = Number(val);
+      return !isNaN(n) && n > 0;
+    }
+    return Boolean(val);
   }
-  return Boolean(val);
+
+  // D4.6 fallback: no entitlement row. Query the plan features directly through
+  // tenant_subscriptions → saas_plans → saas_plan_features. This is the path
+  // grandfathered tenants hit (they have subscription rows but were never run
+  // through the Stripe webhook that populates tenant_entitlements).
+  //
+  // Treating this as authoritative also means: if the plan matrix changes in
+  // saas_plan_features, all tenants pick up the change without needing a
+  // webhook round-trip. The entitlements table becomes a cache optimization,
+  // not a correctness gate.
+  const fallback = await db.query(
+    `SELECT spf.enabled
+     FROM tenant_subscriptions ts
+     JOIN saas_plans sp ON sp.id = ts.plan_id
+     JOIN saas_plan_features spf ON spf.plan_id = sp.id
+     WHERE ts.tenant_id = $1
+       AND ts.status IN ('active', 'trialing')
+       AND spf.feature_key = $2
+     ORDER BY ts.started_at DESC NULLS LAST
+     LIMIT 1`,
+    [tenantId, featureKey]
+  );
+
+  if (!fallback.rows.length) return false;
+  return Boolean(fallback.rows[0].enabled);
 }
 
 // ── Express middleware ─────────────────────────────────────────────────────────

@@ -145,6 +145,10 @@ describe("PATCH /api/customers/:customerId/restore", () => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe("hasFeature()", () => {
+  // D4 FINISH adds a third query path: when neither the trial check nor the
+  // tenant_entitlements cache returns a row, hasFeature() falls through to
+  // saas_plans → saas_plan_features. Tests below mock all 3 query layers.
+
   test("returns true if tenant is on trialing subscription", async () => {
     mockQuery.mockResolvedValueOnce({ rows: [{ status: "trialing" }] });
     const result = await hasFeature(1, "memberships");
@@ -166,10 +170,31 @@ describe("hasFeature()", () => {
     expect(result).toBe(false);
   });
 
-  test("returns false if no entitlement row exists", async () => {
-    mockQuery.mockResolvedValueOnce({ rows: [] });
-    mockQuery.mockResolvedValueOnce({ rows: [] });
+  test("returns false if no entitlement row exists AND no plan-feature match", async () => {
+    // No trial, no cache, no saas_plans fallback match → false
+    mockQuery.mockResolvedValueOnce({ rows: [] });  // trial check
+    mockQuery.mockResolvedValueOnce({ rows: [] });  // entitlements cache
+    mockQuery.mockResolvedValueOnce({ rows: [] });  // D4.6 saas_plans fallback
     const result = await hasFeature(3, "calendar_planning");
+    expect(result).toBe(false);
+  });
+
+  test("returns true via D4.6 fallback when plan-feature is enabled", async () => {
+    // Tenant has a subscription to a plan that enables the feature via
+    // saas_plan_features, but the tenant_entitlements cache hasn't been
+    // populated yet (grandfathered tenants, pre-webhook-run tenants).
+    mockQuery.mockResolvedValueOnce({ rows: [] });  // trial check
+    mockQuery.mockResolvedValueOnce({ rows: [] });  // entitlements cache
+    mockQuery.mockResolvedValueOnce({ rows: [{ enabled: true }] });  // fallback
+    const result = await hasFeature(3, "memberships");
+    expect(result).toBe(true);
+  });
+
+  test("returns false via D4.6 fallback when plan-feature is disabled", async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [] });
+    mockQuery.mockResolvedValueOnce({ rows: [] });
+    mockQuery.mockResolvedValueOnce({ rows: [{ enabled: false }] });
+    const result = await hasFeature(3, "api_access");
     expect(result).toBe(false);
   });
 
@@ -208,7 +233,8 @@ describe("requireFeature() middleware", () => {
     testApp.get("/test", requireFeature("multi_location"), (req, res) => res.json({ ok: true }));
 
     mockQuery.mockResolvedValueOnce({ rows: [] }); // no trial
-    mockQuery.mockResolvedValueOnce({ rows: [] }); // no entitlement
+    mockQuery.mockResolvedValueOnce({ rows: [] }); // no entitlement cache
+    mockQuery.mockResolvedValueOnce({ rows: [] }); // D4.6 fallback: no plan-feature match
 
     const res = await request(testApp).get("/test");
     expect(res.status).toBe(403);

@@ -101,10 +101,15 @@ router.post(
       const planCode = String(req.body?.planCode || '').trim().toLowerCase();
       if (!planCode) return res.status(400).json({ error: 'planCode is required.' });
 
-      const priceId = getPriceIdForPlan(planCode);
+      // D4.2: accept billing cycle (yearly default — matches pricing page default).
+      const cycleRaw = String(req.body?.cycle || 'yearly').trim().toLowerCase();
+      const cycle = (cycleRaw === 'monthly') ? 'monthly' : 'yearly';
+
+      const priceId = await getPriceIdForPlan(planCode, cycle);
       if (!priceId) {
         return res.status(400).json({
-          error: `No Stripe price configured for plan "${planCode}". Set STRIPE_PRICE_${planCode.toUpperCase()} env var.`,
+          error: `No Stripe price configured for plan "${planCode}" (${cycle}). ` +
+                 `Populate saas_plans.stripe_price_id_${cycle} or set STRIPE_PRICE_${planCode.toUpperCase()}_${cycle.toUpperCase()} env var.`,
         });
       }
 
@@ -123,17 +128,19 @@ router.post(
           tenant_id:   String(tenantId),
           tenant_slug: slug,
           plan_code:   planCode,
+          cycle:       cycle,
         },
         subscription_data: {
           metadata: {
             tenant_id:   String(tenantId),
             tenant_slug: slug,
             plan_code:   planCode,
+            cycle:       cycle,
           },
         },
       });
 
-      logger.info({ tenantId, planCode, sessionId: session.id }, 'Stripe checkout session created');
+      logger.info({ tenantId, planCode, cycle, sessionId: session.id }, 'Stripe checkout session created');
       return res.json({ url: session.url, sessionId: session.id });
     } catch (err) {
       logger.error({ err }, 'POST /api/billing/checkout error');
