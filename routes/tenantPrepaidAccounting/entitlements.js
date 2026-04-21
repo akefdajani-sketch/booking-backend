@@ -3,6 +3,7 @@
 // Mounted by routes/tenantPrepaidAccounting.js
 
 const db = require("../../db");
+const { requireFeature } = require("../../utils/entitlements"); // D4.6: plan-gated features
 const {
   requireTenantMeAuth, maybeEnsureUser, resolveTenantIdFromParam, requirePrepaidTables, requireTenantRole,
   PRODUCT_TYPES, ENTITLEMENT_STATUSES, ENTITLEMENT_SOURCES, TRANSACTION_TYPES, REDEMPTION_MODES, VALIDITY_UNITS,
@@ -75,6 +76,7 @@ router.post(
   maybeEnsureUser,
   resolveTenantIdFromParam,
   requirePrepaidTables,
+  requireFeature("packages"),  // D4.6: Starter-tier tenants get 403
   requireTenantRole("manager"),
   async (req, res) => {
     const client = await db.connect();

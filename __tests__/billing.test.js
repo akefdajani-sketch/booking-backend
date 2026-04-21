@@ -18,6 +18,11 @@ const app     = require('../app');
 describe('utils/stripe', () => {
   const { isStripeEnabled, getPriceIdForPlan } = require('../utils/stripe');
 
+  // D4 FINISH: getPriceIdForPlan now queries the DB first (saas_plans) and
+  // falls back to legacy env vars. In the test environment there's no DB
+  // connection so the DB query rejects and fallback-to-env kicks in. These
+  // tests exercise the env-var fallback path explicitly.
+
   test('isStripeEnabled returns false when STRIPE_SECRET_KEY is not set', () => {
     const orig = process.env.STRIPE_SECRET_KEY;
     delete process.env.STRIPE_SECRET_KEY;
@@ -33,22 +38,37 @@ describe('utils/stripe', () => {
     else delete process.env.STRIPE_SECRET_KEY;
   });
 
-  test('getPriceIdForPlan returns falsy when env var not set', () => {
+  test('getPriceIdForPlan returns falsy when neither DB nor env has a price', async () => {
     delete process.env.STRIPE_PRICE_STARTER;
+    delete process.env.STRIPE_PRICE_STARTER_MONTHLY;
+    delete process.env.STRIPE_PRICE_STARTER_YEARLY;
     delete process.env.STRIPE_PRICE_GROWTH;
-    // Returns null or undefined — either way falsy and unusable as a price ID
-    expect(getPriceIdForPlan('starter')).toBeFalsy();
-    expect(getPriceIdForPlan('growth')).toBeFalsy();
+    delete process.env.STRIPE_PRICE_GROWTH_MONTHLY;
+    delete process.env.STRIPE_PRICE_GROWTH_YEARLY;
+    // DB query will fail silently in test env (no connection) and fall through
+    // to env vars — which are also unset — so both return falsy.
+    await expect(getPriceIdForPlan('starter')).resolves.toBeFalsy();
+    await expect(getPriceIdForPlan('growth')).resolves.toBeFalsy();
   });
 
-  test('getPriceIdForPlan returns env var value when set', () => {
+  test('getPriceIdForPlan returns env var value when set (legacy fallback)', async () => {
     process.env.STRIPE_PRICE_STARTER = 'price_test_123';
-    expect(getPriceIdForPlan('starter')).toBe('price_test_123');
+    // With legacy non-cycle env var set, falls back to it regardless of cycle
+    await expect(getPriceIdForPlan('starter', 'yearly')).resolves.toBe('price_test_123');
     delete process.env.STRIPE_PRICE_STARTER;
   });
 
-  test('getPriceIdForPlan handles unknown plan codes gracefully', () => {
-    const result = getPriceIdForPlan('unknown_plan');
+  test('getPriceIdForPlan prefers cycle-specific env var when available', async () => {
+    process.env.STRIPE_PRICE_STARTER_YEARLY = 'price_yearly_abc';
+    process.env.STRIPE_PRICE_STARTER_MONTHLY = 'price_monthly_xyz';
+    await expect(getPriceIdForPlan('starter', 'yearly')).resolves.toBe('price_yearly_abc');
+    await expect(getPriceIdForPlan('starter', 'monthly')).resolves.toBe('price_monthly_xyz');
+    delete process.env.STRIPE_PRICE_STARTER_YEARLY;
+    delete process.env.STRIPE_PRICE_STARTER_MONTHLY;
+  });
+
+  test('getPriceIdForPlan handles unknown plan codes gracefully', async () => {
+    const result = await getPriceIdForPlan('unknown_plan');
     expect(result == null).toBe(true); // null or undefined
   });
 });
