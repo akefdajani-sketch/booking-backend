@@ -57,6 +57,7 @@ const tenantUserPermissionsRouter = require("./routes/tenantUserPermissions");
 const tenantStaffScheduleRouter = require("./routes/tenantStaffSchedule");
 const serviceHoursRouter = require("./routes/serviceHours");
 const tenantHomeLandingRouter = require("./routes/tenantHomeLanding");
+const tenantBookingPolicyRouter = require("./routes/tenantBookingPolicy"); // Patch 151b-fix
 const tenantBrandingRouter = require("./routes/tenantBranding");
 const tenantMembershipCheckoutRouter = require("./routes/tenantMembershipCheckout");
 const tenantRatesRouter = require("./routes/tenantRates");
@@ -188,6 +189,7 @@ app.use("/api/tenant", tenantStaffScheduleRouter);
 app.use("/api/tenant", serviceHoursRouter); // PR-SH1: per-service time windows
 app.use("/api/tenant", sessionsRouter);     // PR-SESSIONS: group/parallel booking sessions
 app.use("/api/tenant", tenantHomeLandingRouter);
+app.use("/api/tenant", tenantBookingPolicyRouter); // Patch 151b-fix: /:slug/booking-policy
 app.use("/api/tenant", tenantBrandingRouter);
 app.use("/api/tenant", tenantMembershipCheckoutRouter);
 app.use("/api/tenant", tenantRatesRouter);
