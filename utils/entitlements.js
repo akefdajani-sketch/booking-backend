@@ -1,10 +1,29 @@
 // utils/entitlements.js
 // Entitlement enforcement — reads active subscription + plan features,
-// syncs tenant_entitlements, and exposes per-request feature checks.
+// syncs tenant_entitlements cache, and exposes per-request feature checks.
+//
+// Schema:
+//   saas_plan_features (plan_id, feature_key, enabled, limit_value)
+//   tenant_entitlements (tenant_id, feature_key, enabled, limit_value, source, ...)
+//   tenant_subscriptions (tenant_id, plan_id, status, ...)
 //
 // Usage:
 //   const { requireFeature } = require("../utils/entitlements");
 //   router.post("/", requireFeature("memberships"), handler);
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// D4 FINISH v2 — schema corrections:
+//
+// Previous (broken) version queried `spf.feature_value` and wrote to
+// `tenant_entitlements.feature_value` — neither column exists. The real column
+// is `enabled` (BOOLEAN). This version uses the correct column name, matching
+// the actual schema from migration 003 + 039.
+//
+// Behavior change: the entitlements cache is now fully optional. hasFeature()
+// falls back to saas_plan_features directly whenever the cache is empty or
+// errors. This makes the system correct-by-default for grandfathered tenants
+// (who have no cache entries) and removes the cache as a correctness gate.
+// ─────────────────────────────────────────────────────────────────────────────
 
 "use strict";
 
@@ -20,18 +39,29 @@ const FEATURES = Object.freeze({
   CUSTOM_BRANDING: "custom_branding",
   API_ACCESS: "api_access",
   PRIORITY_SUPPORT: "priority_support",
+  BOOKING_CODES: "booking_codes",
+  PACKAGES: "packages",
+  ONLINE_PAYMENTS: "online_payments",
+  TAX_CONFIG: "tax_config",
+  EMAIL_REMINDERS: "email_reminders",
+  SMS_NOTIFICATIONS: "sms_notifications",
+  WHATSAPP_NOTIFICATIONS: "whatsapp_notifications",
+  WHITE_LABEL: "white_label",
+  SSO: "sso",
 });
 
 // ── Internal helpers ───────────────────────────────────────────────────────────
 
 /**
  * Fetch the active plan features for a tenant.
- * Falls back to an empty set if no active subscription exists (free / unset tenants
- * are implicitly on Starter; Starter has no premium features).
+ * Returns [{ feature_key, enabled, limit_value }]
+ *
+ * Falls back to an empty set if no active/trialing subscription exists —
+ * those tenants are implicitly unset and have no features.
  */
 async function fetchPlanFeatures(tenantId) {
   const result = await db.query(
-    `SELECT spf.feature_key, spf.feature_value
+    `SELECT spf.feature_key, spf.enabled, spf.limit_value
      FROM tenant_subscriptions ts
      JOIN saas_plans sp ON sp.id = ts.plan_id
      JOIN saas_plan_features spf ON spf.plan_id = sp.id
@@ -40,12 +70,16 @@ async function fetchPlanFeatures(tenantId) {
      ORDER BY spf.feature_key`,
     [tenantId]
   );
-  return result.rows; // [{ feature_key, feature_value }]
+  return result.rows;
 }
 
 /**
  * Upsert tenant_entitlements from current plan features.
- * Called after a successful Stripe webhook activation.
+ * Called after a successful Stripe webhook activation (checkout.session.completed,
+ * customer.subscription.updated, etc.).
+ *
+ * This is a cache-populating operation. If it fails or is never called, hasFeature()
+ * still returns correct results via the saas_plan_features fallback path.
  */
 async function ensureEntitlements(tenantId) {
   const features = await fetchPlanFeatures(tenantId);
@@ -59,79 +93,80 @@ async function ensureEntitlements(tenantId) {
     return;
   }
 
-  for (const { feature_key, feature_value } of features) {
+  for (const { feature_key, enabled, limit_value } of features) {
     await db.query(
-      `INSERT INTO tenant_entitlements (tenant_id, feature_key, feature_value, updated_at)
-       VALUES ($1, $2, $3, NOW())
+      `INSERT INTO tenant_entitlements
+         (tenant_id, feature_key, enabled, limit_value, source, created_at)
+       VALUES ($1, $2, $3, $4, 'plan', NOW())
        ON CONFLICT (tenant_id, feature_key)
-       DO UPDATE SET feature_value = EXCLUDED.feature_value,
-                     updated_at    = EXCLUDED.updated_at`,
-      [tenantId, feature_key, feature_value]
+       DO UPDATE SET enabled     = EXCLUDED.enabled,
+                     limit_value = EXCLUDED.limit_value,
+                     source      = EXCLUDED.source`,
+      [tenantId, feature_key, enabled, limit_value]
     );
   }
 }
 
 /**
  * Check whether a tenant has a specific feature enabled.
- * Returns true if the entitlement row exists and feature_value is truthy.
+ *
+ * Resolution order:
+ *   1. Trial bypass: tenant has an active 'trialing' subscription → true
+ *   2. Entitlements cache: a row exists in tenant_entitlements → use its enabled value
+ *   3. D4.6 fallback: query saas_plan_features via tenant_subscriptions → use its enabled value
+ *   4. No match anywhere → false
+ *
+ * The fallback (step 3) is the critical path that protects tenants whose
+ * tenant_entitlements cache has not been populated — including grandfathered
+ * tenants that never ran through a Stripe webhook.
+ *
+ * Returns boolean. Never throws; on DB errors, returns false (deny-by-default
+ * is safer than a middleware crash that fails open everywhere).
  */
 async function hasFeature(tenantId, featureKey) {
-  // Also honour trial bypass — tenants in trial get all features
-  const trialCheck = await db.query(
-    `SELECT 1 FROM tenant_subscriptions
-     WHERE tenant_id = $1 AND status = 'trialing'
-     LIMIT 1`,
-    [tenantId]
-  );
-  if (trialCheck.rows.length) return true;
+  try {
+    // 1. Trial bypass
+    const trialCheck = await db.query(
+      `SELECT 1 FROM tenant_subscriptions
+       WHERE tenant_id = $1 AND status = 'trialing'
+       LIMIT 1`,
+      [tenantId]
+    );
+    if (trialCheck.rows.length) return true;
 
-  // D4.2 / D4.6: primary lookup is the entitlements cache (populated by
-  // ensureEntitlements() in the Stripe webhook path).
-  const result = await db.query(
-    `SELECT feature_value FROM tenant_entitlements
-     WHERE tenant_id = $1 AND feature_key = $2
-     LIMIT 1`,
-    [tenantId, featureKey]
-  );
-
-  if (result.rows.length) {
-    const val = result.rows[0].feature_value;
-    // Boolean-like: "true", true, 1, "1", numeric string > 0
-    if (typeof val === "boolean") return val;
-    if (typeof val === "number") return val > 0;
-    if (typeof val === "string") {
-      if (val.toLowerCase() === "true") return true;
-      if (val.toLowerCase() === "false") return false;
-      const n = Number(val);
-      return !isNaN(n) && n > 0;
+    // 2. Entitlements cache
+    const cacheResult = await db.query(
+      `SELECT enabled FROM tenant_entitlements
+       WHERE tenant_id = $1 AND feature_key = $2
+       LIMIT 1`,
+      [tenantId, featureKey]
+    );
+    if (cacheResult.rows.length) {
+      return Boolean(cacheResult.rows[0].enabled);
     }
-    return Boolean(val);
+
+    // 3. D4.6 fallback — query plan features directly
+    const fallback = await db.query(
+      `SELECT spf.enabled
+       FROM tenant_subscriptions ts
+       JOIN saas_plans sp ON sp.id = ts.plan_id
+       JOIN saas_plan_features spf ON spf.plan_id = sp.id
+       WHERE ts.tenant_id = $1
+         AND ts.status IN ('active', 'trialing')
+         AND spf.feature_key = $2
+       ORDER BY ts.started_at DESC NULLS LAST
+       LIMIT 1`,
+      [tenantId, featureKey]
+    );
+    if (!fallback.rows.length) return false;
+    return Boolean(fallback.rows[0].enabled);
+  } catch (err) {
+    // Log but do not crash — fail closed (safer than opening all gates).
+    // Middleware's try/catch handles the subsequent behavior.
+    // eslint-disable-next-line no-console
+    console.error("[entitlements] hasFeature error:", err.message);
+    return false;
   }
-
-  // D4.6 fallback: no entitlement row. Query the plan features directly through
-  // tenant_subscriptions → saas_plans → saas_plan_features. This is the path
-  // grandfathered tenants hit (they have subscription rows but were never run
-  // through the Stripe webhook that populates tenant_entitlements).
-  //
-  // Treating this as authoritative also means: if the plan matrix changes in
-  // saas_plan_features, all tenants pick up the change without needing a
-  // webhook round-trip. The entitlements table becomes a cache optimization,
-  // not a correctness gate.
-  const fallback = await db.query(
-    `SELECT spf.enabled
-     FROM tenant_subscriptions ts
-     JOIN saas_plans sp ON sp.id = ts.plan_id
-     JOIN saas_plan_features spf ON spf.plan_id = sp.id
-     WHERE ts.tenant_id = $1
-       AND ts.status IN ('active', 'trialing')
-       AND spf.feature_key = $2
-     ORDER BY ts.started_at DESC NULLS LAST
-     LIMIT 1`,
-    [tenantId, featureKey]
-  );
-
-  if (!fallback.rows.length) return false;
-  return Boolean(fallback.rows[0].enabled);
 }
 
 // ── Express middleware ─────────────────────────────────────────────────────────
@@ -156,23 +191,26 @@ function requireFeature(featureKey) {
       const allowed = await hasFeature(tenantId, featureKey);
       if (!allowed) {
         return res.status(403).json({
-          error: `Feature not available on your current plan.`,
+          error: "Feature not available on your current plan.",
           code: "FEATURE_NOT_AVAILABLE",
           feature: featureKey,
         });
       }
       return next();
     } catch (err) {
-      // Log but do not block — fail open is safer than killing all requests
-      // if the entitlements table has a transient issue
-      console.error("[entitlements] feature check error:", err);
-      return next();
+      // hasFeature() already catches its own errors and returns false — but
+      // if something else throws (JWT parse, etc.), fail closed by returning
+      // 500 rather than opening the gate silently.
+      // eslint-disable-next-line no-console
+      console.error("[entitlements] feature gate error:", err);
+      return res.status(500).json({ error: "Feature gate check failed." });
     }
   };
 }
 
 module.exports = {
   FEATURES,
+  fetchPlanFeatures,
   ensureEntitlements,
   hasFeature,
   requireFeature,
