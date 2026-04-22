@@ -75,6 +75,8 @@ const tenantWhatsAppSettingsRouter = require("./routes/tenantWhatsAppSettings");
 // PR 145: Per-tenant Twilio settings
 const tenantTwilioSettingsRouter = require("./routes/tenantTwilioSettings");
 const reminderJobRouter = require("./routes/reminderJob");
+const smsReminderJobRouter = require("./routes/smsReminderJob"); // Patch H3.5.2 — SMS booking reminders
+const whatsappReminderJobRouter = require("./routes/whatsappReminderJob"); // Patch H3.5.3 — WhatsApp booking reminders
 
 // PR-TAX-1: Tax & service charge configuration
 const tenantTaxRouter = require("./routes/tenantTax");
@@ -177,6 +179,8 @@ app.use("/api/maintenance-tickets", require("./routes/maintenanceTickets")); // 
 app.use("/api/booking-contracts",   require("./routes/bookingContracts"));   // PR-CONTRACT-1
 
 app.use("/api/reminder-job", reminderJobRouter);
+app.use("/api/sms-reminder-job", smsReminderJobRouter); // Patch H3.5.2 — SMS booking reminders
+app.use("/api/whatsapp-reminder-job", whatsappReminderJobRouter); // Patch H3.5.3 — WhatsApp booking reminders
 
 app.use("/api/membership-plans", membershipPlansRouter);
 app.use("/api/customer-memberships", customerMembershipsRouter);

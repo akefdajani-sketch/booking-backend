@@ -1384,6 +1384,57 @@ const charge_amount = (finalCustomerMembershipId || prepaidApplied) ? 0 : price_
       }
       // ── End WhatsApp ──────────────────────────────────────────────────────
 
+      // ── H3.5: Twilio SMS booking confirmation (non-fatal, fires after response) ──
+      // Gated on the 'sms_notifications' feature (Pro plan). Independent of WhatsApp
+      // so prospects on Pro-without-WhatsApp still get SMS, and vice versa.
+      if (created && joined?.customer_phone) {
+        setImmediate(async () => {
+          try {
+            const { hasFeature } = require('../../utils/entitlements');
+            const smsEnabled = await hasFeature(resolvedTenantId, 'sms_notifications').catch(() => false);
+            if (!smsEnabled) return;
+
+            const { sendBookingConfirmation: sendSmsConfirmation } = require('../../utils/twilioSms');
+            const { isTwilioEnabledForTenant } = require('../../utils/twilioCredentials');
+            const twEnabled = await isTwilioEnabledForTenant(resolvedTenantId).catch(() => false);
+            if (!twEnabled) return;
+
+            const tRes = await require('../../db').query(
+              'SELECT name, timezone FROM tenants WHERE id = $1',
+              [resolvedTenantId]
+            );
+            const tenantName     = tRes.rows?.[0]?.name     || 'Flexrz';
+            const tenantTimezone = tRes.rows?.[0]?.timezone || 'Asia/Amman';
+
+            const smsResult = await sendSmsConfirmation({
+              booking: joined,
+              tenantName,
+              tenantTimezone,
+              tenantId: resolvedTenantId,
+              bookingUrl: null, // SMS is short-form — URL omitted to keep messages from getting truncated
+            });
+
+            if (smsResult.ok) {
+              require('../../utils/logger').info(
+                { bookingId, phone: joined.customer_phone, msgSid: smsResult.messageSid },
+                'SMS confirmation sent'
+              );
+            } else {
+              require('../../utils/logger').warn(
+                { bookingId, reason: smsResult.reason },
+                'SMS confirmation skipped'
+              );
+            }
+          } catch (smsErr) {
+            require('../../utils/logger').error(
+              { err: smsErr.message, bookingId },
+              'SMS confirmation error (non-fatal)'
+            );
+          }
+        });
+      }
+      // ── End SMS ───────────────────────────────────────────────────────────
+
       return res.status(created ? 201 : 200).json({
         booking: joined,
         replay: !created,
