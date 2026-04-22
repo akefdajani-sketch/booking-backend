@@ -410,6 +410,56 @@ router.delete("/:id", requireTenant, requireAdminOrTenantRole("staff"), async (r
     await bumpTenantBookingChange(tenantId);
 
     const joined = await loadJoinedBookingById(bookingId, tenantId);
+
+    // ── H3.5: Twilio SMS cancellation (non-fatal, fires after response) ──
+    // Only send if the transition actually happened (not a no-op re-cancel).
+    if (currentStatus !== nextStatus && joined?.customer_phone) {
+      setImmediate(async () => {
+        try {
+          const { hasFeature } = require('../../utils/entitlements');
+          const smsEnabled = await hasFeature(tenantId, 'sms_notifications').catch(() => false);
+          if (!smsEnabled) return;
+
+          const { sendBookingCancellation } = require('../../utils/twilioSms');
+          const { isTwilioEnabledForTenant } = require('../../utils/twilioCredentials');
+          const twEnabled = await isTwilioEnabledForTenant(tenantId).catch(() => false);
+          if (!twEnabled) return;
+
+          const tRes = await pool.query(
+            'SELECT name, timezone FROM tenants WHERE id = $1',
+            [tenantId]
+          );
+          const tenantName     = tRes.rows?.[0]?.name     || 'Flexrz';
+          const tenantTimezone = tRes.rows?.[0]?.timezone || 'Asia/Amman';
+
+          const smsResult = await sendBookingCancellation({
+            booking: joined,
+            tenantName,
+            tenantTimezone,
+            tenantId,
+          });
+
+          if (smsResult.ok) {
+            require('../../utils/logger').info(
+              { bookingId, msgSid: smsResult.messageSid },
+              'SMS cancellation sent'
+            );
+          } else {
+            require('../../utils/logger').warn(
+              { bookingId, reason: smsResult.reason },
+              'SMS cancellation skipped'
+            );
+          }
+        } catch (smsErr) {
+          require('../../utils/logger').error(
+            { err: smsErr.message, bookingId },
+            'SMS cancellation error (non-fatal)'
+          );
+        }
+      });
+    }
+    // ── End SMS cancellation ──────────────────────────────────────────────
+
     return res.json({ booking: joined });
   } catch (err) {
     console.error("Error cancelling booking:", err);

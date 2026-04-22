@@ -235,6 +235,81 @@ async function sendPaymentReceived({ customerPhone, customerName, tenantName, te
   return sendMessage({ to: customerPhone, message, tenantId });
 }
 
+/**
+ * Send booking reminder WhatsApp (H3.5.3).
+ * windowType: '24h' or '1h' — affects template copy.
+ * Non-fatal — caller handles the setImmediate wrapper.
+ *
+ * Gating is caller's responsibility:
+ *   - hasFeature(tenantId, 'whatsapp_notifications') — Pro plan gate
+ *   - isWhatsAppEnabledForTenant(tenantId) — credentials check
+ *   - customer has phone
+ */
+async function sendBookingReminder({
+  booking,
+  tenantName,
+  tenantTimezone = 'Asia/Amman',
+  tenantId = null,
+  windowType = '24h',
+}) {
+  const phone = booking.customer_phone;
+  if (!phone) return { ok: false, reason: 'no_phone' };
+
+  const message = buildBookingReminderMessage({
+    tenantName,
+    customerName: booking.customer_name,
+    bookingCode:  booking.booking_code,
+    resourceName: booking.resource_name,
+    serviceName:  booking.service_name,
+    checkinDate:  booking.checkin_date,
+    startTime:    booking.start_time,
+    timezone:     tenantTimezone,
+    windowType,
+  });
+
+  return sendMessage({ to: phone, message, tenantId });
+}
+
+function buildBookingReminderMessage({
+  tenantName,
+  customerName,
+  bookingCode,
+  resourceName,
+  serviceName,
+  checkinDate,
+  startTime,
+  timezone,
+  windowType,
+}) {
+  const greeting = customerName ? `Hi ${customerName},` : 'Hi,';
+  const is1h = windowType === '1h';
+
+  const opener = is1h
+    ? `${greeting} quick reminder — your booking at *${tenantName}* starts soon.`
+    : `${greeting} friendly reminder — you have a booking tomorrow at *${tenantName}*.`;
+
+  const lines = [opener, ''];
+  if (bookingCode) lines.push(`*Reference:* ${bookingCode}`);
+
+  if (checkinDate) {
+    lines.push(`*When:* ${formatDate(checkinDate, timezone)}`);
+  } else if (startTime) {
+    lines.push(`*When:* ${formatDate(startTime, timezone)} at ${formatDateTime(startTime, timezone).split(' ').pop()}`);
+  }
+
+  const what = [serviceName, resourceName].filter(Boolean).join(' · ');
+  if (what) lines.push(`*Details:* ${what}`);
+
+  lines.push('');
+  if (is1h) {
+    lines.push('See you soon! 👋');
+  } else {
+    lines.push('Need to reschedule? Just reply to this message.');
+  }
+
+  return lines.join('\n');
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -307,11 +382,13 @@ function isWhatsAppConfigured() {
 module.exports = {
   sendMessage,
   sendBookingConfirmation,
+  sendBookingReminder,
   sendPaymentLink,
   sendPaymentReceived,
   isWhatsAppConfigured,
   // Exported for testing
   buildBookingConfirmationMessage,
+  buildBookingReminderMessage,
   buildPaymentLinkMessage,
   buildPaymentReceivedMessage,
   normalisePhone,

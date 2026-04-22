@@ -131,6 +131,21 @@ router.post(
           cycle:       cycle,
         },
         subscription_data: {
+          // D4 trial: 14-day free trial on every new subscription.
+          // Stripe webhook fires customer.subscription.updated with
+          // status='trialing' → entitlements filter already treats it as
+          // active → features immediately available.
+          //
+          // After the trial, Stripe attempts the first invoice. On success
+          // status → 'active'. On failure (e.g. card declined) status →
+          // 'past_due' → entitlements exclude → features lost → owner
+          // receives Stripe dunning email → can update card via portal.
+          //
+          // No card required to start trial (payment_method_collection
+          // defaults to 'if_required' which Stripe interprets as "collect
+          // during checkout" — yes, a card is captured at signup but not
+          // charged for 14 days).
+          trial_period_days: 14,
           metadata: {
             tenant_id:   String(tenantId),
             tenant_slug: slug,
@@ -140,7 +155,7 @@ router.post(
         },
       });
 
-      logger.info({ tenantId, planCode, cycle, sessionId: session.id }, 'Stripe checkout session created');
+      logger.info({ tenantId, planCode, cycle, trialDays: 14, sessionId: session.id }, 'Stripe checkout session created');
       return res.json({ url: session.url, sessionId: session.id });
     } catch (err) {
       logger.error({ err }, 'POST /api/billing/checkout error');
