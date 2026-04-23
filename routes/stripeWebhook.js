@@ -3,6 +3,7 @@
 // routes/stripeWebhook.js
 // PR-4: Stripe Billing Wiring — Webhook handler
 // PR-9: Invoice + Payment Record Creation
+// G2a-2: Route contract invoice.* events to contract_invoices via metadata.flexrz_channel
 //
 // Endpoint:
 //   POST /api/billing/webhook
@@ -14,8 +15,11 @@
 //   checkout.session.completed     — activate subscription after payment
 //   customer.subscription.updated  — sync status changes (upgrade/downgrade)
 //   customer.subscription.deleted  — mark subscription as canceled
-//   invoice.paid                   — record invoice + payment in DB (PR-9)
-//   invoice.payment_failed         — record failed invoice + mark past_due (PR-9)
+//   invoice.paid                   — record invoice + payment in DB (PR-9) OR
+//                                    mark contract_invoices.paid (G2a-2)
+//   invoice.payment_failed         — record failed invoice + mark past_due (PR-9) OR
+//                                    append audit note to contract_invoices (G2a-2)
+//   invoice.voided                 — mark contract_invoices.void (G2a-2)
 //
 // Env vars:
 //   STRIPE_WEBHOOK_SECRET — from Stripe dashboard → Webhooks → Signing secret
@@ -26,6 +30,7 @@ const router  = express.Router();
 const db     = require('../db');
 const logger = require('../utils/logger');
 const { getStripe, isStripeEnabled } = require('../utils/stripe');
+const { handleContractInvoiceEvent } = require('../utils/contractWebhookHandler'); // G2a-2
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -231,6 +236,12 @@ router.post(
         // ── PR-9: Invoice paid ───────────────────────────────────────────────
         case 'invoice.paid': {
           const stripeInvoice = event.data.object;
+
+          // G2a-2: If this is a contract invoice (metadata.flexrz_channel==='contract'),
+          // route to contract_invoices handler and skip tenant_invoices path.
+          const handled = await handleContractInvoiceEvent('invoice.paid', stripeInvoice);
+          if (handled) break;
+
           const customerId    = stripeInvoice.customer;
           const tenantId      = await getTenantIdByCustomer(customerId);
 
@@ -257,6 +268,11 @@ router.post(
         // ── PR-9: Invoice payment failed ─────────────────────────────────────
         case 'invoice.payment_failed': {
           const stripeInvoice = event.data.object;
+
+          // G2a-2: Route to contract handler if this is a contract invoice
+          const handled = await handleContractInvoiceEvent('invoice.payment_failed', stripeInvoice);
+          if (handled) break;
+
           const customerId    = stripeInvoice.customer;
           const tenantId      = await getTenantIdByCustomer(customerId);
 
@@ -295,6 +311,25 @@ router.post(
           // Mark subscription as past_due
           await syncSubscriptionStatus(tenantId, 'past_due');
           logger.warn({ tenantId }, 'Subscription payment failed — marked past_due');
+          break;
+        }
+
+        // ── G2a-2: Invoice voided (contract invoice cancellation) ────────────
+        case 'invoice.voided': {
+          const stripeInvoice = event.data.object;
+          const handled = await handleContractInvoiceEvent('invoice.voided', stripeInvoice);
+          if (!handled) {
+            logger.info({ stripeInvoiceId: stripeInvoice.id },
+                        'invoice.voided: not a contract channel invoice, no tenant_invoices handler');
+          }
+          break;
+        }
+
+        // ── G2a-2: Invoice finalized / sent (informational for contracts) ────
+        case 'invoice.finalized':
+        case 'invoice.sent': {
+          const stripeInvoice = event.data.object;
+          await handleContractInvoiceEvent(event.type, stripeInvoice);
           break;
         }
 
