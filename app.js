@@ -67,6 +67,10 @@ const sessionsRouter       = require("./routes/sessions");        // PR-SESSIONS
 const tenantPrepaidCatalogRouter = require("./routes/tenantPrepaidCatalog");
 const tenantPrepaidAccountingRouter = require("./routes/tenantPrepaidAccounting");
 
+// G2a-1: Long-term contracts + payment schedule templates
+const contractsRouter                 = require("./routes/contracts");
+const paymentScheduleTemplatesRouter  = require("./routes/paymentScheduleTemplates");
+
 // PAY-1: Network payment routes
 const networkPaymentsRouter       = require("./routes/networkPayments");
 const tenantPaymentSettingsRouter = require("./routes/tenantPaymentSettings");
@@ -177,6 +181,10 @@ app.use("/api/rental-availability", availabilityLimiter, require("./routes/renta
 app.use("/api/rental-payment-links", require("./routes/rentalPaymentLinks"));
 app.use("/api/maintenance-tickets", require("./routes/maintenanceTickets")); // PR-MAINT-1
 app.use("/api/booking-contracts",   require("./routes/bookingContracts"));   // PR-CONTRACT-1
+
+// G2a-1: long-term contracts + payment schedule templates
+app.use("/api/contracts",                  contractsRouter);
+app.use("/api/payment-schedule-templates", paymentScheduleTemplatesRouter);
 
 app.use("/api/reminder-job", reminderJobRouter);
 app.use("/api/sms-reminder-job", smsReminderJobRouter); // Patch H3.5.2 — SMS booking reminders
