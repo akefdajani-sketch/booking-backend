@@ -336,9 +336,19 @@ router.post("/", requireAppAuth, requireTenant, async (req, res) => {
     // startTime and the server happily accepted it (see bug with BRD-TS-
     // 260420-0069, booked from Malaysia for 06:00 Asia/Amman while Birdie
     // opens at 10:00). Admin/owner bypass is exempt.
+    //
+    // NIGHTLY/RENTAL EXEMPTION (April 2026):
+    // Nightly bookings span 24h+ windows (check-in today, check-out tomorrow
+    // or later) and are not bound by the same desk-open business hours that
+    // apply to time-slot services. A hotel room is "usable" around the clock
+    // once handed over; whether the front-desk is staffed at 3 AM is a
+    // separate operational question that should NOT block a reservation.
+    // Skipping Gate A here preserves the Birdie bug-fix intent (time-slot
+    // tenants still get working-hours enforcement on create) while letting
+    // nightly tenants (aqababooking, etc.) accept bookings as designed.
     const bookingPolicy = await getBookingPolicy(resolvedTenantId);
 
-    if (!isAdminBypass && bookingPolicy.enforceWorkingHours) {
+    if (!isAdminBypass && !isNightlyBooking && bookingPolicy.enforceWorkingHours) {
       let tenantTzForPolicy = 'UTC';
       try {
         const tzRow = await db.query(
