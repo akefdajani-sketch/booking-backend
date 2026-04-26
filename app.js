@@ -81,6 +81,7 @@ const tenantTwilioSettingsRouter = require("./routes/tenantTwilioSettings");
 const reminderJobRouter = require("./routes/reminderJob");
 const smsReminderJobRouter = require("./routes/smsReminderJob"); // Patch H3.5.2 — SMS booking reminders
 const whatsappReminderJobRouter = require("./routes/whatsappReminderJob"); // Patch H3.5.3 — WhatsApp booking reminders
+const contractInvoiceReminderJobRouter = require("./routes/contractInvoiceReminderJob"); // G2a-S3d — Contract invoice reminders
 
 // PR-TAX-1: Tax & service charge configuration
 const tenantTaxRouter = require("./routes/tenantTax");
@@ -186,9 +187,13 @@ app.use("/api/booking-contracts",   require("./routes/bookingContracts"));   // 
 app.use("/api/contracts",                  contractsRouter);
 app.use("/api/payment-schedule-templates", paymentScheduleTemplatesRouter);
 
+// G1: Group / class bookings (sessions, seats, waitlist, instructors)
+app.use("/api/classes",                    require("./routes/classes"));
+
 app.use("/api/reminder-job", reminderJobRouter);
 app.use("/api/sms-reminder-job", smsReminderJobRouter); // Patch H3.5.2 — SMS booking reminders
 app.use("/api/whatsapp-reminder-job", whatsappReminderJobRouter); // Patch H3.5.3 — WhatsApp booking reminders
+app.use("/api/contract-invoice-reminder-job", contractInvoiceReminderJobRouter); // G2a-S3d — Contract invoice reminders
 
 app.use("/api/membership-plans", membershipPlansRouter);
 app.use("/api/customer-memberships", customerMembershipsRouter);

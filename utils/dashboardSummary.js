@@ -738,6 +738,12 @@ async function getDashboardSummary({ tenantId, tenantSlug, mode, dateStr, staffI
           ON b.tenant_id=st.tenant_id
          AND b.staff_id=st.id
         WHERE st.tenant_id=$1
+          -- v2 §3.1 fix: only show staff who actually deliver services.
+          -- Filters out owner/admin login accounts that are not service providers.
+          AND EXISTS (
+            SELECT 1 FROM staff_service_links ssl
+            WHERE ssl.staff_id = st.id
+          )
         GROUP BY st.id, st.name
         ORDER BY booked_minutes DESC, staff_name ASC
         LIMIT 6
@@ -1022,10 +1028,24 @@ async function getDashboardSummary({ tenantId, tenantSlug, mode, dateStr, staffI
 
   // ─── PR-RENTAL-DASH: Nightly occupancy & revenue by unit ──────────────────
   // Only runs when the tenant has nightly-mode resources.
+  // v2 §3.1 fix: leak onto time-slot tenants. Two issues now both gated:
+  //   1. Was counting ALL tenant resources as total_units (Birdie golf bays
+  //      were leaking in). Now restricts the COUNT to nightly rental_types.
+  //   2. Belt-and-braces: also gate on tenants.rental_mode_enabled, so even
+  //      if a time-slot tenant has stray rental_type rows, the widget stays
+  //      hidden until the tenant explicitly opts in.
   // Non-fatal — wrapped in try/catch so a schema gap never breaks the dashboard.
   let nightlyKpis = null;
   try {
-    // Check if this tenant has any nightly resources
+    // First: tenant must have rental mode explicitly enabled.
+    const rentalCheck = await db.query(
+      `SELECT COALESCE(rental_mode_enabled, FALSE) AS enabled
+       FROM tenants WHERE id = $1`,
+      [tenantId]
+    );
+    const rentalEnabled = Boolean(rentalCheck.rows?.[0]?.enabled);
+
+    // Then: tenant must have at least one nightly-typed resource.
     const nightlyCheck = await db.query(
       `SELECT COUNT(*)::int AS cnt
        FROM resources
@@ -1035,10 +1055,12 @@ async function getDashboardSummary({ tenantId, tenantSlug, mode, dateStr, staffI
     );
     const hasNightlyUnits = Number(nightlyCheck.rows?.[0]?.cnt || 0) > 0;
 
-    if (hasNightlyUnits) {
-      // Total nightly units available for this tenant
+    if (rentalEnabled && hasNightlyUnits) {
+      // Total nightly units (NOT total tenant resources — that was the leak).
       const unitCountRes = await db.query(
-        `SELECT COUNT(*)::int AS total_units FROM resources WHERE tenant_id=$1`,
+        `SELECT COUNT(*)::int AS total_units FROM resources
+         WHERE tenant_id=$1
+           AND rental_type IN ('short_term','long_term','flexible')`,
         [tenantId]
       );
       const totalUnits = Number(unitCountRes.rows?.[0]?.total_units || 0);
