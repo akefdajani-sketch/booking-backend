@@ -3,6 +3,7 @@
 // routes/contracts.js
 // G2a-1: Long-term contracts router.
 // G2a-2: Adds PDF generation + invoice send/mark-paid sub-routes.
+// G2a-S3d: Adds renewal sub-route.
 //
 // Mount in app.js:
 //   app.use('/api/contracts', require('./routes/contracts'));
@@ -16,6 +17,7 @@
 //   pdf.js       — POST   /:id/generate-pdf                   (generate unsigned PDF)
 //   invoices.js  — POST   /:id/invoices/:i/send-invoice       (create Stripe invoice)
 //                  POST   /:id/invoices/:i/mark-paid          (manual receipt)
+//   renew.js     — POST   /:id/renew                          (create renewal contract)
 
 const express = require('express');
 const router  = express.Router();
@@ -26,5 +28,6 @@ require('./contracts/get')(router);
 require('./contracts/update')(router);
 require('./contracts/pdf')(router);       // G2a-2
 require('./contracts/invoices')(router);  // G2a-2
+require('./contracts/renew')(router);     // G2a-S3d
 
 module.exports = router;
