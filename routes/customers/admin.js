@@ -325,7 +325,11 @@ router.get(
           b.service_id, COALESCE(s.name, 'Unknown') AS service_name,
           b.staff_id,   COALESCE(st.name, NULL)    AS staff_name,
           b.resource_id, COALESCE(r.name, NULL)    AS resource_name,
-          b.start_time, b.end_time,
+          b.start_time,
+          -- Production DB drift fix (§3.5 customer drawer 500 error):
+          -- some tenant DBs are missing bookings.end_time. Compute it from
+          -- start_time + duration_minutes so this query works on every DB.
+          (b.start_time + (COALESCE(b.duration_minutes, 0) || ' minutes')::interval) AS end_time,
           b.status, b.charge_amount, b.booking_code,
           b.created_at, b.updated_at
         FROM bookings b
