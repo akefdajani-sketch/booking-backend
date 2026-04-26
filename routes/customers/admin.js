@@ -327,11 +327,16 @@ router.get(
           b.resource_id, COALESCE(r.name, NULL)    AS resource_name,
           b.start_time,
           -- Production DB drift fix (§3.5 customer drawer 500 error):
-          -- some tenant DBs are missing bookings.end_time. Compute it from
-          -- start_time + duration_minutes so this query works on every DB.
-          (b.start_time + (COALESCE(b.duration_minutes, 0) || ' minutes')::interval) AS end_time,
+          -- production DB lacks bookings.end_time AND bookings.updated_at.
+          -- Compute end_time from start_time + duration_minutes (pattern
+          -- proven in utils/bookings.js); return NULL for updated_at since
+          -- it's not in the API contract that callers depend on. If a
+          -- migration is later run that adds these columns, swap these
+          -- expressions back to b.end_time / b.updated_at.
+          (b.start_time + (COALESCE(b.duration_minutes, 0)::int || ' minutes')::interval) AS end_time,
           b.status, b.charge_amount, b.booking_code,
-          b.created_at, b.updated_at
+          b.created_at,
+          NULL::timestamptz AS updated_at
         FROM bookings b
         LEFT JOIN services  s  ON s.id  = b.service_id
         LEFT JOIN staff     st ON st.id = b.staff_id
