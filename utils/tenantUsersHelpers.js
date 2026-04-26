@@ -88,6 +88,13 @@ async function getTenantMeColumnSet() {
     "admin_email",
     "branding",
     "brand_overrides_json",
+    // Business-type feature flags (added by migrations 023 + 051).
+    // Listed here so getTenantMeColumnSet detects them in the DB and the
+    // SELECT in getTenantDetail can use the real column instead of the
+    // FALSE fallback. Without this entry, colSet.has() always returns
+    // false and every tenant looks like a non-rental, non-classes tenant.
+    "rental_mode_enabled",
+    "class_bookings_enabled",
   ];
   const r = await db.query(
     `
@@ -108,6 +115,14 @@ function tenantMeSelectExpr(colSet, canonical, legacy) {
   if (legacy && colSet.has(legacy)) return `${legacy} AS ${canonical}`;
   if (canonical === "branding" || canonical === "brand_overrides_json") {
     return `NULL::jsonb AS ${canonical}`;
+  }
+  // Boolean feature flags (rental/classes/etc.) — fall back to FALSE so the
+  // frontend can read them as a boolean even if the column hasn't landed yet.
+  if (
+    canonical === "rental_mode_enabled" ||
+    canonical === "class_bookings_enabled"
+  ) {
+    return `FALSE::boolean AS ${canonical}`;
   }
   return `NULL::text AS ${canonical}`;
 }
@@ -141,6 +156,12 @@ async function getTenantDetail(tenantId, tenantSlug) {
     tenantMeSelectExpr(cols, "country_code"),
     tenantMeSelectExpr(cols, "admin_name"),
     tenantMeSelectExpr(cols, "admin_email"),
+    // Business-type feature flags read by the tenant Ops UI to gate
+    // tabs in the side nav (Contracts → rental, Classes → classes).
+    // Fall back to FALSE if the column doesn't exist yet (boolean
+    // fallback wired in tenantMeSelectExpr above).
+    tenantMeSelectExpr(cols, "rental_mode_enabled"),
+    tenantMeSelectExpr(cols, "class_bookings_enabled"),
   ].join(",\n        ");
 
   const result = await db.query(
