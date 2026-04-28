@@ -89,7 +89,25 @@ router.get("/", requireAdmin, async (req, res) => {
     `;
 
     const result = await db.query(q);
-    return res.json({ tenants: result.rows, schemaCompat: true });
+    const tenants = result.rows;
+
+    // F: enrich each tenant with subscription state (plan, status,
+    // trial_ends_at, badge). Single batch query — no N+1.
+    try {
+      const { getSubscriptionsForTenants } = require('../../utils/tenantSubscriptionEnricher');
+      const subsById = await getSubscriptionsForTenants(tenants.map(t => t.id));
+      for (const t of tenants) {
+        t.subscription = subsById.get(t.id) || null;
+      }
+    } catch (subErr) {
+      // Schema-compat: if anything goes wrong (missing tables on a fresh
+      // install, etc), keep the response shape but with null subscriptions.
+      // The Tenants list still renders.
+      console.warn('Tenant enrichment failed (non-fatal):', subErr.message);
+      for (const t of tenants) t.subscription = null;
+    }
+
+    return res.json({ tenants, schemaCompat: true });
   } catch (err) {
     console.error("Error loading tenants:", err);
     return res.status(500).json({ error: "Failed to load tenants" });
