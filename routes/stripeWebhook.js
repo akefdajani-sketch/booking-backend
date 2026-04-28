@@ -31,6 +31,13 @@ const db     = require('../db');
 const logger = require('../utils/logger');
 const { getStripe, isStripeEnabled } = require('../utils/stripe');
 const { handleContractInvoiceEvent } = require('../utils/contractWebhookHandler'); // G2a-2
+const { sendEmail } = require('../utils/email'); // G: transactional email
+const {
+  renderTrialWarning,
+  renderPaymentFailed,
+  renderWelcome,
+  renderTrialConverted,
+} = require('../utils/emailTemplates'); // G: transactional email templates
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -92,6 +99,61 @@ async function activateSubscription(tenantId, planCode, stripeSubscriptionId) {
   );
 
   logger.info({ tenantId, planCode, stripeSubscriptionId }, 'Subscription activated');
+}
+
+// ─── G: Email helper ─────────────────────────────────────────────────────────
+// Fetch the data needed to send a tenant-level transactional email in one
+// query. Returns null when the tenant has no recipient — the caller's
+// responsibility is to skip the send. We never throw — DB hiccups become
+// "no email" rather than webhook failures.
+
+async function getTenantEmailContext(tenantId) {
+  if (!tenantId) return null;
+  try {
+    const { rows } = await db.query(`
+      SELECT
+        t.id          AS tenant_id,
+        t.slug,
+        t.name        AS tenant_name,
+        t.admin_email,
+        t.billing_email,
+        ts.trial_ends_at,
+        sp.code       AS plan_code,
+        sp.name       AS plan_name
+      FROM tenants t
+      LEFT JOIN LATERAL (
+        SELECT plan_id, trial_ends_at
+        FROM tenant_subscriptions
+        WHERE tenant_id = t.id
+        ORDER BY COALESCE(started_at, NOW()) DESC
+        LIMIT 1
+      ) ts ON TRUE
+      LEFT JOIN saas_plans sp ON sp.id = ts.plan_id
+      WHERE t.id = $1
+      LIMIT 1
+    `, [tenantId]);
+
+    const row = rows[0];
+    if (!row) return null;
+
+    // Prefer billing_email for billing-related events, fall back to admin_email.
+    const recipient = row.billing_email || row.admin_email;
+    if (!recipient) return null;
+
+    return {
+      tenantId: row.tenant_id,
+      slug: row.slug,
+      tenantName: row.tenant_name,
+      recipient,
+      trialEndsAt: row.trial_ends_at,
+      planCode: row.plan_code,
+      planName: row.plan_name,
+      manageBillingUrl: `${(process.env.APP_BASE_URL || 'https://app.flexrz.com').replace(/\/+$/, '')}/owner/${encodeURIComponent(row.slug)}`,
+    };
+  } catch (err) {
+    logger.warn({ err: err.message, tenantId }, 'getTenantEmailContext failed (non-fatal)');
+    return null;
+  }
 }
 
 // ─── PR-9: Invoice + Payment helpers ─────────────────────────────────────────
@@ -211,6 +273,30 @@ router.post(
           }
 
           await activateSubscription(tenantId, planCode, subId);
+
+          // G: send welcome email (async, non-fatal — webhook still 200s on email failure)
+          try {
+            const ctx = await getTenantEmailContext(tenantId);
+            if (ctx) {
+              const tpl = renderWelcome({
+                tenantName: ctx.tenantName,
+                planName: ctx.planName,
+                trialEndsAt: ctx.trialEndsAt,
+                dashboardUrl: ctx.manageBillingUrl,
+              });
+              await sendEmail({
+                kind: 'welcome',
+                to: ctx.recipient,
+                subject: tpl.subject,
+                html: tpl.html,
+                text: tpl.text,
+                tenantId,
+                meta: { plan_code: ctx.planCode, source: 'checkout.session.completed' },
+              });
+            }
+          } catch (emailErr) {
+            logger.error({ err: emailErr.message, tenantId }, 'welcome email failed (non-fatal)');
+          }
           break;
         }
 
@@ -262,6 +348,53 @@ router.post(
             { tenantId, trialEndsAt: sub.trial_end },
             'Trial ending soon — warning timestamp recorded'
           );
+
+          // G: send the trial-warning email. The trial_warning_sent_at column
+          // doubles as a dedup guard — Stripe sometimes re-fires this event,
+          // and COALESCE ensures we only stamp once. We re-check inside this
+          // try block by reading the just-updated row, so the second webhook
+          // delivery is a no-op email-wise.
+          try {
+            const dedup = await db.query(
+              `SELECT trial_warning_sent_at FROM tenant_subscriptions
+                WHERE id = (
+                  SELECT id FROM tenant_subscriptions
+                   WHERE tenant_id = $1
+                   ORDER BY COALESCE(started_at, NOW()) DESC
+                   LIMIT 1
+                )`,
+              [tenantId]
+            );
+            const stampedAt = dedup.rows[0]?.trial_warning_sent_at;
+            // Only send if the stamp is fresh (within last 5 minutes — accounts
+            // for clock skew without ever sending duplicates on retry).
+            const isFresh = stampedAt && (Date.now() - new Date(stampedAt).getTime()) < 5 * 60 * 1000;
+            if (!isFresh) {
+              logger.info({ tenantId }, 'trial_will_end: warning already sent (stale stamp), skipping email');
+              break;
+            }
+
+            const ctx = await getTenantEmailContext(tenantId);
+            if (ctx) {
+              const tpl = renderTrialWarning({
+                tenantName: ctx.tenantName,
+                trialEndsAt: sub.trial_end ? new Date(sub.trial_end * 1000) : ctx.trialEndsAt,
+                planName: ctx.planName,
+                manageBillingUrl: ctx.manageBillingUrl,
+              });
+              await sendEmail({
+                kind: 'trial_warning',
+                to: ctx.recipient,
+                subject: tpl.subject,
+                html: tpl.html,
+                text: tpl.text,
+                tenantId,
+                meta: { trial_ends_at: sub.trial_end, plan_code: ctx.planCode },
+              });
+            }
+          } catch (emailErr) {
+            logger.error({ err: emailErr.message, tenantId }, 'trial_warning email failed (non-fatal)');
+          }
           break;
         }
 
@@ -343,6 +476,36 @@ router.post(
           // Mark subscription as past_due
           await syncSubscriptionStatus(tenantId, 'past_due');
           logger.warn({ tenantId }, 'Subscription payment failed — marked past_due');
+
+          // G: send payment-failed email so the tenant can update their card
+          // before Stripe gives up retrying. Non-fatal — webhook still 200s
+          // on email failure (Stripe will retry the webhook on a real failure).
+          try {
+            const ctx = await getTenantEmailContext(tenantId);
+            if (ctx) {
+              const tpl = renderPaymentFailed({
+                tenantName: ctx.tenantName,
+                amountCents: stripeInvoice.amount_due ?? 0,
+                currency: stripeInvoice.currency,
+                manageBillingUrl: ctx.manageBillingUrl,
+              });
+              await sendEmail({
+                kind: 'payment_failed',
+                to: ctx.recipient,
+                subject: tpl.subject,
+                html: tpl.html,
+                text: tpl.text,
+                tenantId,
+                meta: {
+                  invoice_id: stripeInvoice.id,
+                  amount_cents: stripeInvoice.amount_due,
+                  currency: stripeInvoice.currency,
+                },
+              });
+            }
+          } catch (emailErr) {
+            logger.error({ err: emailErr.message, tenantId }, 'payment_failed email failed (non-fatal)');
+          }
           break;
         }
 
