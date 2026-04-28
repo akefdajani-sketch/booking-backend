@@ -91,6 +91,7 @@ async function fetchKpis() {
     revenueTodayCents,
     pastDue,
     trialsEndingSoon,
+    activationRate, // L: activated tenants / tenants ≥7d old
   ] = await Promise.all([
     // 1. Active tenants — any tenant with status in ('active','trialing') on
     //    their most-recent subscription. Uses DISTINCT ON to pick the latest
@@ -168,6 +169,43 @@ async function fetchKpis() {
         AND trial_ends_at <= NOW() + INTERVAL '3 days'
         AND trial_ends_at >= NOW()
     `).then(r => r.rows[0]?.n || 0),
+
+    // 7. L: Activation rate — % of tenants ≥7 days old that have completed
+    //    setup. A tenant is "activated" if it has at least one service AND
+    //    one resource AND one booking. We deliberately use a stricter
+    //    definition than the in-app checklist (6 milestones) so the KPI
+    //    measures "actually using the product" not "filled out forms".
+    //
+    //    Cohort cutoff = 7d so we don't penalize tenants who just signed up.
+    //    Returns { numerator, denominator } so the frontend can render
+    //    "12/18 tenants (67%)".
+    db.query(`
+      WITH cohort AS (
+        SELECT DISTINCT ON (ts.tenant_id) ts.tenant_id, ts.started_at
+          FROM tenant_subscriptions ts
+        ORDER BY ts.tenant_id, COALESCE(ts.started_at, NOW()) DESC
+      ),
+      eligible AS (
+        SELECT tenant_id FROM cohort
+         WHERE started_at IS NOT NULL
+           AND started_at < NOW() - INTERVAL '7 days'
+      ),
+      activated AS (
+        SELECT e.tenant_id FROM eligible e
+         WHERE EXISTS (SELECT 1 FROM services s  WHERE s.tenant_id  = e.tenant_id AND s.active = true)
+           AND EXISTS (SELECT 1 FROM resources r WHERE r.tenant_id  = e.tenant_id AND r.active = true)
+           AND EXISTS (SELECT 1 FROM bookings  b WHERE b.tenant_id  = e.tenant_id AND b.deleted_at IS NULL)
+      )
+      SELECT
+        (SELECT COUNT(*)::int FROM eligible)  AS denominator,
+        (SELECT COUNT(*)::int FROM activated) AS numerator
+    `).then(r => {
+      const row = r.rows[0] || { numerator: 0, denominator: 0 };
+      const num = Number(row.numerator || 0);
+      const den = Number(row.denominator || 0);
+      const pct = den > 0 ? Math.round((num / den) * 100) : 0;
+      return { numerator: num, denominator: den, pct };
+    }),
   ]);
 
   // Format helpers
@@ -219,6 +257,20 @@ async function fetchKpis() {
       value: trialsEndingSoon,
       sublabel: 'within 3 days',
       tone: trialsEndingSoon > 0 ? 'warn' : 'neutral',
+    },
+    {
+      key: 'activationRate',
+      label: 'Activation rate',
+      value: `${activationRate.pct}%`,
+      sublabel: `${activationRate.numerator} / ${activationRate.denominator} tenants ≥7 days old`,
+      tone:
+        activationRate.denominator === 0
+          ? 'neutral'
+          : activationRate.pct >= 60
+            ? 'good'
+            : activationRate.pct >= 30
+              ? 'neutral'
+              : 'warn',
     },
   ];
 }
