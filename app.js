@@ -82,6 +82,7 @@ const tenantNotificationSettingsRouter = require("./routes/tenantNotificationSet
 const ownerDashboardRouter = require("./routes/ownerDashboard"); // E: platform-admin overview metrics
 const trialSweepJobRouter = require("./routes/trialSweepJob"); // F: defensive trial-status sync via Stripe
 const emailReminderJobRouter = require("./routes/emailReminderJob"); // PR H — Email booking reminders
+const emailLogRouter = require("./routes/emailLog"); // G2: owner-facing email log surface
 const reminderJobRouter = require("./routes/reminderJob");
 const smsReminderJobRouter = require("./routes/smsReminderJob"); // Patch H3.5.2 — SMS booking reminders
 const whatsappReminderJobRouter = require("./routes/whatsappReminderJob"); // Patch H3.5.3 — WhatsApp booking reminders
@@ -247,6 +248,7 @@ app.use("/api/media-library", mediaLibraryRoutes);
 
 // ─── Theme system ─────────────────────────────────────────────────────────────
 app.use("/api/admin/themes", adminThemesRouter);
+app.use("/api/email-log", emailLogRouter); // G2: GET email log + stats (admin-only)
 app.use("/api/jobs", trialSweepJobRouter); // F: POST /api/jobs/trial-sweep (admin-only)
 app.use("/api/owner-dashboard", ownerDashboardRouter); // E: GET /overview (admin-only)
 app.use("/api/admin/tenants", adminTenantsThemeRouter);
