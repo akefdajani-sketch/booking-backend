@@ -416,14 +416,12 @@ router.delete("/:id", requireTenant, requireAdminOrTenantRole("staff"), async (r
     if (currentStatus !== nextStatus && joined?.customer_phone) {
       setImmediate(async () => {
         try {
-          const { hasFeature } = require('../../utils/entitlements');
-          const smsEnabled = await hasFeature(tenantId, 'sms_notifications').catch(() => false);
-          if (!smsEnabled) return;
+          // D5: 3-gate check (plan + creds + per-event toggle).
+          const { shouldSendSMS } = require('../../utils/notificationGates');
+          const gate = await shouldSendSMS(tenantId, 'cancellations');
+          if (!gate.ok) return;
 
           const { sendBookingCancellation } = require('../../utils/twilioSms');
-          const { isTwilioEnabledForTenant } = require('../../utils/twilioCredentials');
-          const twEnabled = await isTwilioEnabledForTenant(tenantId).catch(() => false);
-          if (!twEnabled) return;
 
           const tRes = await pool.query(
             'SELECT name, timezone FROM tenants WHERE id = $1',
