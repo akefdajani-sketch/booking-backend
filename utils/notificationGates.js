@@ -59,6 +59,14 @@ const WA_TOGGLE_COLUMNS = Object.freeze({
   cancellations: 'wa_cancellations_enabled',
 });
 
+// PR H — email channel
+const EMAIL_TOGGLE_COLUMNS = Object.freeze({
+  confirmations: 'email_confirmations_enabled',
+  reminder_24h:  'email_reminder_24h_enabled',
+  reminder_1h:   'email_reminder_1h_enabled',
+  cancellations: 'email_cancellations_enabled',
+});
+
 const VALID_EVENT_KINDS = Object.freeze(['confirmations', 'reminder_24h', 'reminder_1h', 'cancellations']);
 
 // ─── Toggle reader ──────────────────────────────────────────────────────────
@@ -147,14 +155,52 @@ async function shouldSendWA(tenantId, eventKind) {
 }
 
 /**
- * Read all 8 toggles for a tenant in one query — used by the GET endpoint
- * that powers the frontend matrix. Returns sane defaults if columns are
- * missing (migration not applied) so the UI still renders.
+ * Should an email fire for this tenant + event? PR H.
+ *
+ * Same 3-gate composition as shouldSendSMS/shouldSendWA but with one
+ * notable difference: email credentials are PLATFORM-managed, not
+ * per-tenant. There's a single Resend account (RESEND_API_KEY) shared
+ * across all tenants. The credential check here is therefore just "is
+ * RESEND_API_KEY set?", which utils/email.js already handles by failing
+ * open. We still explicitly check it here so the gating stays auditable
+ * and a missing key surfaces as 'creds_missing' in logs rather than
+ * silently routing into utils/email.js to be downgraded to 'skipped'.
+ *
+ * Plan feature: email_reminders (Growth+ in saas_plan_features matrix
+ * from migration 040). Used for both confirmations AND reminders despite
+ * the name — matches the existing pricing-page promise.
+ */
+async function shouldSendEmail(tenantId, eventKind) {
+  if (!VALID_EVENT_KINDS.includes(eventKind)) {
+    return { ok: false, reason: `invalid eventKind "${eventKind}"` };
+  }
+
+  const planEnabled = await hasFeature(tenantId, 'email_reminders').catch(() => false);
+  if (!planEnabled) return { ok: false, reason: 'plan_disabled' };
+
+  // Platform-level creds check. Mirrors what utils/email.js does internally
+  // but surfaced here so reason codes stay consistent across SMS/WA/email.
+  const platformKey = String(process.env.RESEND_API_KEY || '').trim();
+  if (!platformKey) return { ok: false, reason: 'creds_missing' };
+
+  const column = EMAIL_TOGGLE_COLUMNS[eventKind];
+  const toggleOn = await readToggle(tenantId, column);
+  if (!toggleOn) return { ok: false, reason: 'tenant_toggle_off' };
+
+  return { ok: true };
+}
+
+/**
+ * Read all 12 toggles for a tenant in one query (PR H — was 8 in D5).
+ * Used by the GET endpoint that powers the frontend matrix. Returns
+ * sane defaults if columns are missing (migration not applied) so the
+ * UI still renders.
  */
 async function getTenantNotificationToggles(tenantId) {
   const allColumns = [
     ...Object.values(SMS_TOGGLE_COLUMNS),
     ...Object.values(WA_TOGGLE_COLUMNS),
+    ...Object.values(EMAIL_TOGGLE_COLUMNS),
   ];
   try {
     const { rows } = await db.query(
@@ -176,15 +222,22 @@ async function getTenantNotificationToggles(tenantId) {
         reminder_1h:   row.wa_reminder_1h_enabled   !== false,
         cancellations: row.wa_cancellations_enabled !== false,
       },
+      email: {
+        confirmations: row.email_confirmations_enabled !== false,
+        reminder_24h:  row.email_reminder_24h_enabled  !== false,
+        reminder_1h:   row.email_reminder_1h_enabled   !== false,
+        cancellations: row.email_cancellations_enabled !== false,
+      },
     };
   } catch (err) {
     if (/column .* does not exist/i.test(err.message || '')) {
-      // Pre-052 schema — return legacy "all enabled" defaults so the UI
-      // doesn't break before the migration is run.
+      // Pre-052/055 schema — return legacy "all enabled" defaults so the UI
+      // doesn't break before migrations are run.
       logger.warn({ tenantId }, 'notification toggle columns missing — returning legacy defaults');
       return {
         sms:      { confirmations: true, reminder_24h: true, reminder_1h: true, cancellations: true },
         whatsapp: { confirmations: true, reminder_24h: true, reminder_1h: true, cancellations: true },
+        email:    { confirmations: true, reminder_24h: true, reminder_1h: true, cancellations: true },
       };
     }
     throw err;
@@ -215,6 +268,7 @@ async function updateTenantNotificationToggles(tenantId, patch) {
 
   consider(patch?.sms,      SMS_TOGGLE_COLUMNS);
   consider(patch?.whatsapp, WA_TOGGLE_COLUMNS);
+  consider(patch?.email,    EMAIL_TOGGLE_COLUMNS); // PR H
 
   if (updates.length === 0) {
     // Nothing to update — just return the current state.
@@ -231,6 +285,7 @@ async function updateTenantNotificationToggles(tenantId, patch) {
 module.exports = {
   shouldSendSMS,
   shouldSendWA,
+  shouldSendEmail, // PR H
   getTenantNotificationToggles,
   updateTenantNotificationToggles,
   VALID_EVENT_KINDS,

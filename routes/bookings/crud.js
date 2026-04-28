@@ -458,6 +458,69 @@ router.delete("/:id", requireTenant, requireAdminOrTenantRole("staff"), async (r
     }
     // ── End SMS cancellation ──────────────────────────────────────────────
 
+    // ── H: Customer email cancellation (non-fatal, fires after response) ──
+    // Mirrors SMS path but for customer.email.
+    if (currentStatus !== nextStatus && joined?.customer_email) {
+      setImmediate(async () => {
+        try {
+          const { shouldSendEmail } = require('../../utils/notificationGates');
+          const gate = await shouldSendEmail(tenantId, 'cancellations');
+          if (!gate.ok) return;
+
+          const { sendEmail } = require('../../utils/email');
+          const { renderBookingCancellation } = require('../../utils/customerBookingEmailTemplates');
+
+          const tRes = await pool.query(
+            `SELECT name, slug, branding->>'timezone' AS timezone, branding->>'primary_color' AS primary_color
+               FROM tenants WHERE id = $1`,
+            [tenantId]
+          );
+          const tRow = tRes.rows?.[0] || {};
+          const APP_BASE = (process.env.APP_BASE_URL || 'https://app.flexrz.com').replace(/\/+$/, '');
+
+          const tpl = renderBookingCancellation({
+            tenantName:     tRow.name || 'Flexrz',
+            tenantTimezone: tRow.timezone || 'Asia/Amman',
+            bookingUrl:     tRow.slug ? `${APP_BASE}/book/${encodeURIComponent(tRow.slug)}` : null,
+            customerName:   joined.customer_name,
+            serviceName:    joined.service_name,
+            resourceName:   joined.resource_name,
+            startTime:      joined.start_time,
+            bookingCode:    joined.booking_code,
+            accentColor:    tRow.primary_color,
+          });
+
+          const emailResult = await sendEmail({
+            kind: 'booking_cancellation',
+            to: joined.customer_email,
+            subject: tpl.subject,
+            html: tpl.html,
+            text: tpl.text,
+            tenantId,
+            meta: { booking_id: bookingId },
+          });
+
+          if (emailResult.status === 'sent') {
+            require('../../utils/logger').info(
+              { bookingId, recipient: joined.customer_email },
+              'Email cancellation sent'
+            );
+          } else {
+            require('../../utils/logger').info(
+              { bookingId, status: emailResult.status, error: emailResult.error },
+              'Email cancellation not sent'
+            );
+          }
+        } catch (emailErr) {
+          require('../../utils/logger').error(
+            { err: emailErr.message, bookingId },
+            'Email cancellation error (non-fatal)'
+          );
+        }
+      });
+    }
+    // ── End email cancellation ────────────────────────────────────────────
+
     return res.json({ booking: joined });
   } catch (err) {
     console.error("Error cancelling booking:", err);

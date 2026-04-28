@@ -81,6 +81,7 @@ const tenantTwilioSettingsRouter = require("./routes/tenantTwilioSettings");
 const tenantNotificationSettingsRouter = require("./routes/tenantNotificationSettings"); // D5: per-tenant notification toggle matrix
 const ownerDashboardRouter = require("./routes/ownerDashboard"); // E: platform-admin overview metrics
 const trialSweepJobRouter = require("./routes/trialSweepJob"); // F: defensive trial-status sync via Stripe
+const emailReminderJobRouter = require("./routes/emailReminderJob"); // PR H — Email booking reminders
 const reminderJobRouter = require("./routes/reminderJob");
 const smsReminderJobRouter = require("./routes/smsReminderJob"); // Patch H3.5.2 — SMS booking reminders
 const whatsappReminderJobRouter = require("./routes/whatsappReminderJob"); // Patch H3.5.3 — WhatsApp booking reminders
@@ -196,6 +197,7 @@ app.use("/api/classes",                    require("./routes/classes"));
 app.use("/api/reminder-job", reminderJobRouter);
 app.use("/api/sms-reminder-job", smsReminderJobRouter); // Patch H3.5.2 — SMS booking reminders
 app.use("/api/whatsapp-reminder-job", whatsappReminderJobRouter); // Patch H3.5.3 — WhatsApp booking reminders
+app.use("/api/email-reminder-job", emailReminderJobRouter); // PR H — Email booking reminders
 app.use("/api/contract-invoice-reminder-job", contractInvoiceReminderJobRouter); // G2a-S3d — Contract invoice reminders
 
 app.use("/api/membership-plans", membershipPlansRouter);

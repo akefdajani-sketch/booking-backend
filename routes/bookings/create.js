@@ -1444,6 +1444,76 @@ const charge_amount = (finalCustomerMembershipId || prepaidApplied) ? 0 : price_
       }
       // ── End SMS ───────────────────────────────────────────────────────────
 
+      // ── H: Customer email booking confirmation (non-fatal, fires after response) ──
+      // Same setImmediate pattern as SMS/WA so the email send never blocks
+      // the booking response. Gated through shouldSendEmail (plan + creds +
+      // per-event toggle). Customer must have an email on file.
+      if (created && joined?.customer_email) {
+        setImmediate(async () => {
+          try {
+            const { shouldSendEmail } = require('../../utils/notificationGates');
+            const gate = await shouldSendEmail(resolvedTenantId, 'confirmations');
+            if (!gate.ok) return;
+
+            const { sendEmail } = require('../../utils/email');
+            const { renderBookingConfirmation } = require('../../utils/customerBookingEmailTemplates');
+
+            const tRes = await require('../../db').query(
+              `SELECT name, slug, branding->>'timezone' AS timezone, branding->>'primary_color' AS primary_color
+                 FROM tenants WHERE id = $1`,
+              [resolvedTenantId]
+            );
+            const tRow = tRes.rows?.[0] || {};
+
+            const APP_BASE = (process.env.APP_BASE_URL || 'https://app.flexrz.com').replace(/\/+$/, '');
+            const tpl = renderBookingConfirmation({
+              tenantName:     tRow.name || 'Flexrz',
+              tenantTimezone: tRow.timezone || 'Asia/Amman',
+              bookingUrl:     tRow.slug ? `${APP_BASE}/book/${encodeURIComponent(tRow.slug)}` : null,
+              customerName:   joined.customer_name,
+              serviceName:    joined.service_name,
+              resourceName:   joined.resource_name,
+              startTime:      joined.start_time,
+              bookingCode:    joined.booking_code,
+              accentColor:    tRow.primary_color,
+            });
+
+            const emailResult = await sendEmail({
+              kind: 'booking_confirmation',
+              to: joined.customer_email,
+              subject: tpl.subject,
+              html: tpl.html,
+              text: tpl.text,
+              tenantId: resolvedTenantId,
+              meta: { booking_id: bookingId },
+            });
+
+            if (emailResult.status === 'sent') {
+              require('../../utils/logger').info(
+                { bookingId, recipient: joined.customer_email, messageId: emailResult.messageId },
+                'Email confirmation sent'
+              );
+            } else if (emailResult.status === 'skipped') {
+              require('../../utils/logger').info(
+                { bookingId, reason: emailResult.error || 'no api key / kill switch' },
+                'Email confirmation skipped'
+              );
+            } else {
+              require('../../utils/logger').warn(
+                { bookingId, error: emailResult.error },
+                'Email confirmation failed'
+              );
+            }
+          } catch (emailErr) {
+            require('../../utils/logger').error(
+              { err: emailErr.message, bookingId },
+              'Email confirmation error (non-fatal)'
+            );
+          }
+        });
+      }
+      // ── End email ─────────────────────────────────────────────────────────
+
       return res.status(created ? 201 : 200).json({
         booking: joined,
         replay: !created,
