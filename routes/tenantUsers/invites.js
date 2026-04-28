@@ -88,6 +88,47 @@ router.post(
         ? `${base}/invite?token=${token}`
         : null;
 
+      // G: send the invite email. Non-fatal — if email fails, the invite row
+      // still exists in the DB and the inviter sees the URL in the API
+      // response so they can copy/paste manually. Logs the failure for
+      // observability.
+      if (inviteUrl) {
+        try {
+          const { sendEmail } = require('../../utils/email');
+          const { renderInvite } = require('../../utils/emailTemplates');
+
+          // Look up tenant name + inviter name in one query for the template.
+          const ctxRes = await db.query(
+            `SELECT t.name AS tenant_name, u.name AS inviter_name
+               FROM tenants t
+               LEFT JOIN users u ON u.id = $2
+              WHERE t.id = $1
+              LIMIT 1`,
+            [req.tenantId, req.user.id]
+          );
+          const ctxRow = ctxRes.rows[0] || {};
+          const tpl = renderInvite({
+            tenantName:  ctxRow.tenant_name  || 'your team',
+            inviterName: ctxRow.inviter_name || 'A teammate',
+            role,
+            inviteUrl,
+            expiresAt:   expiresAt.toISOString(),
+          });
+          await sendEmail({
+            kind: 'invite',
+            to: email,
+            subject: tpl.subject,
+            html: tpl.html,
+            text: tpl.text,
+            tenantId: req.tenantId,
+            meta: { invite_id: ins.rows[0].id, role, inviter_user_id: req.user.id },
+          });
+        } catch (emailErr) {
+          // Already logged inside sendEmail. Don't fail the invite create.
+          console.warn('Invite email send failed (non-fatal):', emailErr.message);
+        }
+      }
+
       return res.status(201).json({
         ok: true,
         invite: {
@@ -331,6 +372,43 @@ router.post(
 
       const base = String(process.env.FRONTEND_BASE_URL || "").replace(/\/$/, "");
       const inviteUrl = base ? `${base}/invite?token=${token}` : null;
+
+      // G: send the resent invite email. Same non-fatal pattern as the
+      // initial invite create — log on failure, don't block the API response.
+      if (inviteUrl) {
+        try {
+          const { sendEmail } = require('../../utils/email');
+          const { renderInvite } = require('../../utils/emailTemplates');
+
+          const ctxRes = await db.query(
+            `SELECT t.name AS tenant_name, u.name AS inviter_name
+               FROM tenants t
+               LEFT JOIN users u ON u.id = $2
+              WHERE t.id = $1
+              LIMIT 1`,
+            [req.tenantId, req.user.id]
+          );
+          const ctxRow = ctxRes.rows[0] || {};
+          const tpl = renderInvite({
+            tenantName:  ctxRow.tenant_name  || 'your team',
+            inviterName: ctxRow.inviter_name || 'A teammate',
+            role:        upd.rows[0].role,
+            inviteUrl,
+            expiresAt:   expiresAt.toISOString(),
+          });
+          await sendEmail({
+            kind: 'invite',
+            to: upd.rows[0].email,
+            subject: tpl.subject,
+            html: tpl.html,
+            text: tpl.text,
+            tenantId: req.tenantId,
+            meta: { invite_id: upd.rows[0].id, role: upd.rows[0].role, resend: true, inviter_user_id: req.user.id },
+          });
+        } catch (emailErr) {
+          console.warn('Resend invite email failed (non-fatal):', emailErr.message);
+        }
+      }
 
       return res.json({
         ok: true,
