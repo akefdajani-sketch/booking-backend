@@ -34,8 +34,24 @@ const SUPPORT_HINT = 'Reply to this email if you have questions about your booki
 
 // ─── Shared shell ────────────────────────────────────────────────────────────
 
-function shell({ tenantName, preheader, heading, bodyHtml, ctaLabel, ctaUrl, footerNote, accentColor }) {
+function shell({ tenantName, tenantLogoUrl, preheader, heading, bodyHtml, ctaLabel, ctaUrl, footerNote, accentColor }) {
   const accent = accentColor || '#0f172a';
+  // J.3: When the tenant has a logo URL, render a small <img> alongside the
+  // name. Falls back to text-only header if no URL provided. Logo is sized
+  // conservatively (24px tall, max 120px wide) so it works in all email
+  // clients including Outlook's brittle table renderer.
+  const headerInner = tenantLogoUrl
+    ? `<table role="presentation" cellpadding="0" cellspacing="0" style="border-collapse:collapse;">
+         <tr>
+           <td style="padding-right:10px;vertical-align:middle;">
+             <img src="${escape(tenantLogoUrl)}" alt="${escape(tenantName || '')}" height="24" style="display:block;height:24px;max-width:120px;width:auto;border:0;outline:none;" />
+           </td>
+           <td style="vertical-align:middle;">
+             <div style="font-size:18px;font-weight:800;color:#ffffff;letter-spacing:-0.3px;">${escape(tenantName || 'Booking')}</div>
+           </td>
+         </tr>
+       </table>`
+    : `<div style="font-size:18px;font-weight:800;color:#ffffff;letter-spacing:-0.3px;">${escape(tenantName || 'Booking')}</div>`;
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -54,7 +70,7 @@ function shell({ tenantName, preheader, heading, bodyHtml, ctaLabel, ctaUrl, foo
           <!-- Header -->
           <tr>
             <td style="padding:24px 32px;border-bottom:1px solid #e2e8f0;background-color:${accent};">
-              <div style="font-size:18px;font-weight:800;color:#ffffff;letter-spacing:-0.3px;">${escape(tenantName || 'Booking')}</div>
+              ${headerInner}
             </td>
           </tr>
 
@@ -159,7 +175,7 @@ function plainTextSummary({ serviceName, resourceName, startTime, tenantTimezone
 
 function renderBookingConfirmation(ctx) {
   const {
-    tenantName, tenantTimezone, bookingUrl,
+    tenantName, tenantLogoUrl, tenantTimezone, bookingUrl,
     customerName, serviceName, resourceName, startTime, bookingCode,
     accentColor,
   } = ctx;
@@ -174,6 +190,7 @@ function renderBookingConfirmation(ctx) {
     subject: subject.trim(),
     html: shell({
       tenantName,
+      tenantLogoUrl,
       preheader: `Your booking with ${tenantName || 'us'} is confirmed`,
       heading: 'Booking confirmed',
       bodyHtml: body,
@@ -190,7 +207,7 @@ function renderBookingConfirmation(ctx) {
 
 function renderBookingReminder24h(ctx) {
   const {
-    tenantName, tenantTimezone, bookingUrl,
+    tenantName, tenantLogoUrl, tenantTimezone, bookingUrl,
     customerName, serviceName, resourceName, startTime, bookingCode,
     accentColor,
   } = ctx;
@@ -208,6 +225,7 @@ function renderBookingReminder24h(ctx) {
     subject,
     html: shell({
       tenantName,
+      tenantLogoUrl,
       preheader: `Booking tomorrow with ${tenantName || 'us'}`,
       heading: 'See you tomorrow',
       bodyHtml: body,
@@ -223,7 +241,7 @@ function renderBookingReminder24h(ctx) {
 
 function renderBookingReminder1h(ctx) {
   const {
-    tenantName, tenantTimezone, bookingUrl,
+    tenantName, tenantLogoUrl, tenantTimezone, bookingUrl,
     customerName, serviceName, resourceName, startTime, bookingCode,
     accentColor,
   } = ctx;
@@ -241,6 +259,7 @@ function renderBookingReminder1h(ctx) {
     subject,
     html: shell({
       tenantName,
+      tenantLogoUrl,
       preheader: `Booking starts in 1 hour`,
       heading: 'See you in an hour',
       bodyHtml: body,
@@ -256,7 +275,7 @@ function renderBookingReminder1h(ctx) {
 
 function renderBookingCancellation(ctx) {
   const {
-    tenantName, tenantTimezone, bookingUrl,
+    tenantName, tenantLogoUrl, tenantTimezone, bookingUrl,
     customerName, serviceName, resourceName, startTime, bookingCode,
     accentColor,
   } = ctx;
@@ -274,6 +293,7 @@ function renderBookingCancellation(ctx) {
     subject,
     html: shell({
       tenantName,
+      tenantLogoUrl,
       preheader: `Your ${tenantName || ''} booking has been cancelled`,
       heading: 'Booking cancelled',
       bodyHtml: body,

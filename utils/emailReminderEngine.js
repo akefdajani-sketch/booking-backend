@@ -93,6 +93,7 @@ async function processWindow(window) {
            r.name AS resource_name,
            t.name AS tenant_name,
            t.slug AS tenant_slug,
+           t.logo_url AS tenant_logo_url,
            t.branding->>'timezone' AS tenant_timezone,
            t.branding->>'primary_color' AS tenant_accent_color
     FROM bookings b
@@ -125,6 +126,7 @@ async function processWindow(window) {
 
       const tpl = render({
         tenantName:     booking.tenant_name || 'Flexrz',
+        tenantLogoUrl:  booking.tenant_logo_url || null, // J.3: brand the email
         tenantTimezone: booking.tenant_timezone || 'Asia/Amman',
         bookingUrl:     booking.tenant_slug ? `${APP_BASE}/book/${encodeURIComponent(booking.tenant_slug)}` : null,
         customerName:   booking.customer_name,

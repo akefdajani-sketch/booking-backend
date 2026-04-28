@@ -1459,7 +1459,7 @@ const charge_amount = (finalCustomerMembershipId || prepaidApplied) ? 0 : price_
             const { renderBookingConfirmation } = require('../../utils/customerBookingEmailTemplates');
 
             const tRes = await require('../../db').query(
-              `SELECT name, slug, branding->>'timezone' AS timezone, branding->>'primary_color' AS primary_color
+              `SELECT name, slug, logo_url, branding->>'timezone' AS timezone, branding->>'primary_color' AS primary_color
                  FROM tenants WHERE id = $1`,
               [resolvedTenantId]
             );
@@ -1468,6 +1468,7 @@ const charge_amount = (finalCustomerMembershipId || prepaidApplied) ? 0 : price_
             const APP_BASE = (process.env.APP_BASE_URL || 'https://app.flexrz.com').replace(/\/+$/, '');
             const tpl = renderBookingConfirmation({
               tenantName:     tRow.name || 'Flexrz',
+              tenantLogoUrl:  tRow.logo_url || null, // J.3: brand the email
               tenantTimezone: tRow.timezone || 'Asia/Amman',
               bookingUrl:     tRow.slug ? `${APP_BASE}/book/${encodeURIComponent(tRow.slug)}` : null,
               customerName:   joined.customer_name,

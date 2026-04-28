@@ -471,7 +471,7 @@ router.delete("/:id", requireTenant, requireAdminOrTenantRole("staff"), async (r
           const { renderBookingCancellation } = require('../../utils/customerBookingEmailTemplates');
 
           const tRes = await pool.query(
-            `SELECT name, slug, branding->>'timezone' AS timezone, branding->>'primary_color' AS primary_color
+            `SELECT name, slug, logo_url, branding->>'timezone' AS timezone, branding->>'primary_color' AS primary_color
                FROM tenants WHERE id = $1`,
             [tenantId]
           );
@@ -480,6 +480,7 @@ router.delete("/:id", requireTenant, requireAdminOrTenantRole("staff"), async (r
 
           const tpl = renderBookingCancellation({
             tenantName:     tRow.name || 'Flexrz',
+            tenantLogoUrl:  tRow.logo_url || null, // J.3: brand the email
             tenantTimezone: tRow.timezone || 'Asia/Amman',
             bookingUrl:     tRow.slug ? `${APP_BASE}/book/${encodeURIComponent(tRow.slug)}` : null,
             customerName:   joined.customer_name,
