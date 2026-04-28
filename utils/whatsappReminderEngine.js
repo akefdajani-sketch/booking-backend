@@ -14,8 +14,7 @@
 const db     = require('../db');
 const logger = require('./logger');
 const { sendBookingReminder } = require('./whatsapp');
-const { isWhatsAppEnabledForTenant } = require('./whatsappCredentials');
-const { hasFeature } = require('./entitlements');
+const { shouldSendWA } = require('./notificationGates'); // D5: 3-gate composer (plan + creds + per-event toggle)
 
 const WINDOW_24H = {
   minMinutesAhead: 23 * 60,
@@ -82,11 +81,10 @@ async function processWindow(window) {
 
   for (const booking of rows) {
     try {
-      const waEnabled = await hasFeature(booking.tenant_id, 'whatsapp_notifications').catch(() => false);
-      if (!waEnabled) { stats.skipped++; continue; }
-
-      const credsEnabled = await isWhatsAppEnabledForTenant(booking.tenant_id).catch(() => false);
-      if (!credsEnabled) { stats.skipped++; continue; }
+      // D5: 3-gate check (plan + creds + per-event toggle).
+      const eventKind = windowType === '1h' ? 'reminder_1h' : 'reminder_24h';
+      const gate = await shouldSendWA(booking.tenant_id, eventKind);
+      if (!gate.ok) { stats.skipped++; continue; }
 
       const sendResult = await sendBookingReminder({
         booking: {

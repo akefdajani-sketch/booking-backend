@@ -33,8 +33,7 @@
 const db     = require('../db');
 const logger = require('./logger');
 const { sendBookingReminder } = require('./twilioSms');
-const { isTwilioEnabledForTenant } = require('./twilioCredentials');
-const { hasFeature } = require('./entitlements');
+const { shouldSendSMS } = require('./notificationGates'); // D5: 3-gate composer (plan + creds + per-event toggle)
 
 // ---------------------------------------------------------------------------
 // Window config — how wide to catch bookings relative to "now".
@@ -118,16 +117,13 @@ async function processWindow(window) {
 
   for (const booking of rows) {
     try {
-      // Gate 1: tenant plan includes SMS (uses D4 FINISH entitlement fallback)
-      const smsEnabled = await hasFeature(booking.tenant_id, 'sms_notifications').catch(() => false);
-      if (!smsEnabled) {
-        stats.skipped++;
-        continue;
-      }
-
-      // Gate 2: tenant has Twilio creds
-      const twEnabled = await isTwilioEnabledForTenant(booking.tenant_id).catch(() => false);
-      if (!twEnabled) {
+      // D5: 3-gate check (plan + creds + per-event toggle). Replaces the
+      // pre-D5 separate hasFeature() and isTwilioEnabledForTenant() calls.
+      // The eventKind matches the windowType so a tenant can disable just
+      // the 24h or just the 1h reminder.
+      const eventKind = windowType === '1h' ? 'reminder_1h' : 'reminder_24h';
+      const gate = await shouldSendSMS(booking.tenant_id, eventKind);
+      if (!gate.ok) {
         stats.skipped++;
         continue;
       }

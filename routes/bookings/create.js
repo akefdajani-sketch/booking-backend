@@ -1313,17 +1313,18 @@ const charge_amount = (finalCustomerMembershipId || prepaidApplied) ? 0 : price_
       }
 
       // ── WhatsApp booking confirmation (non-fatal, fires after response) ──
-      // Only send on new bookings (not replays), only when phone exists.
-      // Runs after the response is built so it never delays the customer.
-      // WA-1: tenantId passed so per-tenant DB credentials are used first.
+      // D5: gating composed in utils/notificationGates.js. The pre-D5 inline
+      // check used isWhatsAppEnabledForTenant() with isWhatsAppConfigured()
+      // env-var fallback; that fallback now lives inside shouldSendWA's creds
+      // resolver so behavior is unchanged.
       if (created && joined?.customer_phone) {
         setImmediate(async () => {
           try {
-            const { sendBookingConfirmation, isWhatsAppConfigured } = require('../../utils/whatsapp');
-            const { isWhatsAppEnabledForTenant } = require('../../utils/whatsappCredentials');
-            // Check DB credentials first (WA-1), fall back to env var check
-            const waEnabled = await isWhatsAppEnabledForTenant(resolvedTenantId).catch(() => isWhatsAppConfigured());
-            if (!waEnabled) return;
+            const { shouldSendWA } = require('../../utils/notificationGates');
+            const gate = await shouldSendWA(resolvedTenantId, 'confirmations');
+            if (!gate.ok) return;
+
+            const { sendBookingConfirmation } = require('../../utils/whatsapp');
 
             // Load tenant name + timezone for the message
             const tRes = await require('../../db').query('SELECT name, timezone FROM tenants WHERE id = $1', [resolvedTenantId]);
@@ -1395,19 +1396,17 @@ const charge_amount = (finalCustomerMembershipId || prepaidApplied) ? 0 : price_
       // ── End WhatsApp ──────────────────────────────────────────────────────
 
       // ── H3.5: Twilio SMS booking confirmation (non-fatal, fires after response) ──
-      // Gated on the 'sms_notifications' feature (Pro plan). Independent of WhatsApp
-      // so prospects on Pro-without-WhatsApp still get SMS, and vice versa.
+      // D5: gating composed in utils/notificationGates.js (plan + creds +
+      // per-event toggle). Replaces the pre-D5 separate hasFeature() and
+      // isTwilioEnabledForTenant() calls inline below.
       if (created && joined?.customer_phone) {
         setImmediate(async () => {
           try {
-            const { hasFeature } = require('../../utils/entitlements');
-            const smsEnabled = await hasFeature(resolvedTenantId, 'sms_notifications').catch(() => false);
-            if (!smsEnabled) return;
+            const { shouldSendSMS } = require('../../utils/notificationGates');
+            const gate = await shouldSendSMS(resolvedTenantId, 'confirmations');
+            if (!gate.ok) return;
 
             const { sendBookingConfirmation: sendSmsConfirmation } = require('../../utils/twilioSms');
-            const { isTwilioEnabledForTenant } = require('../../utils/twilioCredentials');
-            const twEnabled = await isTwilioEnabledForTenant(resolvedTenantId).catch(() => false);
-            if (!twEnabled) return;
 
             const tRes = await require('../../db').query(
               'SELECT name, timezone FROM tenants WHERE id = $1',
