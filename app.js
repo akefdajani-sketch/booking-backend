@@ -79,6 +79,7 @@ const tenantWhatsAppSettingsRouter = require("./routes/tenantWhatsAppSettings");
 // PR 145: Per-tenant Twilio settings
 const tenantTwilioSettingsRouter = require("./routes/tenantTwilioSettings");
 const tenantNotificationSettingsRouter = require("./routes/tenantNotificationSettings"); // D5: per-tenant notification toggle matrix
+const ownerDashboardRouter = require("./routes/ownerDashboard"); // E: platform-admin overview metrics
 const reminderJobRouter = require("./routes/reminderJob");
 const smsReminderJobRouter = require("./routes/smsReminderJob"); // Patch H3.5.2 — SMS booking reminders
 const whatsappReminderJobRouter = require("./routes/whatsappReminderJob"); // Patch H3.5.3 — WhatsApp booking reminders
@@ -243,6 +244,7 @@ app.use("/api/media-library", mediaLibraryRoutes);
 
 // ─── Theme system ─────────────────────────────────────────────────────────────
 app.use("/api/admin/themes", adminThemesRouter);
+app.use("/api/owner-dashboard", ownerDashboardRouter); // E: GET /overview (admin-only)
 app.use("/api/admin/tenants", adminTenantsThemeRouter);
 app.use("/api/public/tenant-theme", publicApiLimiter, publicTenantThemeRouter);
 
