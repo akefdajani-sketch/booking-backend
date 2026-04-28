@@ -84,6 +84,7 @@ const trialSweepJobRouter = require("./routes/trialSweepJob"); // F: defensive t
 const emailReminderJobRouter = require("./routes/emailReminderJob"); // PR H — Email booking reminders
 const emailLogRouter = require("./routes/emailLog"); // G2: owner-facing email log surface
 const ownerAlertsRouter = require("./routes/ownerAlerts"); // I: real platform-health alerts
+const tenantEmailLogRouter = require("./routes/tenantEmailLog"); // K: tenant-side email log
 const reminderJobRouter = require("./routes/reminderJob");
 const smsReminderJobRouter = require("./routes/smsReminderJob"); // Patch H3.5.2 — SMS booking reminders
 const whatsappReminderJobRouter = require("./routes/whatsappReminderJob"); // Patch H3.5.3 — WhatsApp booking reminders
@@ -226,6 +227,7 @@ app.use("/api/tenant", tenantPaymentSettingsRouter); // PAY-1: /:slug/payment-se
 app.use("/api/tenant", tenantWhatsAppSettingsRouter); // WA-1: /:slug/whatsapp-settings
 app.use("/api/tenant", tenantTwilioSettingsRouter);   // PR 145: /:slug/twilio-settings
 app.use("/api/tenant", tenantNotificationSettingsRouter); // D5: /:slug/notification-settings
+app.use("/api/tenant", tenantEmailLogRouter); // K: /:slug/email-log + /:slug/email-log/stats (owner only)
 app.use("/api/tenant", tenantTaxRouter);              // PR-TAX-1: /:slug/tax-config
 app.use("/api/invites", invitesRouter);
 
