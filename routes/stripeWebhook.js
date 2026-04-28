@@ -233,6 +233,38 @@ router.post(
           break;
         }
 
+        // ── F: Trial ending soon — Stripe fires this 3 days before trial_ends_at ──
+        // Set trial_warning_sent_at on the local subscription row (dedup
+        // guard + audit trail). Also surfaces as an Owner Dashboard signal
+        // through the new "Trials ending" KPI in E, and the Trials Ending
+        // badge on the Tenants list in F.
+        case 'customer.subscription.trial_will_end': {
+          const sub        = event.data.object;
+          const customerId = sub.customer;
+          const tenantId   = await getTenantIdByCustomer(customerId);
+          if (!tenantId) {
+            logger.warn({ customerId }, 'trial_will_end: tenant not found for customer');
+            break;
+          }
+          // Touch only the most-recent subscription row (mirrors syncSubscriptionStatus).
+          await db.query(
+            `UPDATE tenant_subscriptions
+                SET trial_warning_sent_at = COALESCE(trial_warning_sent_at, NOW())
+              WHERE id = (
+                SELECT id FROM tenant_subscriptions
+                 WHERE tenant_id = $1
+                 ORDER BY COALESCE(started_at, NOW()) DESC
+                 LIMIT 1
+              )`,
+            [tenantId]
+          );
+          logger.info(
+            { tenantId, trialEndsAt: sub.trial_end },
+            'Trial ending soon — warning timestamp recorded'
+          );
+          break;
+        }
+
         // ── PR-9: Invoice paid ───────────────────────────────────────────────
         case 'invoice.paid': {
           const stripeInvoice = event.data.object;
