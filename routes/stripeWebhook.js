@@ -427,6 +427,69 @@ router.post(
             { tenantId, stripeInvoiceId: stripeInvoice.id, invoiceId },
             'Invoice paid — record created'
           );
+
+          // J.1: Send "Subscription is now active" email if this is the first
+          // paid invoice after a trial conversion.
+          //
+          // Detection logic (idempotent, no new schema):
+          //   - email_log already has a row with kind='trial_converted' for this
+          //     tenant → skip (already sent, this is a recurring invoice)
+          //   - Otherwise → send + email_log records the kind='trial_converted'
+          //     row, future invoices will be skipped.
+          //
+          // Schema-compat: if email_log table missing (G migration 054 not run),
+          // sendEmail() handles that gracefully and the whole block is wrapped
+          // in try/catch so webhook still 200s.
+          try {
+            const dedupCheck = await db.query(
+              `SELECT 1
+                 FROM email_log
+                WHERE tenant_id = $1
+                  AND kind      = 'trial_converted'
+                  AND status    = 'sent'
+                LIMIT 1`,
+              [tenantId]
+            );
+            const alreadySent = dedupCheck.rows.length > 0;
+
+            if (!alreadySent) {
+              const ctx = await getTenantEmailContext(tenantId);
+              if (ctx) {
+                const tpl = renderTrialConverted({
+                  tenantName: ctx.tenantName,
+                  planName: ctx.planName,
+                  amountCents: stripeInvoice.amount_paid || 0,
+                  currency: (stripeInvoice.currency || 'usd').toLowerCase(),
+                  manageBillingUrl: ctx.manageBillingUrl,
+                });
+                await sendEmail({
+                  kind: 'trial_converted',
+                  to: ctx.recipient,
+                  subject: tpl.subject,
+                  html: tpl.html,
+                  text: tpl.text,
+                  tenantId,
+                  meta: {
+                    plan_code: ctx.planCode,
+                    stripe_invoice_id: stripeInvoice.id,
+                    amount_paid_cents: stripeInvoice.amount_paid,
+                    currency: stripeInvoice.currency,
+                    source: 'invoice.paid',
+                  },
+                });
+                logger.info({ tenantId, stripeInvoiceId: stripeInvoice.id }, 'trial_converted email sent');
+              }
+            }
+          } catch (emailErr) {
+            // Schema-compat: email_log table may not exist yet — treat as "first
+            // time" and let sendEmail() decide if it can ship. If sendEmail also
+            // fails, log it but don't fail the webhook.
+            if (/relation .*email_log.* does not exist/i.test(emailErr.message || '')) {
+              logger.info({ tenantId }, 'trial_converted dedup check skipped (email_log table missing)');
+            } else {
+              logger.error({ err: emailErr.message, tenantId }, 'trial_converted email failed (non-fatal)');
+            }
+          }
           break;
         }
 
