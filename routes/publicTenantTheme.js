@@ -220,6 +220,27 @@ router.get("/:slug", async (req, res) => {
     ? draftBranding.image_settings
     : {};
 
+  // LOGO-SYNC: Logo DISPLAY settings (size + position + light variant URL)
+  // are always served from the draft branding so owner changes apply to
+  // the public page immediately — same UX customers already get for
+  // banner uploads and image-setting focal points. These four fields
+  // are the only ones we leak from draft; everything else (colors,
+  // layout, copy) still requires an explicit Publish step.
+  //
+  // Returns an object with ONLY the keys that are actually defined in
+  // the draft, so a `{...draftLogoOverlay}` spread is a no-op when the
+  // owner hasn't customised anything.
+  const draftAssets = draftBranding.assets && typeof draftBranding.assets === "object"
+    ? draftBranding.assets
+    : {};
+  const draftLogoOverlay = {};
+  if (typeof draftAssets.logoHeroSize   === "string" && draftAssets.logoHeroSize.trim())   draftLogoOverlay.logoHeroSize   = draftAssets.logoHeroSize;
+  if (typeof draftAssets.logoDrawerSize === "string" && draftAssets.logoDrawerSize.trim()) draftLogoOverlay.logoDrawerSize = draftAssets.logoDrawerSize;
+  if (typeof draftAssets.logoPosition   === "string" && draftAssets.logoPosition.trim())   draftLogoOverlay.logoPosition   = draftAssets.logoPosition;
+  if (typeof draftAssets.logoLightUrl   === "string" && draftAssets.logoLightUrl.trim())   draftLogoOverlay.logoLightUrl   = draftAssets.logoLightUrl;
+  // Legacy single-size field that pre-dates the split hero/drawer config.
+  if (typeof draftAssets.logoSize === "string" && draftAssets.logoSize.trim()) draftLogoOverlay.logoSize = draftAssets.logoSize;
+
   const effectiveBrandingWithBanners = effectiveBranding
     ? {
         ...effectiveBranding,
@@ -231,6 +252,10 @@ router.get("/:slug", async (req, res) => {
             ...((effectiveBranding.assets && effectiveBranding.assets.banners) || {}),
             ...tenantBanners,
           },
+          // LOGO-SYNC: overlay draft logo display settings on top of the
+          // published snapshot. Spread last so draft wins; absent draft
+          // fields fall through to whatever the published snapshot has.
+          ...draftLogoOverlay,
         },
         // Always overlay live focal point settings so they update without a publish step.
         image_settings: {
@@ -238,7 +263,21 @@ router.get("/:slug", async (req, res) => {
           ...tenantImageSettings,
         },
       }
-    : null;
+    // LOGO-SYNC: when the tenant hasn't published yet but the owner has
+    // saved logo display settings in draft, surface those alone so the
+    // public page reflects the saved size/position. Anything that would
+    // require a published snapshot (colors, layout, copy) stays absent.
+    : (Object.keys(draftLogoOverlay).length > 0
+        ? {
+            assets: {
+              logoUrl: tenant.logo_url || null,
+              coverImageUrl: tenant.cover_image_url || null,
+              banners: { ...tenantBanners },
+              ...draftLogoOverlay,
+            },
+            image_settings: { ...tenantImageSettings },
+          }
+        : null);
 
   // Theme schema is served as the *published* snapshot only.
   // If tenant isn't published yet, this must be null.
@@ -307,6 +346,10 @@ router.get("/:slug", async (req, res) => {
           ...snapshotBanners,
           ...Object.fromEntries(Object.entries(tenantBanners).filter(([, v]) => !!v)),
         },
+        // LOGO-SYNC: same overlay applied to the snapshot path, so
+        // bootstrapAssets the frontend reads stays in sync with the
+        // owner's draft logo display settings.
+        ...draftLogoOverlay,
       },
     };
   }
