@@ -7,6 +7,23 @@
 //
 // Both routes accept the same filter params — this eliminates the duplicated
 // param-parsing + filter-building logic that previously lived inline in each handler.
+//
+// PR DAY-VIEW-NIGHTLY-1 (Apr 2026):
+//   When scope=range with both `from` and `to` bounds, switched the date
+//   filter from "starts in range" (b.start_time >= $from AND b.start_time < $to)
+//   to "overlaps range" (b.start_time < $to AND b.end_time > $from).
+//
+//   This is required for the owner Day/Week/Month view to display:
+//     - Nightly bookings (which span multiple days; previously only showed
+//       on the checkin date because start_time = midnight of checkin_date)
+//     - Multi-hour timeslot bookings that cross day boundaries (rare but
+//       possible) — now correctly appear on every day they consume.
+//
+//   Single-day same-hour bookings (the timeslot common case) are returned
+//   identically by both formulations — no behavior change.
+//
+//   Other scopes (upcoming/past/all/latest) and single-bound usages keep
+//   the legacy single-bound start_time logic.
 
 /**
  * Parse and validate booking filter params from an Express req.query object.
@@ -82,13 +99,32 @@ function buildBookingListWhere(p, tenantId) {
     where.push("b.start_time >= NOW()"); // safe default
   }
 
-  if (p.fromTs) {
+  // ─── DAY-VIEW-NIGHTLY-1: overlap-based range filter ──────────────────────
+  // When scope=range with BOTH bounds, use overlap math so multi-day
+  // bookings (nightly stays, midnight-spanning timeslot reservations)
+  // appear on every day they consume.
+  //
+  // Formulation:  b.start_time < $to  AND  b.end_time > $from
+  //   - timeslot single-day same-hour: identical to legacy filter
+  //   - nightly span: now appears on each day in the span
+  //   - midnight-spanning timeslot: now appears on both days
+  //
+  // Other shapes (single bound, no bounds, cursor) keep legacy behavior.
+  if (p.scope === "range" && p.fromTs && p.toTs) {
     params.push(p.fromTs.toISOString());
-    where.push(`b.start_time >= $${params.length}`);
-  }
-  if (p.toTs) {
+    const fromIdx = params.length;
     params.push(p.toTs.toISOString());
-    where.push(`b.start_time < $${params.length}`);
+    const toIdx = params.length;
+    where.push(`b.start_time < $${toIdx} AND b.end_time > $${fromIdx}`);
+  } else {
+    if (p.fromTs) {
+      params.push(p.fromTs.toISOString());
+      where.push(`b.start_time >= $${params.length}`);
+    }
+    if (p.toTs) {
+      params.push(p.toTs.toISOString());
+      where.push(`b.start_time < $${params.length}`);
+    }
   }
 
   if (p.status && p.status !== "all") {
