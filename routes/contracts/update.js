@@ -27,11 +27,25 @@ const requireAppAuth           = require('../../middleware/requireAppAuth');
 const { requireTenant }        = require('../../middleware/requireTenant');
 const requireAdminOrTenantRole = require('../../middleware/requireAdminOrTenantRole');
 
-const { applyTemplate, roundMinor, insertContractInvoices } = require('../../utils/contracts');
+const {
+  applyTemplate,
+  roundMinor,
+  insertContractInvoices,
+  // CONTRACT-CALENDAR-1
+  materializeContractBooking,
+  cancelContractBooking,
+  syncResourceLeaseFromContract,
+} = require('../../utils/contracts');
 
 // Allowed transitions
+//
+// CONTRACT-FAST-CONFIRM-1: 'signed' is added as a permitted next state from
+// 'draft'. This is the fast-path for trusted recurring clients where the
+// host doesn't need a wet-signature ceremony — they confirm the contract
+// directly. Same gate as the regular 'signed' transition: requires
+// signed_by_name and sets signed_at/signature_method='manual'.
 const TRANSITIONS = {
-  draft:             new Set(['pending_signature', 'cancelled']),
+  draft:             new Set(['pending_signature', 'signed', 'cancelled']),
   pending_signature: new Set(['signed', 'cancelled']),
   signed:            new Set(['active', 'terminated']),
   active:            new Set(['completed', 'terminated', 'expired']),
@@ -282,17 +296,51 @@ module.exports = function mount(router) {
           }
         }
 
+        // ─── CONTRACT-CALENDAR-1: phantom booking + resource lease sync ───
+        // On any transition INTO signed (from draft fast-confirm or from
+        // pending_signature normal flow): materialize the phantom booking
+        // so the calendar reflects the lease, and sync resources.lease_*
+        // so the existing lease guard keeps the unit blocked even outside
+        // the bookings query path.
+        let phantomBookingResult = null;
+        let leaseSyncResult      = null;
+        if (nextStatus === 'signed' && current.status !== 'signed') {
+          phantomBookingResult = await materializeContractBooking(client, updated);
+          leaseSyncResult      = await syncResourceLeaseFromContract(client, updated, 'apply');
+
+          // Re-fetch updated row in case materialize wrote booking_id back
+          const refetch = await client.query(
+            `SELECT * FROM contracts WHERE id = $1 AND tenant_id = $2`,
+            [updated.id, tenantId]
+          );
+          if (refetch.rows.length) Object.assign(updated, refetch.rows[0]);
+        }
+
+        // On any transition OUT of signed/active into a terminal state,
+        // soft-delete the phantom booking and conditionally release the
+        // resource (only if auto_release_on_expiry is true).
+        const TERMINAL_STATES = new Set(['terminated', 'cancelled', 'expired', 'completed']);
+        const wasSignedOrActive = current.status === 'signed' || current.status === 'active';
+        if (wasSignedOrActive && TERMINAL_STATES.has(nextStatus)) {
+          phantomBookingResult = await cancelContractBooking(client, updated);
+          leaseSyncResult      = await syncResourceLeaseFromContract(client, updated, 'release');
+        }
+
         await client.query('COMMIT');
 
         logger.info({
           tenantId, contractId: id,
           fromStatus: current.status, toStatus: nextStatus,
           invoicesCreated: newInvoiceIds.length,
+          phantomBooking: phantomBookingResult,
+          leaseSync: leaseSyncResult,
         }, 'contract updated');
 
         return res.json({
           contract: updated,
           invoices_created: newInvoiceIds.length,
+          phantom_booking: phantomBookingResult,
+          lease_sync: leaseSyncResult,
         });
       } catch (err) {
         await client.query('ROLLBACK').catch(() => {});

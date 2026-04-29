@@ -328,6 +328,280 @@ function toFiniteNumber(v) {
 
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// CONTRACT-CALENDAR-1: Phantom booking + resource lease sync
+// ---------------------------------------------------------------------------
+//
+// When a contract transitions to 'signed' (or is created with initial_status
+// 'signed' via fast-confirm), three side-effects must happen inside the same
+// transaction:
+//
+//   1. materializeContractBooking() — INSERT a phantom row into bookings so
+//      the existing checkNightlyAvailability SQL (which only reads bookings)
+//      treats the unit as occupied for the contract window. Carries
+//      total_amount = contract.total_value so dashboard revenue queries
+//      pick it up automatically.
+//
+//   2. syncResourceLeaseFromContract(..., 'apply') — write contract dates +
+//      tenant name + monthly_rate onto resources.lease_* fields. This keeps
+//      the existing lease guard (rentalAvailabilityEngine.js lines 48–93)
+//      consistent and makes the resource edit panel reflect live contracts.
+//
+// On terminate/cancel/expire/completed:
+//
+//   1. cancelContractBooking() soft-deletes the phantom booking.
+//   2. syncResourceLeaseFromContract(..., 'release') reverts resource fields
+//      ONLY when contract.auto_release_on_expiry is true (matches the
+//      existing checkbox semantic — host can keep lease info historical).
+//
+// All three helpers are idempotent and take a transactional client (not the
+// pool) so callers control commit/rollback.
+
+/**
+ * Insert a phantom booking representing a contract on the calendar.
+ * Idempotent: if contract.booking_id already points to a non-deleted booking,
+ * returns that booking_id without inserting.
+ *
+ * Returns: { bookingId, created } where created=false means the booking
+ * already existed.
+ */
+async function materializeContractBooking(client, contract) {
+  if (!client || typeof client.query !== 'function') {
+    throw new Error('materializeContractBooking: transactional client required');
+  }
+  if (!contract || !contract.id || !contract.tenant_id) {
+    throw new Error('materializeContractBooking: contract with id and tenant_id required');
+  }
+  if (!contract.resource_id || !contract.start_date || !contract.end_date) {
+    throw new Error('materializeContractBooking: contract missing resource_id/start_date/end_date');
+  }
+
+  // Idempotency: if a phantom already exists and is live, do nothing.
+  if (contract.booking_id) {
+    const existing = await client.query(
+      `SELECT id FROM bookings
+        WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL
+        LIMIT 1`,
+      [contract.booking_id, contract.tenant_id]
+    );
+    if (existing.rows.length) {
+      return { bookingId: Number(contract.booking_id), created: false };
+    }
+  }
+
+  // Also defensive: search for an existing live phantom by contract_id.
+  // Handles the case where booking_id wasn't written back due to a partial
+  // historical state.
+  const orphan = await client.query(
+    `SELECT id FROM bookings
+      WHERE tenant_id = $1 AND contract_id = $2 AND deleted_at IS NULL
+      LIMIT 1`,
+    [contract.tenant_id, contract.id]
+  );
+  if (orphan.rows.length) {
+    const existingId = Number(orphan.rows[0].id);
+    // Backfill the link on contracts so future calls find it via the fast path.
+    await client.query(
+      `UPDATE contracts SET booking_id = $1, updated_at = NOW() WHERE id = $2`,
+      [existingId, contract.id]
+    );
+    return { bookingId: existingId, created: false };
+  }
+
+  const startDateStr = String(contract.start_date).slice(0, 10);
+  const endDateStr   = String(contract.end_date).slice(0, 10);
+
+  // Nights = ceil days between start and end (DATE columns, day-precision).
+  const startMs = Date.parse(`${startDateStr}T00:00:00Z`);
+  const endMs   = Date.parse(`${endDateStr}T00:00:00Z`);
+  const nights  = Math.max(1, Math.round((endMs - startMs) / (24 * 60 * 60 * 1000)));
+  const durationMinutes = nights * 1440;
+
+  // start_time / end_time as TIMESTAMPTZ at midnight UTC of the relevant
+  // dates. Matches the convention nightly bookings already use.
+  const startTimeIso = `${startDateStr}T00:00:00Z`;
+  const endTimeIso   = `${endDateStr}T00:00:00Z`;
+
+  const totalValue = roundMinor(Number(contract.total_value) || 0);
+  const currency   = String(contract.currency_code || 'JOD').trim().toUpperCase();
+
+  // Build column list dynamically — different deployments have different
+  // optional columns added by various migrations. We INSERT only what's
+  // present in the schema to stay backwards-compatible.
+  const colsRes = await client.query(
+    `SELECT column_name FROM information_schema.columns
+      WHERE table_schema = 'public' AND table_name = 'bookings'`
+  );
+  const cols = new Set(colsRes.rows.map(r => r.column_name));
+
+  const fields = ['tenant_id', 'customer_id', 'resource_id', 'start_time', 'end_time', 'duration_minutes', 'status'];
+  const values = [contract.tenant_id, contract.customer_id || null, contract.resource_id, startTimeIso, endTimeIso, durationMinutes, 'confirmed'];
+
+  const add = (col, val) => { if (cols.has(col)) { fields.push(col); values.push(val); } };
+
+  add('booking_mode',    'nightly');
+  add('stay_type',       'contract_stay');
+  add('checkin_date',    startDateStr);
+  add('checkout_date',   endDateStr);
+  add('nights_count',    nights);
+  add('contract_id',     contract.id);
+  add('total_amount',    totalValue);
+  add('charge_amount',   totalValue);
+  add('subtotal_amount', totalValue);
+  add('currency_code',   currency);
+  add('notes',           `Auto-generated from contract ${contract.contract_number || contract.id}`);
+
+  const placeholders = values.map((_, i) => `$${i + 1}`).join(', ');
+  const insertRes = await client.query(
+    `INSERT INTO bookings (${fields.join(', ')})
+     VALUES (${placeholders})
+     RETURNING id`,
+    values
+  );
+  const newId = Number(insertRes.rows[0].id);
+
+  // Link contract → booking
+  await client.query(
+    `UPDATE contracts SET booking_id = $1, updated_at = NOW() WHERE id = $2`,
+    [newId, contract.id]
+  );
+
+  return { bookingId: newId, created: true };
+}
+
+/**
+ * Soft-delete the phantom booking for a contract.
+ * Idempotent: if no live phantom exists, returns { cancelled: false }.
+ */
+async function cancelContractBooking(client, contract) {
+  if (!client || typeof client.query !== 'function') {
+    throw new Error('cancelContractBooking: transactional client required');
+  }
+  if (!contract || !contract.id || !contract.tenant_id) {
+    throw new Error('cancelContractBooking: contract with id and tenant_id required');
+  }
+
+  // Find live phantom — prefer contract.booking_id, fall back to scan by
+  // contract_id (handles legacy rows where the FK wasn't written back).
+  const found = await client.query(
+    `SELECT id FROM bookings
+      WHERE tenant_id = $1
+        AND (id = $2 OR contract_id = $3)
+        AND deleted_at IS NULL
+      LIMIT 1`,
+    [contract.tenant_id, contract.booking_id || -1, contract.id]
+  );
+  if (!found.rows.length) {
+    return { cancelled: false, bookingId: null };
+  }
+
+  const bookingId = Number(found.rows[0].id);
+  await client.query(
+    `UPDATE bookings
+        SET deleted_at = NOW(),
+            status = 'cancelled',
+            updated_at = NOW()
+      WHERE id = $1 AND tenant_id = $2`,
+    [bookingId, contract.tenant_id]
+  );
+  return { cancelled: true, bookingId };
+}
+
+/**
+ * Sync resource lease fields from contract.
+ * mode = 'apply'   → write contract dates onto resources.lease_*
+ * mode = 'release' → revert lease fields IF contract.auto_release_on_expiry
+ *
+ * Honors auto_release_on_expiry on release: when false, leaves fields alone
+ * so the host keeps historical lease info (matches existing checkbox UX).
+ */
+async function syncResourceLeaseFromContract(client, contract, mode) {
+  if (!client || typeof client.query !== 'function') {
+    throw new Error('syncResourceLeaseFromContract: transactional client required');
+  }
+  if (!contract || !contract.tenant_id || !contract.resource_id) {
+    throw new Error('syncResourceLeaseFromContract: contract with tenant_id and resource_id required');
+  }
+  if (mode !== 'apply' && mode !== 'release') {
+    throw new Error(`syncResourceLeaseFromContract: invalid mode "${mode}"`);
+  }
+
+  // Check what columns exist on resources — older deployments may lack
+  // some of the rental management fields.
+  const colsRes = await client.query(
+    `SELECT column_name FROM information_schema.columns
+      WHERE table_schema = 'public' AND table_name = 'resources'`
+  );
+  const cols = new Set(colsRes.rows.map(r => r.column_name));
+  if (!cols.has('rental_type')) return { synced: false, reason: 'rental_type column missing' };
+
+  if (mode === 'release') {
+    if (!contract.auto_release_on_expiry) {
+      return { synced: false, reason: 'auto_release_on_expiry=false; lease fields preserved' };
+    }
+    const sets = [`rental_type = 'short_term'`];
+    if (cols.has('lease_start'))           sets.push(`lease_start = NULL`);
+    if (cols.has('lease_end'))             sets.push(`lease_end = NULL`);
+    if (cols.has('lease_tenant_name'))     sets.push(`lease_tenant_name = NULL`);
+    if (cols.has('lease_tenant_phone'))    sets.push(`lease_tenant_phone = NULL`);
+    if (cols.has('monthly_rate'))          sets.push(`monthly_rate = NULL`);
+    sets.push(`updated_at = NOW()`);
+    await client.query(
+      `UPDATE resources SET ${sets.join(', ')}
+        WHERE id = $1 AND tenant_id = $2`,
+      [contract.resource_id, contract.tenant_id]
+    );
+    return { synced: true, mode: 'release' };
+  }
+
+  // mode === 'apply'
+  // Look up customer name + phone for lease_tenant_* fields.
+  let tenantName = null;
+  let tenantPhone = null;
+  if (contract.customer_id) {
+    const cust = await client.query(
+      `SELECT name, phone FROM customers WHERE id = $1 AND tenant_id = $2 LIMIT 1`,
+      [contract.customer_id, contract.tenant_id]
+    );
+    if (cust.rows.length) {
+      tenantName  = cust.rows[0].name  || null;
+      tenantPhone = cust.rows[0].phone || null;
+    }
+  }
+
+  const startDateStr = String(contract.start_date).slice(0, 10);
+  const endDateStr   = String(contract.end_date).slice(0, 10);
+  // 'flexible' means the unit auto-releases for short-term after lease end.
+  // 'long_term' means the unit is locked under lease until manually changed.
+  const rentalType = contract.auto_release_on_expiry ? 'flexible' : 'long_term';
+  const monthlyRate = contract.monthly_rate != null ? Number(contract.monthly_rate) : null;
+
+  const sets    = [`rental_type = $3`];
+  const params  = [contract.resource_id, contract.tenant_id, rentalType];
+  let p = 3;
+  const addCol = (col, val) => {
+    if (!cols.has(col)) return;
+    p += 1;
+    sets.push(`${col} = $${p}`);
+    params.push(val);
+  };
+  addCol('lease_start',           startDateStr);
+  addCol('lease_end',              endDateStr);
+  addCol('lease_tenant_name',      tenantName);
+  addCol('lease_tenant_phone',     tenantPhone);
+  addCol('monthly_rate',           monthlyRate);
+  addCol('auto_release_on_expiry', !!contract.auto_release_on_expiry);
+  sets.push(`updated_at = NOW()`);
+
+  await client.query(
+    `UPDATE resources SET ${sets.join(', ')}
+      WHERE id = $1 AND tenant_id = $2`,
+    params
+  );
+
+  return { synced: true, mode: 'apply', rentalType };
+}
+
 module.exports = {
   // Primary API
   generateContractNumber,
@@ -336,6 +610,11 @@ module.exports = {
   applyTemplate,
   computeMilestoneDueDate,
   insertContractInvoices,
+
+  // CONTRACT-CALENDAR-1: phantom-booking + lease sync
+  materializeContractBooking,
+  cancelContractBooking,
+  syncResourceLeaseFromContract,
 
   // Exposed for tests + rounding consistency
   roundMinor,
