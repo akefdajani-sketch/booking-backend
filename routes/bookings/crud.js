@@ -571,6 +571,12 @@ router.get("/stats", requireTenant, requireAdminOrTenantRole("staff"), resolveSt
         bookings_by_day:    [],
         revenue_by_day:     [],
         bookings_by_service: [],
+        // PR M
+        revenue_by_service: [],
+        bookings_by_hour:   [],
+        bookings_by_dow:    [],
+        avg_booking_value:  0,
+        repeat_customer:    { rate: 0, repeat_count: 0, total: 0 },
       });
     }
     // Use a helper fragment + param append so each query shares the same scope
@@ -734,6 +740,101 @@ router.get("/stats", requireTenant, requireAdminOrTenantRole("staff"), resolveSt
       topResources = resRes.rows;
     }
 
+    // ── PR M (Metrics expansion) ─────────────────────────────────────────────
+    // 5 new analytics datasets, all over the same window/scope as the existing
+    // queries. Each is a single SQL aggregate — total cost ~30-50ms across all
+    // 5 on a typical prod DB.
+
+    // 1. Revenue by service — top 10. Distinct from bookings_by_service which
+    //    is COUNT-based; this is SUM-based. Different question:
+    //    "which services make money?" vs "which are most popular?"
+    const revenueByServiceRes = await db.query(
+      `SELECT
+         COALESCE(s.name, 'Unknown') AS service_name,
+         COALESCE(SUM(b.charge_amount) FILTER (WHERE b.status = 'confirmed'), 0)::numeric AS revenue
+       FROM bookings b
+       LEFT JOIN services s ON s.id = b.service_id
+       WHERE b.tenant_id = $1
+         AND b.start_time >= $2
+         AND b.deleted_at IS NULL${staffFilter}
+       GROUP BY COALESCE(s.name, 'Unknown')
+       HAVING COALESCE(SUM(b.charge_amount) FILTER (WHERE b.status = 'confirmed'), 0) > 0
+       ORDER BY revenue DESC
+       LIMIT 10`,
+      params
+    );
+
+    // 2. Bookings by hour-of-day — 24 buckets. Confirmed bookings only (we
+    //    care about what actually ran). Returned as { hour: 0-23, count: N }
+    //    sparse array — frontend zero-fills.
+    const byHourRes = await db.query(
+      `SELECT
+         EXTRACT(HOUR FROM start_time)::int AS hour,
+         COUNT(*)::int AS count
+       FROM bookings
+       WHERE tenant_id = $1
+         AND start_time >= $2
+         AND status = 'confirmed'
+         AND deleted_at IS NULL${staffFilter}
+       GROUP BY EXTRACT(HOUR FROM start_time)
+       ORDER BY hour`,
+      params
+    );
+
+    // 3. Bookings by day-of-week — 7 buckets, Postgres DOW: 0=Sunday, 6=Saturday.
+    //    Same scoping as bookings_by_hour.
+    const byDowRes = await db.query(
+      `SELECT
+         EXTRACT(DOW FROM start_time)::int AS dow,
+         COUNT(*)::int AS count
+       FROM bookings
+       WHERE tenant_id = $1
+         AND start_time >= $2
+         AND status = 'confirmed'
+         AND deleted_at IS NULL${staffFilter}
+       GROUP BY EXTRACT(DOW FROM start_time)
+       ORDER BY dow`,
+      params
+    );
+
+    // 4. Average booking value — revenue_total / confirmed_count. Pre-computed
+    //    server-side so the frontend doesn't accidentally divide by zero.
+    const avgBookingValue = confirmedCount > 0 ? (revenueTotal / confirmedCount) : 0;
+
+    // 5. Repeat customer rate — % of confirmed bookings whose customer had
+    //    an EARLIER confirmed booking with this tenant. Trickier: needs to
+    //    look at ALL prior bookings (not just within the window) to detect
+    //    "this customer has booked before". Using a window function so we
+    //    only scan once.
+    //
+    //    Definition:
+    //      total      = confirmed bookings in window (with customer_id)
+    //      repeat     = subset where the customer had a confirmed booking
+    //                   anywhere in this tenant strictly before this booking
+    //      rate       = repeat / total * 100
+    const repeatRes = await db.query(
+      `WITH ranked AS (
+         SELECT
+           b.customer_id,
+           b.start_time,
+           ROW_NUMBER() OVER (PARTITION BY b.customer_id ORDER BY b.start_time) AS n,
+           (b.start_time >= $2)::boolean AS in_window
+         FROM bookings b
+         WHERE b.tenant_id = $1
+           AND b.status = 'confirmed'
+           AND b.customer_id IS NOT NULL
+           AND b.deleted_at IS NULL${staffFilter}
+       )
+       SELECT
+         COUNT(*) FILTER (WHERE in_window)::int AS total,
+         COUNT(*) FILTER (WHERE in_window AND n > 1)::int AS repeat_count
+       FROM ranked`,
+      params
+    );
+    const repeatTotal = Number(repeatRes.rows[0]?.total || 0);
+    const repeatCount = Number(repeatRes.rows[0]?.repeat_count || 0);
+    const repeatRate  = repeatTotal > 0 ? Math.round((repeatCount / repeatTotal) * 1000) / 10 : 0;
+
     return res.json({
       window_days:        days,
       confirmed_count:    confirmedCount,
@@ -750,6 +851,19 @@ router.get("/stats", requireTenant, requireAdminOrTenantRole("staff"), resolveSt
         resourceSupported,
         topStaff,
         topResources,
+      },
+      // PR M (Metrics expansion): deeper analytics datasets
+      revenue_by_service: revenueByServiceRes.rows.map((r) => ({
+        service_name: r.service_name,
+        revenue: parseFloat(r.revenue),
+      })),
+      bookings_by_hour: byHourRes.rows,           // [{ hour: 0-23, count }]
+      bookings_by_dow:  byDowRes.rows,            // [{ dow: 0-6,  count }] (0=Sun)
+      avg_booking_value: avgBookingValue,         // number (matches revenue_total currency)
+      repeat_customer:  {
+        rate: repeatRate,                         // 0-100, one-decimal
+        repeat_count: repeatCount,
+        total: repeatTotal,
       },
     });
   } catch (err) {
