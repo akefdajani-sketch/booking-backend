@@ -132,6 +132,7 @@ router.get('/check', async (req, res) => {
     // Attempt to apply rate rules using the check-in date as the booking start.
     // durationMinutes = nights × 1440 lets day-of-week and date-window rules fire correctly.
     let effectivePrice = basePricePerNight;
+    let rateMatched = false;
     if (computeRateForBookingLike) {
       try {
         const nightsCount    = rangeValidation.nights || 1;
@@ -150,6 +151,7 @@ router.get('/check', async (req, res) => {
           // adjusted_price_amount is the TOTAL for all nights — convert to per-night
           const totalAdjusted = Number(rateResult.adjusted_price_amount);
           effectivePrice = nightsCount > 0 ? totalAdjusted / nightsCount : totalAdjusted;
+          rateMatched = true;
         }
       } catch (rateErr) {
         // Non-fatal — fall back to base price
@@ -157,13 +159,25 @@ router.get('/check', async (req, res) => {
       }
     }
 
-    const pricingSummary = getNightlyPriceSummary({ checkIn, checkOut, pricePerNight: effectivePrice });
+    // FIX-RATES-3: If neither a rate rule fired NOR the service has a real
+    // base price, we genuinely cannot price this booking. Return pricing:null
+    // and a priceUnavailable flag so the public form can show "Price
+    // unavailable — contact us" instead of silently displaying $0 as a
+    // mysterious "Request booking".
+    const hasBasePrice = basePricePerNight > 0;
+    const priceUnavailable = !rateMatched && !hasBasePrice;
+
+    const pricingSummary = priceUnavailable
+      ? null
+      : getNightlyPriceSummary({ checkIn, checkOut, pricePerNight: effectivePrice });
     const pricing = pricingSummary ? { ...pricingSummary, currencyCode } : null;
 
     return res.json({
       available:   availability.available,
       nights:      rangeValidation.nights,
       pricing,
+      priceUnavailable,
+      rateMatched,
       currencyCode,
       conflicting: availability.conflictingBookings ?? [],
     });

@@ -97,8 +97,41 @@ async function loadRules({ tenantId, serviceId, staffId, resourceId }) {
       }
     }
 
-    return { ...row, days_of_week: dows, metadata: meta };
+    // FIX-RATES-1: pg returns DATE/TIMESTAMP columns as JS Date objects.
+    // isWithinDateRange below compares with `<` against a YYYY-MM-DD string,
+    // which silently coerces to NaN<num and ALWAYS returns false in both
+    // directions — meaning rules with a date range silently matched every
+    // date regardless of the configured window. Normalise to YYYY-MM-DD
+    // strings so isWithinDateRange's string compare works as intended.
+    return {
+      ...row,
+      days_of_week: dows,
+      metadata: meta,
+      date_start: toDateOnlyString(row.date_start),
+      date_end:   toDateOnlyString(row.date_end),
+    };
   });
+}
+
+/**
+ * Normalise a value coming from pg (Date | string | null) into a stable
+ * YYYY-MM-DD string suitable for lexicographic compare against `dateStr`
+ * values produced by toLocalParts.
+ */
+function toDateOnlyString(v) {
+  if (v == null) return null;
+  if (v instanceof Date) {
+    if (Number.isNaN(v.getTime())) return null;
+    const yyyy = v.getUTCFullYear();
+    const mm   = String(v.getUTCMonth() + 1).padStart(2, "0");
+    const dd   = String(v.getUTCDate()).padStart(2, "0");
+    return `${yyyy}-${mm}-${dd}`;
+  }
+  const s = String(v).trim();
+  if (!s) return null;
+  // Already starts with YYYY-MM-DD — strip any trailing time/timezone.
+  if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10);
+  return null;
 }
 
 function round2(n) {
@@ -437,7 +470,25 @@ async function computeRateForBookingLike({
           })[0] || null;
 
         rule = per;
-        applied = per ? applyRule(baseForSegment(slotUnit), per, slotUnit, slotUnit) : { adjusted: baseForSegment(slotUnit), reason: "no_rule" };
+        if (per) {
+          applied = applyRule(baseForSegment(slotUnit), per, slotUnit, slotUnit);
+        } else {
+          // FIX-RATES-2: no rule matched this slot. If the service has a real
+          // base price (>0), use it — that's the legitimate "no override"
+          // path. If base is null OR 0, the only honest answer is null:
+          // we have no price to charge. Returning 0 here used to be picked
+          // by DP as the cheapest option, silently zeroing-out the entire
+          // booking total even when other days had matching rules. Now we
+          // mark the segment as unpriced so DP cannot select it; if NO
+          // valid path exists, the engine surfaces null and the caller
+          // can show "price unavailable" instead of "$0".
+          const fallbackBase = baseForSegment(slotUnit);
+          if (fallbackBase != null && Number(fallbackBase) > 0) {
+            applied = { adjusted: fallbackBase, reason: "no_rule_base_price" };
+          } else {
+            applied = { adjusted: null, reason: "no_rule_no_base" };
+          }
+        }
       }
 
       if (!applied || applied.adjusted == null || !Number.isFinite(Number(applied.adjusted))) continue;
