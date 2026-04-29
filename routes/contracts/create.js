@@ -16,6 +16,9 @@ const {
   applyTemplate,
   insertContractInvoices,
   roundMinor,
+  // CONTRACT-CALENDAR-1
+  materializeContractBooking,
+  syncResourceLeaseFromContract,
 } = require('../../utils/contracts');
 
 function toNum(v) {
@@ -64,6 +67,25 @@ module.exports = function mount(router) {
         const notes           = body.notes != null ? String(body.notes) : null;
         const terms           = body.terms != null ? String(body.terms) : null;
         const signedByName    = body.signed_by_name != null ? String(body.signed_by_name) : null;
+
+        // CONTRACT-FAST-CONFIRM-1: Allow caller to create a contract directly
+        // in 'signed' state, skipping the pending_signature ceremony. Used
+        // for trusted recurring clients (corporate accounts, frequent
+        // partners). Only 'draft' (default) and 'signed' are accepted as
+        // initial states — other lifecycle states (active, terminated, etc.)
+        // remain reachable only via the update endpoint.
+        const initialStatusRaw = body.initial_status ?? body.initialStatus ?? 'draft';
+        const initialStatus    = String(initialStatusRaw).trim().toLowerCase();
+        if (!['draft', 'signed'].includes(initialStatus)) {
+          return res.status(400).json({
+            error: "initial_status must be 'draft' or 'signed'",
+          });
+        }
+        if (initialStatus === 'signed' && (!signedByName || !signedByName.trim())) {
+          return res.status(400).json({
+            error: "signed_by_name required when initial_status='signed'",
+          });
+        }
 
         if (!customerId) return res.status(400).json({ error: 'customer_id required' });
         if (!resourceId) return res.status(400).json({ error: 'resource_id required' });
@@ -154,7 +176,10 @@ module.exports = function mount(router) {
             tenantId, tenantPrefix: prefix, year,
           });
 
-          // Apply template (if any) to get payment_schedule_snapshot + invoice rows
+          // Apply template (if any) to get payment_schedule_snapshot + invoice rows.
+          // FAST-CONFIRM: when initial_status='signed' we pass signedAt so the
+          // template's date triggers (e.g. "on_signing", "on_signing+30") resolve
+          // to concrete dates. For 'draft' we pass null (matches prior behaviour).
           let snapshot = null;
           let invoiceRows = [];
           if (template) {
@@ -162,13 +187,18 @@ module.exports = function mount(router) {
               template,
               totalValue: roundMinor(totalValue),
               startDate, endDate,
-              signedAt: null, // contract is draft at creation
+              signedAt: initialStatus === 'signed' ? new Date() : null,
             });
             snapshot = applied.snapshot;
             invoiceRows = applied.invoiceRows;
           }
 
-          // Insert contract
+          // Insert contract.
+          // FAST-CONFIRM: status, signed_at, signature_method are computed
+          // from initial_status. We use $18/$19/$20 placeholders to keep the
+          // shape uniform regardless of path.
+          const signedAtSql       = initialStatus === 'signed' ? 'NOW()' : 'NULL';
+          const signatureMethodVal = initialStatus === 'signed' ? 'manual' : null;
           const insertRes = await client.query(
             `INSERT INTO contracts (
                tenant_id, contract_number, customer_id, resource_id, booking_id,
@@ -176,37 +206,66 @@ module.exports = function mount(router) {
                monthly_rate, total_value, security_deposit, currency_code,
                payment_schedule_template_id, payment_schedule_snapshot,
                status, auto_release_on_expiry,
-               notes, terms, signed_by_name, created_by
+               notes, terms, signed_by_name, created_by,
+               signed_at, signature_method
              )
              VALUES (
                $1, $2, $3, $4, $5,
                $6, $7,
                $8, $9, $10, $11,
                $12, $13::jsonb,
-               'draft', $14,
-               $15, $16, $17, NULL
+               $14, $15,
+               $16, $17, $18, NULL,
+               ${signedAtSql}, $19
              )
-             RETURNING id, contract_number, status, created_at`,
+             RETURNING *`,
             [
               tenantId, contractNumber, customerId, resourceId, bookingId,
               startDate, endDate,
               roundMinor(monthlyRate), roundMinor(totalValue), roundMinor(securityDeposit), currencyCode,
               templateId, snapshot ? JSON.stringify(snapshot) : null,
-              autoRelease,
+              initialStatus, autoRelease,
               notes, terms, signedByName,
+              signatureMethodVal,
             ]
           );
           const contract = insertRes.rows[0];
 
-          // Do NOT create contract_invoices yet — those are created when status → 'signed'.
-          // Store the snapshot so we know what to create. (Session 2: sign flow will emit them.)
-          //
-          // Note: we chose this over creating at draft time to keep contract edits easy —
-          // amounts/due_dates can shift if start/end/total change before signing.
+          // ─── Fast-confirm side-effects (when initial_status='signed') ──
+          // Mirror what update.js does for the pending_signature → signed
+          // transition: emit invoices from the template, materialize the
+          // phantom booking onto the calendar, sync resource lease fields.
+          // All inside the same transaction — either everything commits or
+          // nothing does.
+          let invoicesCreated     = 0;
+          let phantomBookingResult = null;
+          let leaseSyncResult      = null;
+          if (initialStatus === 'signed') {
+            if (invoiceRows.length) {
+              const newInvoiceIds = await insertContractInvoices(client, {
+                tenantId,
+                contractId: contract.id,
+                currencyCode: contract.currency_code,
+                invoiceRows,
+              });
+              invoicesCreated = newInvoiceIds.length;
+            }
+            phantomBookingResult = await materializeContractBooking(client, contract);
+            leaseSyncResult      = await syncResourceLeaseFromContract(client, contract, 'apply');
+          }
+          // For 'draft' contracts we deliberately do NOT create invoices yet
+          // — they're emitted on the draft → signed (or pending_signature →
+          // signed) transition. This keeps draft edits cheap; amounts/dates
+          // can shift before signing without orphaning invoice rows.
 
           await client.query('COMMIT');
 
-          logger.info({ tenantId, contractId: contract.id, contractNumber }, 'contract created');
+          logger.info({
+            tenantId, contractId: contract.id, contractNumber,
+            initialStatus, invoicesCreated,
+            phantomBooking: phantomBookingResult,
+            leaseSync: leaseSyncResult,
+          }, 'contract created');
 
           return res.status(201).json({
             contract: {
@@ -216,7 +275,7 @@ module.exports = function mount(router) {
               tenant_id: tenantId,
               customer_id: customerId,
               resource_id: resourceId,
-              booking_id: bookingId,
+              booking_id: contract.booking_id ?? bookingId,
               start_date: startDate,
               end_date: endDate,
               monthly_rate: roundMinor(monthlyRate),
@@ -226,8 +285,13 @@ module.exports = function mount(router) {
               payment_schedule_template_id: templateId,
               payment_schedule_snapshot: snapshot,
               auto_release_on_expiry: autoRelease,
+              signed_at: contract.signed_at,
+              signature_method: contract.signature_method,
               created_at: contract.created_at,
             },
+            invoices_created: invoicesCreated,
+            phantom_booking:  phantomBookingResult,
+            lease_sync:       leaseSyncResult,
           });
         } catch (err) {
           await client.query('ROLLBACK').catch(() => {});
