@@ -188,7 +188,9 @@ app.use("/api/availability", availabilityLimiter, availabilityRouter);
 // RENTAL-1: nightly rental availability check + blocked-dates calendar feed.
 app.use("/api/rental-availability", availabilityLimiter, require("./routes/rentalAvailability"));
 app.use("/api/rental-payment-links", require("./routes/rentalPaymentLinks"));
-app.use("/api/contract-invoice-payment-links", require("./routes/contractInvoicePaymentLinks")); // G2-PL-2
+// G2-PL-2: Payment links for long-term contract invoices (parallel to rental).
+//          Public portal at /pay-invoice/{token}; supports MPGS card, CliQ, cash.
+app.use("/api/contract-invoice-payment-links", require("./routes/contractInvoicePaymentLinks"));
 app.use("/api/maintenance-tickets", require("./routes/maintenanceTickets")); // PR-MAINT-1
 app.use("/api/booking-contracts",   require("./routes/bookingContracts"));   // PR-CONTRACT-1
 
