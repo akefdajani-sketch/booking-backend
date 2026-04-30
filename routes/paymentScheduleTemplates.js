@@ -91,7 +91,7 @@ router.get(
 
       const { rows } = await db.query(
         `SELECT id, tenant_id, name, description, stay_type_scope,
-                milestones, is_default, is_system, active,
+                milestones, is_default, is_system, active, duration_months,
                 created_at, updated_at
            FROM payment_schedule_templates
           WHERE ${where.join(' AND ')}
@@ -124,7 +124,7 @@ router.get(
       }
       const { rows } = await db.query(
         `SELECT id, tenant_id, name, description, stay_type_scope,
-                milestones, is_default, is_system, active,
+                milestones, is_default, is_system, active, duration_months,
                 created_at, updated_at
            FROM payment_schedule_templates
           WHERE id = $1
