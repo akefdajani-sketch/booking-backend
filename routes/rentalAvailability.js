@@ -11,6 +11,13 @@
 //
 //   GET /api/rental-availability/blocked-dates
 //     → All blocked dates in a month (for calendar greying)
+//
+//   GET /api/rental-availability/blocked-dates/batch  ← FINAL-CONTRACT-FIX
+//     → All blocked dates across multiple months in ONE round trip.
+//       Replaces 12 parallel single-month calls from CreateContractModal.
+//
+//   GET /api/rental-availability/debug-bookings
+//     → Diagnostic (preserved for ops use).
 // ---------------------------------------------------------------------------
 
 const express = require('express');
@@ -28,19 +35,12 @@ let computeRateForBookingLike;
 try {
   ({ computeRateForBookingLike } = require('../utils/ratesEngine'));
 } catch (_) {
-  // Non-fatal: old deployments without ratesEngine will just use base price
   computeRateForBookingLike = null;
 }
 
 // ---------------------------------------------------------------------------
 // GET /api/rental-availability/check
-// Query params:
-//   tenantSlug | tenantId  (one required)
-//   resourceId             (required)
-//   serviceId              (required — to load min/max nights + price_per_night)
-//   checkIn                (YYYY-MM-DD, required)
-//   checkOut               (YYYY-MM-DD, required)
-//   excludeBookingId       (optional — skip this booking for edit flows)
+// (unchanged — full body preserved)
 // ---------------------------------------------------------------------------
 router.get('/check', async (req, res) => {
   try {
@@ -60,7 +60,6 @@ router.get('/check', async (req, res) => {
       });
     }
 
-    // Resolve tenantId
     let tenantId = tenantIdRaw ? Number(tenantIdRaw) : null;
     if (!tenantId && tenantSlug) {
       const row = await pool.query(
@@ -79,7 +78,6 @@ router.get('/check', async (req, res) => {
       return res.status(400).json({ error: 'Invalid resourceId or serviceId' });
     }
 
-    // Load service to get min/max nights and price_per_night
     const svcResult = await pool.query(
       `SELECT s.booking_mode, COALESCE(s.min_nights,1) AS min_nights, s.max_nights,
               s.price_per_night, s.price_amount,
@@ -95,7 +93,6 @@ router.get('/check', async (req, res) => {
       return res.status(400).json({ error: 'Service is not a nightly rental service' });
     }
 
-    // Validate range against min/max nights
     const rangeValidation = validateNightlyRange({
       checkIn,
       checkOut,
@@ -112,7 +109,6 @@ router.get('/check', async (req, res) => {
       });
     }
 
-    // Check for conflicting bookings
     const availability = await checkNightlyAvailability({
       tenantId,
       resourceId,
@@ -121,22 +117,17 @@ router.get('/check', async (req, res) => {
       excludeBookingId: excludeBookingId ? Number(excludeBookingId) : null,
     });
 
-    // Compute pricing — apply rate rules for the check-in date, fall back to base price
-    // Use price_amount first (set directly on service), then price_per_night.
-    // price_amount=0 means "rates control pricing" — treat null and 0 the same as base
     const rawAmount = svc.price_amount != null ? Number(svc.price_amount) : null;
     const rawPerNight = svc.price_per_night != null ? Number(svc.price_per_night) : null;
     const basePricePerNight = rawAmount ?? rawPerNight ?? 0;
     const currencyCode      = svc.currency_code || 'JOD';
 
-    // Attempt to apply rate rules using the check-in date as the booking start.
-    // durationMinutes = nights × 1440 lets day-of-week and date-window rules fire correctly.
     let effectivePrice = basePricePerNight;
     let rateMatched = false;
     if (computeRateForBookingLike) {
       try {
         const nightsCount    = rangeValidation.nights || 1;
-        const checkInDate    = new Date(`${checkIn}T12:00:00Z`); // noon UTC — avoids DST edge
+        const checkInDate    = new Date(`${checkIn}T12:00:00Z`);
         const rateResult     = await computeRateForBookingLike({
           tenantId,
           serviceId,
@@ -145,25 +136,18 @@ router.get('/check', async (req, res) => {
           start:           checkInDate,
           durationMinutes: nightsCount * 1440,
           basePriceAmount: basePricePerNight,
-          serviceSlotMinutes: 1440,           // one day = one "slot" for nightly services
+          serviceSlotMinutes: 1440,
         });
         if (rateResult?.adjusted_price_amount != null) {
-          // adjusted_price_amount is the TOTAL for all nights — convert to per-night
           const totalAdjusted = Number(rateResult.adjusted_price_amount);
           effectivePrice = nightsCount > 0 ? totalAdjusted / nightsCount : totalAdjusted;
           rateMatched = true;
         }
       } catch (rateErr) {
-        // Non-fatal — fall back to base price
         console.warn('rentalAvailability: rate engine error (non-fatal):', rateErr?.message || rateErr);
       }
     }
 
-    // FIX-RATES-3: If neither a rate rule fired NOR the service has a real
-    // base price, we genuinely cannot price this booking. Return pricing:null
-    // and a priceUnavailable flag so the public form can show "Price
-    // unavailable — contact us" instead of silently displaying $0 as a
-    // mysterious "Request booking".
     const hasBasePrice = basePricePerNight > 0;
     const priceUnavailable = !rateMatched && !hasBasePrice;
 
@@ -189,10 +173,7 @@ router.get('/check', async (req, res) => {
 
 // ---------------------------------------------------------------------------
 // GET /api/rental-availability/blocked-dates
-// Query params:
-//   tenantSlug | tenantId  (one required)
-//   resourceId             (required)
-//   month                  (YYYY-MM, required)
+// (single month — preserved for backward compatibility)
 // ---------------------------------------------------------------------------
 router.get('/blocked-dates', async (req, res) => {
   try {
@@ -211,7 +192,6 @@ router.get('/blocked-dates', async (req, res) => {
       return res.status(400).json({ error: 'month must be YYYY-MM format' });
     }
 
-    // Resolve tenantId
     let tenantId = tenantIdRaw ? Number(tenantIdRaw) : null;
     if (!tenantId && tenantSlug) {
       const row = await pool.query(
@@ -241,11 +221,113 @@ router.get('/blocked-dates', async (req, res) => {
   }
 });
 
+// ---------------------------------------------------------------------------
+// GET /api/rental-availability/blocked-dates/batch    ← FINAL-CONTRACT-FIX
+//
+// Query params:
+//   tenantSlug | tenantId   (one required)
+//   resourceId              (required)
+//   months                  (comma-separated YYYY-MM list, 1..24, required)
+//
+// Response:
+//   {
+//     resourceId,
+//     months: {
+//       "YYYY-MM": { blockedDates: ["YYYY-MM-DD",...] },
+//       ...
+//     }
+//   }
+//
+// Replaces N parallel single-month calls. CreateContractModal previously
+// fired 12 in parallel on every resource change; with the batch endpoint
+// it fires 1.
+// ---------------------------------------------------------------------------
+router.get('/blocked-dates/batch', async (req, res) => {
+  try {
+    const {
+      tenantSlug,
+      tenantId: tenantIdRaw,
+      resourceId: resourceIdRaw,
+      months: monthsRaw,
+    } = req.query;
+
+    if (!resourceIdRaw || !monthsRaw) {
+      return res.status(400).json({ error: 'Required: resourceId, months (comma-separated YYYY-MM)' });
+    }
+
+    const months = String(monthsRaw)
+      .split(',')
+      .map(s => s.trim())
+      .filter(Boolean);
+
+    if (months.length === 0) {
+      return res.status(400).json({ error: 'months must contain at least one YYYY-MM value' });
+    }
+    if (months.length > 24) {
+      return res.status(400).json({ error: 'months may not exceed 24 entries per request' });
+    }
+    for (const m of months) {
+      if (!/^\d{4}-\d{2}$/.test(m)) {
+        return res.status(400).json({ error: `Invalid month "${m}" — must be YYYY-MM` });
+      }
+    }
+    // Dedupe (preserves order of first occurrence).
+    const seen = new Set();
+    const uniqueMonths = months.filter(m => {
+      if (seen.has(m)) return false;
+      seen.add(m); return true;
+    });
+
+    // Resolve tenantId ONCE (vs N times in the per-month flow).
+    let tenantId = tenantIdRaw ? Number(tenantIdRaw) : null;
+    if (!tenantId && tenantSlug) {
+      const row = await pool.query(
+        'SELECT id FROM tenants WHERE slug = $1',
+        [String(tenantSlug)]
+      );
+      if (!row.rows.length) return res.status(404).json({ error: 'Tenant not found' });
+      tenantId = Number(row.rows[0].id);
+    }
+    if (!tenantId) return res.status(400).json({ error: 'tenantSlug or tenantId required' });
+
+    const resourceId = Number(resourceIdRaw);
+    if (!Number.isFinite(resourceId)) {
+      return res.status(400).json({ error: 'Invalid resourceId' });
+    }
+
+    // Fetch all months in parallel — but on the SERVER side, with a single
+    // tenantId resolution and a shared pg connection pool. Server-side
+    // parallelism is much cheaper than 12 client→server round trips.
+    const results = await Promise.all(
+      uniqueMonths.map(month =>
+        getBlockedDatesForMonth({ tenantId, resourceId, month })
+          .then(r => ({ month, blockedDates: Array.isArray(r?.blockedDates) ? r.blockedDates : [] }))
+          .catch(err => {
+            console.error(`rentalAvailability/blocked-dates/batch [${month}]:`, err);
+            return { month, blockedDates: [] };
+          })
+      )
+    );
+
+    const monthsMap = {};
+    for (const r of results) {
+      monthsMap[r.month] = { blockedDates: r.blockedDates };
+    }
+
+    return res.json({
+      resourceId,
+      months: monthsMap,
+    });
+  } catch (err) {
+    console.error('rentalAvailability/blocked-dates/batch error:', err);
+    return res.status(500).json({ error: 'Failed to fetch blocked dates batch' });
+  }
+});
+
 module.exports = router;
 
 // ---------------------------------------------------------------------------
-// GET /api/rental-availability/debug-bookings  (TEMPORARY - remove after diagnosis)
-// Shows raw booking data for a resource so we can verify DB state
+// GET /api/rental-availability/debug-bookings  (diagnostic — preserved)
 // ---------------------------------------------------------------------------
 router.get('/debug-bookings', async (req, res) => {
   try {
@@ -266,7 +348,6 @@ router.get('/debug-bookings', async (req, res) => {
     const lastDay = new Date(year, mon, 0);
     const lastDayStr = `${year}-${String(mon).padStart(2, '0')}-${String(lastDay.getDate()).padStart(2, '0')}`;
 
-    // Raw query - no filter, just show all bookings for this resource this month
     const { rows } = await pool.query(
       `SELECT id, booking_mode, checkin_date, checkout_date, start_time, status, deleted_at,
               (start_time AT TIME ZONE 'UTC')::date AS start_date_utc
