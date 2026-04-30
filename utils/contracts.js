@@ -626,7 +626,12 @@ async function syncResourceLeaseFromContract(client, contract, mode) {
     if (cols.has('lease_tenant_name'))     sets.push(`lease_tenant_name = NULL`);
     if (cols.has('lease_tenant_phone'))    sets.push(`lease_tenant_phone = NULL`);
     if (cols.has('monthly_rate'))          sets.push(`monthly_rate = NULL`);
-    sets.push(`updated_at = NOW()`);
+    // SYNC-UPDATED-AT-FIX: production's `resources` table doesn't have an
+    // `updated_at` column (the migrations folder defines one but the live
+    // schema lacks it — same out-of-band drift pattern as bookings).
+    // Every other field in this function gates on cols.has(), but the
+    // updated_at push bypassed the guard. Same fix as the apply path below.
+    if (cols.has('updated_at'))            sets.push(`updated_at = NOW()`);
     await client.query(
       `UPDATE resources SET ${sets.join(', ')}
         WHERE id = $1 AND tenant_id = $2`,
@@ -676,7 +681,14 @@ async function syncResourceLeaseFromContract(client, contract, mode) {
   addCol('lease_tenant_phone',     tenantPhone);
   addCol('monthly_rate',           monthlyRate);
   addCol('auto_release_on_expiry', !!contract.auto_release_on_expiry);
-  sets.push(`updated_at = NOW()`);
+  // SYNC-UPDATED-AT-FIX: only push updated_at if the column actually
+  // exists. Production's resources table lacks it; the apply UPDATE
+  // would fail with `column "updated_at" of relation "resources" does
+  // not exist` (Postgres 42703) right after the contract phantom
+  // booking succeeds — leaving the contract created but the lease
+  // unsynced. addCol uses parameter binding; updated_at = NOW() is
+  // a literal expression so it goes directly into `sets`.
+  if (cols.has('updated_at'))     sets.push(`updated_at = NOW()`);
 
   await client.query(
     `UPDATE resources SET ${sets.join(', ')}
