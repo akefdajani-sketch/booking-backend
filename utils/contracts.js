@@ -440,6 +440,43 @@ async function materializeContractBooking(client, contract) {
   const totalValue = roundMinor(Number(contract.total_value) || 0);
   const currency   = String(contract.currency_code || 'JOD').trim().toUpperCase();
 
+  // CONTRACT-SERVICE-LOOKUP: bookings.service_id has a NOT NULL constraint
+  // but the contracts table has no service_id column — contracts are bound
+  // to a resource (a unit), not a service. Pick a sensible nightly service
+  // from this tenant for the phantom booking.
+  //
+  // Strategy:
+  //   1. Prefer a nightly service whose name contains "long" (the convention
+  //      tenants use to label long-term services, e.g. Aqaba's "Long Term").
+  //   2. Fall back to the lowest-id nightly service.
+  //   3. If the tenant has no nightly service at all, fail with a helpful
+  //      error rather than letting the NOT NULL violation surface as a 500.
+  //
+  // Defensive: filter on deleted_at only if the column exists.
+  const svcColsRes = await client.query(
+    `SELECT column_name FROM information_schema.columns
+      WHERE table_schema = 'public' AND table_name = 'services'`
+  );
+  const svcHasDeletedAt = svcColsRes.rows.some(r => r.column_name === 'deleted_at');
+  const svcSql = `
+    SELECT id FROM services
+     WHERE tenant_id    = $1
+       AND booking_mode = 'nightly'
+       ${svcHasDeletedAt ? 'AND deleted_at IS NULL' : ''}
+     ORDER BY
+       CASE WHEN LOWER(name) LIKE '%long%' THEN 0 ELSE 1 END,
+       id ASC
+     LIMIT 1
+  `;
+  const svcRes = await client.query(svcSql, [contract.tenant_id]);
+  if (!svcRes.rows.length) {
+    throw new Error(
+      `materializeContractBooking: tenant ${contract.tenant_id} has no nightly service — ` +
+      `create at least one nightly service before signing a contract`
+    );
+  }
+  const serviceId = Number(svcRes.rows[0].id);
+
   // Build column list dynamically — different deployments have different
   // optional columns added by various migrations. We INSERT only what's
   // present in the schema to stay backwards-compatible.
@@ -449,8 +486,8 @@ async function materializeContractBooking(client, contract) {
   );
   const cols = new Set(colsRes.rows.map(r => r.column_name));
 
-  const fields = ['tenant_id', 'customer_id', 'resource_id', 'start_time', 'end_time', 'duration_minutes', 'status'];
-  const values = [contract.tenant_id, contract.customer_id || null, contract.resource_id, startTimeIso, endTimeIso, durationMinutes, 'confirmed'];
+  const fields = ['tenant_id', 'customer_id', 'service_id', 'resource_id', 'start_time', 'end_time', 'duration_minutes', 'status'];
+  const values = [contract.tenant_id, contract.customer_id || null, serviceId, contract.resource_id, startTimeIso, endTimeIso, durationMinutes, 'confirmed'];
 
   const add = (col, val) => { if (cols.has(col)) { fields.push(col); values.push(val); } };
 
