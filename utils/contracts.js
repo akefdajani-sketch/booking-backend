@@ -477,6 +477,30 @@ async function materializeContractBooking(client, contract) {
   }
   const serviceId = Number(svcRes.rows[0].id);
 
+  // CONTRACT-CUSTOMER-DENORM: production's bookings table has NOT NULL
+  // constraints on the denormalized customer_name / customer_phone /
+  // customer_email columns (added out-of-band — the migrations folder
+  // has them as nullable). Regular booking creation in routes/bookings/
+  // create.js populates these from the customer input; for contract
+  // phantoms we look up the customers row directly. Same fallback
+  // values as the regular flow ('Customer' / '') so contracts created
+  // from sparse customer records (no email/phone yet) don't blow up.
+  let custName = 'Customer';
+  let custEmail = '';
+  let custPhone = '';
+  if (contract.customer_id) {
+    const custRes = await client.query(
+      `SELECT name, email, phone FROM customers
+         WHERE id = $1 AND tenant_id = $2 LIMIT 1`,
+      [contract.customer_id, contract.tenant_id]
+    );
+    if (custRes.rows.length) {
+      custName  = String(custRes.rows[0].name  || 'Customer').trim() || 'Customer';
+      custEmail = String(custRes.rows[0].email || '').trim();
+      custPhone = String(custRes.rows[0].phone || '').trim();
+    }
+  }
+
   // Build column list dynamically — different deployments have different
   // optional columns added by various migrations. We INSERT only what's
   // present in the schema to stay backwards-compatible.
@@ -501,6 +525,11 @@ async function materializeContractBooking(client, contract) {
   add('charge_amount',   totalValue);
   add('subtotal_amount', totalValue);
   add('currency_code',   currency);
+  // CONTRACT-CUSTOMER-DENORM: denormalized customer fields if the
+  // production schema has them (NOT NULL on app.flexrz.com prod).
+  add('customer_name',   custName);
+  add('customer_email',  custEmail);
+  add('customer_phone',  custPhone);
   add('notes',           `Auto-generated from contract ${contract.contract_number || contract.id}`);
 
   const placeholders = values.map((_, i) => `$${i + 1}`).join(', ');
