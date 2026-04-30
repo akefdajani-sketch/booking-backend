@@ -408,8 +408,23 @@ async function materializeContractBooking(client, contract) {
     return { bookingId: existingId, created: false };
   }
 
-  const startDateStr = String(contract.start_date).slice(0, 10);
-  const endDateStr   = String(contract.end_date).slice(0, 10);
+  // MATERIALIZE-DATE-FIX: contract.start_date / contract.end_date come back
+  // from node-postgres as JavaScript Date objects (DATE columns are parsed,
+  // not returned as raw strings). String(dateObj) yields the toString form
+  // ("Fri May 01 2026 03:00:00 GMT+0300 (...)"), and .slice(0, 10) of that
+  // is "Fri May 01" — concatenating "T00:00:00Z" produces the gibberish
+  // "Fri May 01T00:00:00Z" which Postgres rejects with code 22007 the moment
+  // we try to bind it as TIMESTAMPTZ.
+  //
+  // Same gotcha was already fixed in _getBookingBlockedDates further down in
+  // this file; the fix never reached this function. This is the bug behind
+  // 500s on POST /api/contracts when initial_status='signed' (Confirm now).
+  const startDateStr = (contract.start_date instanceof Date)
+    ? contract.start_date.toISOString().slice(0, 10)
+    : String(contract.start_date).slice(0, 10);
+  const endDateStr = (contract.end_date instanceof Date)
+    ? contract.end_date.toISOString().slice(0, 10)
+    : String(contract.end_date).slice(0, 10);
 
   // Nights = ceil days between start and end (DATE columns, day-precision).
   const startMs = Date.parse(`${startDateStr}T00:00:00Z`);
@@ -569,8 +584,12 @@ async function syncResourceLeaseFromContract(client, contract, mode) {
     }
   }
 
-  const startDateStr = String(contract.start_date).slice(0, 10);
-  const endDateStr   = String(contract.end_date).slice(0, 10);
+  const startDateStr = (contract.start_date instanceof Date)
+    ? contract.start_date.toISOString().slice(0, 10)
+    : String(contract.start_date).slice(0, 10);
+  const endDateStr = (contract.end_date instanceof Date)
+    ? contract.end_date.toISOString().slice(0, 10)
+    : String(contract.end_date).slice(0, 10);
   // 'flexible' means the unit auto-releases for short-term after lease end.
   // 'long_term' means the unit is locked under lease until manually changed.
   const rentalType = contract.auto_release_on_expiry ? 'flexible' : 'long_term';
