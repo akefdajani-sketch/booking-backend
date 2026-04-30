@@ -153,6 +153,12 @@ async function sendBookingConfirmation({
   tenantTimezone = 'Asia/Amman',
   tenantId = null,
   bookingUrl = null,
+  // G2-PL-4 Track A: optional payment link params. When paymentUrl is set,
+  // it REPLACES bookingUrl in the rendered SMS (one URL only — paid Twilio
+  // multi-segment is fine, but UX-wise single CTA converts better).
+  paymentUrl = null,
+  amountDue = null,
+  currency = null,
 }) {
   const phone = booking.customer_phone;
   if (!phone) return { ok: false, reason: 'no_phone' };
@@ -168,6 +174,9 @@ async function sendBookingConfirmation({
     nightsCount:  booking.nights_count,
     startTime:    booking.start_time,
     bookingUrl,
+    paymentUrl,
+    amountDue,
+    currency:     currency || booking.currency_code || 'JOD',
     timezone:     tenantTimezone,
   });
 
@@ -247,6 +256,10 @@ function buildBookingConfirmationMessage({
   nightsCount,
   startTime,
   bookingUrl,
+  // G2-PL-4 Track A
+  paymentUrl,
+  amountDue,
+  currency,
   timezone,
 }) {
   const lines = [];
@@ -271,7 +284,17 @@ function buildBookingConfirmationMessage({
     lines.push(serviceName);
   }
 
-  if (bookingUrl) lines.push(bookingUrl);
+  // G2-PL-4 Track A: payment link wins. Pending link → render with amount
+  // preview and OMIT booking URL. No payment link → booking URL.
+  if (paymentUrl) {
+    if (amountDue != null && Number.isFinite(Number(amountDue))) {
+      lines.push(`Pay ${formatAmount(amountDue, currency)}: ${paymentUrl}`);
+    } else {
+      lines.push(`Pay: ${paymentUrl}`);
+    }
+  } else if (bookingUrl) {
+    lines.push(bookingUrl);
+  }
 
   return lines.join('\n');
 }
@@ -372,6 +395,18 @@ function formatTime(d, tz = 'Asia/Amman') {
   } catch { return String(d).slice(11, 16); }
 }
 
+// G2-PL-4 Track A: amount + currency preview for SMS payment line.
+// Plain ASCII only (no emoji) to keep messages within GSM-7 segments.
+// JOD has 3 decimals (fils), USD/EUR has 2 — use 2 unless code is JOD/KWD/BHD/OMR/IQD.
+function formatAmount(amount, currency = 'JOD') {
+  const num = Number(amount);
+  if (!Number.isFinite(num)) return '';
+  const cur = (currency || 'JOD').toString().toUpperCase();
+  const threeDecimal = ['JOD', 'KWD', 'BHD', 'OMR', 'IQD', 'TND', 'LYD'];
+  const dp = threeDecimal.includes(cur) ? 3 : 2;
+  return `${num.toFixed(dp)} ${cur}`;
+}
+
 function httpPost(url, headers, body) {
   return new Promise((resolve, reject) => {
     let parsed;
@@ -414,5 +449,6 @@ module.exports = {
   buildBookingCancellationMessage,
   buildBookingReminderMessage,
   normalisePhone,
+  formatAmount,
   isTwilioConfiguredViaEnv,
 };

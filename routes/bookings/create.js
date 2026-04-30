@@ -1399,6 +1399,12 @@ const charge_amount = (finalCustomerMembershipId || prepaidApplied) ? 0 : price_
       // D5: gating composed in utils/notificationGates.js (plan + creds +
       // per-event toggle). Replaces the pre-D5 separate hasFeature() and
       // isTwilioEnabledForTenant() calls inline below.
+      //
+      // G2-PL-4 Track A: SMS now includes a URL — payment link if a pending
+      // payment_link exists for this booking, otherwise the booking URL.
+      // Per product decision, payment link REPLACES booking link (one URL
+      // per SMS). Lookup is independent of the WhatsApp block above so SMS
+      // still works correctly if WA was disabled or its gate failed.
       if (created && joined?.customer_phone) {
         setImmediate(async () => {
           try {
@@ -1415,17 +1421,73 @@ const charge_amount = (finalCustomerMembershipId || prepaidApplied) ? 0 : price_
             const tenantName     = tRes.rows?.[0]?.name     || 'Flexrz';
             const tenantTimezone = tRes.rows?.[0]?.timezone || 'Asia/Amman';
 
+            // Check for a pending payment link on this booking — if found, it
+            // replaces the booking URL in the SMS (one URL per spec).
+            let paymentUrl = null;
+            let amountDue  = null;
+            let currency   = joined.currency_code || 'JOD';
+            try {
+              const plRes = await require('../../db').query(
+                `SELECT token, amount_requested, currency_code
+                 FROM rental_payment_links
+                 WHERE booking_id = $1
+                   AND status = 'pending'
+                   AND (expires_at IS NULL OR expires_at > NOW())
+                 ORDER BY created_at DESC LIMIT 1`,
+                [bookingId]
+              );
+              if (plRes.rows.length) {
+                const frontendUrl = process.env.FRONTEND_URL || 'https://app.flexrz.com';
+                paymentUrl = `${frontendUrl}/pay/${plRes.rows[0].token}`;
+                amountDue  = plRes.rows[0].amount_requested;
+                currency   = plRes.rows[0].currency_code || currency;
+              }
+            } catch (_plErr) { /* non-fatal — confirmation still sends without link */ }
+
+            // Build booking URL — custom primary domain first, otherwise
+            // BOOKING_FRONTEND_URL fallback. Mirrors the WhatsApp block so
+            // both channels deep-link to the same place.
+            let bookingUrl = null;
+            if (joined.booking_code) {
+              try {
+                const domainRes = await require('../../db').query(
+                  `SELECT domain FROM tenant_domains
+                   WHERE tenant_id = $1 AND status = 'active' AND is_primary = TRUE
+                   LIMIT 1`,
+                  [resolvedTenantId]
+                );
+                if (domainRes.rows.length) {
+                  const d = domainRes.rows[0].domain.replace(/\/$/, '');
+                  const base = d.startsWith('http') ? d : `https://${d}`;
+                  bookingUrl = `${base}?ref=${encodeURIComponent(joined.booking_code)}`;
+                }
+              } catch (_) { /* non-fatal */ }
+              if (!bookingUrl) {
+                const bookingBase = process.env.BOOKING_FRONTEND_URL || 'https://flexrz.com';
+                bookingUrl = `${bookingBase}/book/${slug}?ref=${encodeURIComponent(joined.booking_code)}`;
+              }
+            }
+
             const smsResult = await sendSmsConfirmation({
               booking: joined,
               tenantName,
               tenantTimezone,
               tenantId: resolvedTenantId,
-              bookingUrl: null, // SMS is short-form — URL omitted to keep messages from getting truncated
+              bookingUrl,
+              paymentUrl,
+              amountDue,
+              currency,
             });
 
             if (smsResult.ok) {
               require('../../utils/logger').info(
-                { bookingId, phone: joined.customer_phone, msgSid: smsResult.messageSid },
+                {
+                  bookingId,
+                  phone: joined.customer_phone,
+                  msgSid: smsResult.messageSid,
+                  hasPaymentLink: !!paymentUrl,
+                  hasBookingUrl: !!bookingUrl && !paymentUrl,
+                },
                 'SMS confirmation sent'
               );
             } else {
