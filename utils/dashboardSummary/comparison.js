@@ -5,6 +5,11 @@
 // derive deltas (revenue change, booking change, repeat-rate change,
 // no-show change) for the alerts engine.
 //
+// FINAL-CONTRACT-FIX (this revision):
+//   - previousRevenueAmount now includes contract_invoices paid in the
+//     previous window. Mirrors the kpi.js change so revenue deltas remain
+//     comparable when contracts contribute to revenue.
+//
 // All queries are best-effort — if comparison fails for any reason the
 // dashboard still renders with zeros, no alerts.
 
@@ -26,7 +31,8 @@ async function buildComparisonSection(ctx) {
   const compareEnd = rangeStart;
 
   let previousConfirmedCount = 0;
-  let previousRevenueAmount = 0;
+  let previousBookingRevenue = 0;
+  let previousContractRevenue = 0;
   let previousNoShowRate = 0;
   let previousRepeatPct = 0;
 
@@ -47,11 +53,35 @@ async function buildComparisonSection(ctx) {
       [tenantId, compareStart.toISOString(), compareEnd.toISOString()]
     );
     previousConfirmedCount = Number(prevAgg.rows?.[0]?.confirmed_count || 0);
-    previousRevenueAmount = Number(prevAgg.rows?.[0]?.revenue_amount || 0);
+    previousBookingRevenue = Number(prevAgg.rows?.[0]?.revenue_amount || 0);
     const prevEligible = Number(prevAgg.rows?.[0]?.eligible_count || 0);
     const prevNoShows = Number(prevAgg.rows?.[0]?.no_show_count || 0);
     previousNoShowRate = prevEligible > 0 ? Number(((prevNoShows / prevEligible) * 100).toFixed(1)) : 0;
   } catch {}
+
+  // FINAL-CONTRACT-FIX: previous-period contract revenue (cash-basis).
+  // Excluded when staffClause is set — same rationale as kpi.js.
+  if (!staffClause || staffClause.trim() === '') {
+    try {
+      const ciReg = await db.query(`SELECT to_regclass('public.contract_invoices') AS reg`);
+      if (ciReg.rows?.[0]?.reg) {
+        const ci = await db.query(
+          `
+          SELECT COALESCE(SUM(amount), 0)::numeric AS contract_revenue
+          FROM contract_invoices
+          WHERE tenant_id = $1
+            AND status = 'paid'
+            AND paid_at >= $2
+            AND paid_at < $3
+          `,
+          [tenantId, compareStart.toISOString(), compareEnd.toISOString()]
+        );
+        previousContractRevenue = Number(ci.rows?.[0]?.contract_revenue || 0);
+      }
+    } catch {}
+  }
+
+  const previousRevenueAmount = previousBookingRevenue + previousContractRevenue;
 
   try {
     const prevRepeat = await db.query(
