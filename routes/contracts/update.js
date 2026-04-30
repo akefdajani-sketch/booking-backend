@@ -332,6 +332,26 @@ module.exports = function mount(router) {
 
         await client.query('COMMIT');
 
+        // ─── G2-PL-4: signing notification (non-fatal, post-commit) ───
+        // Fires WA + SMS confirmation with the first invoice's payment
+        // link when transitioning into 'signed'. Same pattern as create.js.
+        if (nextStatus === 'signed' && current.status !== 'signed' && newInvoiceIds.length > 0) {
+          setImmediate(async () => {
+            try {
+              const { sendContractSigningNotification } = require('../../utils/contractSigningNotification');
+              await sendContractSigningNotification({
+                contractId: id,
+                tenantId,
+              });
+            } catch (notifErr) {
+              logger.error(
+                { err: notifErr.message, contractId: id, tenantId },
+                'Contract signing notification error (non-fatal)'
+              );
+            }
+          });
+        }
+
         logger.info({
           tenantId, contractId: id,
           fromStatus: current.status, toStatus: nextStatus,

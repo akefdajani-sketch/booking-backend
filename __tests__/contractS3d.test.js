@@ -68,6 +68,25 @@ jest.mock('../utils/whatsapp', () => ({
   sendMessage: (...a) => mockSendMessage(...a),
 }));
 
+// G2-PL-4 additions: engine now also dispatches SMS, builds payment links,
+// and gates SMS via notificationGates.shouldSendSMS.
+const mockShouldSendSMS = jest.fn();
+jest.mock('../utils/notificationGates', () => ({
+  shouldSendSMS: (...a) => mockShouldSendSMS(...a),
+}));
+
+const mockGetOrCreatePendingLink = jest.fn();
+jest.mock('../utils/contractInvoicePaymentLinks', () => ({
+  getOrCreatePendingLink: (...a) => mockGetOrCreatePendingLink(...a),
+}));
+
+const mockTwilioSendMessage = jest.fn();
+jest.mock('../utils/twilioSms', () => ({
+  sendMessage: (...a) => mockTwilioSendMessage(...a),
+  // Re-export the real builders/helpers since our SMS template file requires them
+  formatAmount: jest.requireActual('../utils/twilioSms').formatAmount,
+}));
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function buildRenewApp() {
@@ -95,6 +114,15 @@ beforeEach(() => {
   mockHasFeature.mockReset();
   mockIsWhatsAppEnabledForTenant.mockReset();
   mockSendMessage.mockReset();
+  // G2-PL-4 additions
+  mockShouldSendSMS.mockReset();
+  mockGetOrCreatePendingLink.mockReset();
+  mockTwilioSendMessage.mockReset();
+
+  // Sensible defaults — tests can override
+  mockShouldSendSMS.mockResolvedValue({ ok: false, reason: 'default_off' });
+  mockGetOrCreatePendingLink.mockResolvedValue({ token: 'test-token-abc' });
+  mockTwilioSendMessage.mockResolvedValue({ ok: true, messageSid: 'SM-test' });
 });
 
 // ─── renew.js ─────────────────────────────────────────────────────────────────
@@ -308,113 +336,158 @@ describe('buildContractInvoiceReminderMessage', () => {
 });
 
 // ─── reminder engine ─────────────────────────────────────────────────────────
+//
+// G2-PL-4: engine now runs THREE windows (T-3, due, overdue) per invocation,
+// each issuing its own SELECT. New return shape:
+//   { elapsedMs, windows: { t3, due, overdue }, totals }
+// Each window's stats: { window, processed, waSent, smsSent, anySent, skipped, failed }
+// `totals` is an aggregated rollup of all three windows.
 
 describe('runContractInvoiceReminderEngine', () => {
   const { runContractInvoiceReminderEngine } = require('../utils/contractInvoiceReminderEngine');
 
-  test('returns zero counts when no rows match', async () => {
-    mockQuery.mockResolvedValueOnce({ rows: [] });
-    const out = await runContractInvoiceReminderEngine();
-    expect(out.processed).toBe(0);
-    expect(out.sent).toBe(0);
-    expect(out.skipped).toBe(0);
-    expect(out.failed).toBe(0);
+  // Helper: a sample invoice row matching the engine's SELECT projection
+  const sampleRow = (overrides = {}) => ({
+    invoice_id: 10, tenant_id: 33, contract_id: 1,
+    milestone_index: 0, milestone_label: 'Month 1',
+    amount: 500, due_date: '2026-06-01', status: 'sent',
+    contract_number: 'AQB-CON-2026-0001', currency_code: 'JOD',
+    customer_id: 99, customer_name: 'John', customer_phone: '+962771234567',
+    tenant_name: 'Aqaba Book', tenant_timezone: 'Asia/Amman',
+    rental_mode_enabled: true,
+    ...overrides,
   });
 
-  test('skips when feature not enabled', async () => {
-    mockQuery.mockResolvedValueOnce({
-      rows: [{
-        invoice_id: 10, tenant_id: 33, contract_id: 1,
-        milestone_index: 0, milestone_label: 'Deposit',
-        amount: 500, due_date: '2026-06-01', status: 'sent',
-        contract_number: 'AQB-CON-2026-0001', currency_code: 'JOD',
-        customer_id: 99, customer_name: 'John', customer_phone: '+962771234567',
-        tenant_name: 'Aqaba Book', tenant_timezone: 'Asia/Amman',
-        rental_mode_enabled: true,
-      }],
-    });
+  test('returns zero counts when no rows match in any window', async () => {
+    // Three windows = three SELECTs, each empty
+    mockQuery.mockResolvedValueOnce({ rows: [] }); // t3
+    mockQuery.mockResolvedValueOnce({ rows: [] }); // due
+    mockQuery.mockResolvedValueOnce({ rows: [] }); // overdue
+
+    const out = await runContractInvoiceReminderEngine();
+    expect(out.totals.processed).toBe(0);
+    expect(out.totals.anySent).toBe(0);
+    expect(out.totals.skipped).toBe(0);
+    expect(out.totals.failed).toBe(0);
+  });
+
+  test('skips when feature not enabled and SMS gate is off (both channels gated)', async () => {
+    // T-3 window has 1 invoice; other windows empty
+    mockQuery.mockResolvedValueOnce({ rows: [sampleRow()] }); // t3 SELECT
+    mockQuery.mockResolvedValueOnce({ rowCount: 1 });         // dedup UPDATE for skip
+    mockQuery.mockResolvedValueOnce({ rows: [] }); // due
+    mockQuery.mockResolvedValueOnce({ rows: [] }); // overdue
+
     mockHasFeature.mockResolvedValue(false);
+    mockShouldSendSMS.mockResolvedValue({ ok: false });
 
     const out = await runContractInvoiceReminderEngine();
-    expect(out.processed).toBe(1);
-    expect(out.sent).toBe(0);
-    expect(out.skipped).toBe(1);
+    expect(out.totals.processed).toBe(1);
+    expect(out.totals.anySent).toBe(0);
+    expect(out.totals.skipped).toBe(1);
+    // Neither real WA nor real SMS dispatch should have been called
     expect(mockSendMessage).not.toHaveBeenCalled();
+    expect(mockTwilioSendMessage).not.toHaveBeenCalled();
   });
 
-  test('skips when WhatsApp creds not configured', async () => {
-    mockQuery.mockResolvedValueOnce({
-      rows: [{
-        invoice_id: 10, tenant_id: 33, contract_id: 1,
-        milestone_index: 0, milestone_label: 'Deposit',
-        amount: 500, due_date: '2026-06-01', status: 'sent',
-        contract_number: 'AQB-CON-2026-0001', currency_code: 'JOD',
-        customer_id: 99, customer_name: 'John', customer_phone: '+962771234567',
-        tenant_name: 'Aqaba Book', tenant_timezone: 'Asia/Amman',
-        rental_mode_enabled: true,
-      }],
-    });
+  test('skips when WhatsApp creds not configured AND SMS gate off', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [sampleRow()] }); // t3 SELECT
+    mockQuery.mockResolvedValueOnce({ rowCount: 1 });         // dedup UPDATE for skip
+    mockQuery.mockResolvedValueOnce({ rows: [] }); // due
+    mockQuery.mockResolvedValueOnce({ rows: [] }); // overdue
+
     mockHasFeature.mockResolvedValue(true);
     mockIsWhatsAppEnabledForTenant.mockResolvedValue(false);
+    mockShouldSendSMS.mockResolvedValue({ ok: false });
 
     const out = await runContractInvoiceReminderEngine();
-    expect(out.skipped).toBe(1);
-    expect(out.sent).toBe(0);
+    expect(out.totals.skipped).toBe(1);
+    expect(out.totals.anySent).toBe(0);
   });
 
-  test('sends reminder + stamps reminder_sent_at on success', async () => {
-    mockQuery.mockResolvedValueOnce({
-      rows: [{
-        invoice_id: 10, tenant_id: 33, contract_id: 1,
-        milestone_index: 0, milestone_label: 'Month 1',
-        amount: 500, due_date: '2026-06-01', status: 'sent',
-        contract_number: 'AQB-CON-2026-0001', currency_code: 'JOD',
-        customer_id: 99, customer_name: 'John', customer_phone: '+962771234567',
-        tenant_name: 'Aqaba Book', tenant_timezone: 'Asia/Amman',
-        rental_mode_enabled: true,
-      }],
-    });
+  test('sends WA reminder + stamps reminder_t3_sent_at on success', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [sampleRow()] }); // t3 SELECT
+    mockQuery.mockResolvedValueOnce({ rowCount: 1 });         // dedup UPDATE
+    mockQuery.mockResolvedValueOnce({ rows: [] }); // due
+    mockQuery.mockResolvedValueOnce({ rows: [] }); // overdue
+
     mockHasFeature.mockResolvedValue(true);
     mockIsWhatsAppEnabledForTenant.mockResolvedValue(true);
     mockSendMessage.mockResolvedValue({ ok: true, messageId: 'wamid.x' });
-    mockQuery.mockResolvedValueOnce({ rowCount: 1 });  // UPDATE stamp
+    mockShouldSendSMS.mockResolvedValue({ ok: false }); // SMS off — only WA fires
 
     const out = await runContractInvoiceReminderEngine();
-    expect(out.sent).toBe(1);
-    expect(out.failed).toBe(0);
+    expect(out.totals.anySent).toBe(1);
+    expect(out.totals.failed).toBe(0);
+    expect(out.windows.t3.waSent).toBe(1);
     expect(mockSendMessage).toHaveBeenCalledTimes(1);
 
+    // Assert UPDATE stamps reminder_t3_sent_at on the right invoice
     const stamp = mockQuery.mock.calls.find(
-      (c) => typeof c[0] === 'string' && c[0].includes('UPDATE contract_invoices'),
+      (c) => typeof c[0] === 'string' &&
+             c[0].includes('UPDATE contract_invoices') &&
+             c[0].includes('reminder_t3_sent_at'),
     );
     expect(stamp).toBeDefined();
     expect(stamp[1][0]).toBe(10);
   });
 
-  test('counts failures without stamping', async () => {
-    mockQuery.mockResolvedValueOnce({
-      rows: [{
-        invoice_id: 10, tenant_id: 33, contract_id: 1,
-        milestone_index: 0, milestone_label: 'Month 1',
-        amount: 500, due_date: '2026-06-01', status: 'sent',
-        contract_number: 'AQB-CON-2026-0001', currency_code: 'JOD',
-        customer_id: 99, customer_name: 'John', customer_phone: '+962771234567',
-        tenant_name: 'Aqaba Book', tenant_timezone: 'Asia/Amman',
-        rental_mode_enabled: true,
-      }],
-    });
+  test('counts failures without stamping when both channels fail', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [sampleRow()] }); // t3 SELECT
+    // No dedup UPDATE expected (both channels failed)
+    mockQuery.mockResolvedValueOnce({ rows: [] }); // due
+    mockQuery.mockResolvedValueOnce({ rows: [] }); // overdue
+
     mockHasFeature.mockResolvedValue(true);
     mockIsWhatsAppEnabledForTenant.mockResolvedValue(true);
     mockSendMessage.mockResolvedValue({ ok: false, reason: 'invalid_phone' });
+    mockShouldSendSMS.mockResolvedValue({ ok: true });
+    mockTwilioSendMessage.mockResolvedValue({ ok: false, reason: 'twilio_error' });
 
     const out = await runContractInvoiceReminderEngine();
-    expect(out.sent).toBe(0);
-    expect(out.failed).toBe(1);
+    expect(out.totals.anySent).toBe(0);
+    expect(out.totals.failed).toBe(1);
 
     const stamp = mockQuery.mock.calls.find(
       (c) => typeof c[0] === 'string' && c[0].includes('UPDATE contract_invoices'),
     );
     expect(stamp).toBeUndefined();
+  });
+
+  test('SMS-only path: WA disabled, SMS succeeds, flag still stamps', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [sampleRow()] }); // t3 SELECT
+    mockQuery.mockResolvedValueOnce({ rowCount: 1 });         // dedup UPDATE
+    mockQuery.mockResolvedValueOnce({ rows: [] }); // due
+    mockQuery.mockResolvedValueOnce({ rows: [] }); // overdue
+
+    mockHasFeature.mockResolvedValue(false); // WA off
+    mockShouldSendSMS.mockResolvedValue({ ok: true });
+    mockTwilioSendMessage.mockResolvedValue({ ok: true, messageSid: 'SM-x' });
+
+    const out = await runContractInvoiceReminderEngine();
+    expect(out.totals.anySent).toBe(1);
+    expect(out.windows.t3.smsSent).toBe(1);
+    expect(out.windows.t3.waSent).toBe(0);
+    expect(mockTwilioSendMessage).toHaveBeenCalledTimes(1);
+    expect(mockSendMessage).not.toHaveBeenCalled();
+  });
+
+  test('embeds payment URL in WA message body when link is generated', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [sampleRow()] }); // t3 SELECT
+    mockQuery.mockResolvedValueOnce({ rowCount: 1 });         // dedup UPDATE
+    mockQuery.mockResolvedValueOnce({ rows: [] }); // due
+    mockQuery.mockResolvedValueOnce({ rows: [] }); // overdue
+
+    mockHasFeature.mockResolvedValue(true);
+    mockIsWhatsAppEnabledForTenant.mockResolvedValue(true);
+    mockSendMessage.mockResolvedValue({ ok: true, messageId: 'wa-x' });
+    mockShouldSendSMS.mockResolvedValue({ ok: false });
+    mockGetOrCreatePendingLink.mockResolvedValue({ token: 'PAY-TOKEN-XYZ' });
+
+    await runContractInvoiceReminderEngine();
+    const waCall = mockSendMessage.mock.calls[0][0];
+    expect(waCall.message).toContain('PAY-TOKEN-XYZ');
+    expect(waCall.message).toContain('pay-invoice');
   });
 });
 
