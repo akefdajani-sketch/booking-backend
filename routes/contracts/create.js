@@ -2,7 +2,21 @@
 
 // routes/contracts/create.js
 // POST /api/contracts
-// G2a-1: Create a contract (optionally applying a payment schedule template).
+// G2a-1: Create a contract.
+//
+// FINAL-CONTRACT-FIX (this revision):
+//   - Uses generateContractSchedule (unified generator) for fixed-duration
+//     templates AND for None (no template). Long Stay (variable-duration,
+//     duration_months IS NULL) keeps the legacy applyTemplate path.
+//   - When a fixed-duration template is selected, end_date is recomputed
+//     server-side from start_date + duration_months − 1 day, regardless of
+//     what the client sends. Defense-in-depth — the modal does the same math
+//     but the server is the source of truth.
+//   - total_value is recomputed server-side from monthly_rate × actual
+//     covered period (using the generator's own math). Prevents drift
+//     between displayed total and billed schedule.
+//   - Security deposit is generated as a separate is_deposit=TRUE invoice
+//     (excluded from total_value).
 
 const { pool } = require('../../db');
 const logger = require('../../utils/logger');
@@ -14,9 +28,11 @@ const {
   generateContractNumber,
   resolveContractPrefix,
   applyTemplate,
+  generateContractSchedule,
+  computeFixedTermEndDate,
+  computeTotalValueFromSchedule,
   insertContractInvoices,
   roundMinor,
-  // CONTRACT-CALENDAR-1
   materializeContractBooking,
   syncResourceLeaseFromContract,
 } = require('../../utils/contracts');
@@ -51,15 +67,14 @@ module.exports = function mount(router) {
           return res.status(400).json({ error: 'Invalid tenant.' });
         }
 
-        // ─── Parse + validate body ────────────────────────────────────────────
         const body = req.body || {};
         const customerId = toNum(body.customer_id ?? body.customerId);
         const resourceId = toNum(body.resource_id ?? body.resourceId);
         const bookingId  = toNum(body.booking_id ?? body.bookingId);
         const startDate  = toIsoDate(body.start_date ?? body.startDate);
-        const endDate    = toIsoDate(body.end_date ?? body.endDate);
+        let   endDate    = toIsoDate(body.end_date ?? body.endDate);
         const monthlyRate     = toNum(body.monthly_rate ?? body.monthlyRate);
-        const totalValue      = toNum(body.total_value ?? body.totalValue);
+        let   totalValue      = toNum(body.total_value ?? body.totalValue);
         const securityDeposit = toNum(body.security_deposit ?? body.securityDeposit) ?? 0;
         const currencyCode    = String(body.currency_code ?? body.currencyCode ?? '').trim().toUpperCase();
         const templateId      = toNum(body.payment_schedule_template_id ?? body.templateId);
@@ -68,12 +83,6 @@ module.exports = function mount(router) {
         const terms           = body.terms != null ? String(body.terms) : null;
         const signedByName    = body.signed_by_name != null ? String(body.signed_by_name) : null;
 
-        // CONTRACT-FAST-CONFIRM-1: Allow caller to create a contract directly
-        // in 'signed' state, skipping the pending_signature ceremony. Used
-        // for trusted recurring clients (corporate accounts, frequent
-        // partners). Only 'draft' (default) and 'signed' are accepted as
-        // initial states — other lifecycle states (active, terminated, etc.)
-        // remain reachable only via the update endpoint.
         const initialStatusRaw = body.initial_status ?? body.initialStatus ?? 'draft';
         const initialStatus    = String(initialStatusRaw).trim().toLowerCase();
         if (!['draft', 'signed'].includes(initialStatus)) {
@@ -89,17 +98,11 @@ module.exports = function mount(router) {
 
         if (!customerId) return res.status(400).json({ error: 'customer_id required' });
         if (!resourceId) return res.status(400).json({ error: 'resource_id required' });
-        if (!startDate || !endDate) {
-          return res.status(400).json({ error: 'start_date and end_date required (YYYY-MM-DD)' });
-        }
-        if (new Date(endDate) <= new Date(startDate)) {
-          return res.status(400).json({ error: 'end_date must be after start_date' });
+        if (!startDate) {
+          return res.status(400).json({ error: 'start_date required (YYYY-MM-DD)' });
         }
         if (monthlyRate == null || monthlyRate < 0) {
           return res.status(400).json({ error: 'monthly_rate required (non-negative)' });
-        }
-        if (totalValue == null || totalValue < 0) {
-          return res.status(400).json({ error: 'total_value required (non-negative)' });
         }
         if (securityDeposit < 0) {
           return res.status(400).json({ error: 'security_deposit must be non-negative' });
@@ -108,12 +111,10 @@ module.exports = function mount(router) {
           return res.status(400).json({ error: 'currency_code required (3-letter ISO)' });
         }
 
-        // ─── Transaction ──────────────────────────────────────────────────────
         const client = await pool.connect();
         try {
           await client.query('BEGIN');
 
-          // Load tenant (for prefix + isolation check)
           const tRow = await client.query(
             `SELECT id, slug, contract_number_prefix, currency_code
                FROM tenants WHERE id = $1`,
@@ -125,7 +126,6 @@ module.exports = function mount(router) {
           }
           const tenant = tRow.rows[0];
 
-          // Verify customer + resource belong to this tenant
           const checks = await client.query(
             `SELECT
                (SELECT id FROM customers WHERE id = $1 AND tenant_id = $3 AND deleted_at IS NULL) AS cust_id,
@@ -151,11 +151,11 @@ module.exports = function mount(router) {
             }
           }
 
-          // Load + validate template (if provided). Platform templates (tenant_id IS NULL) allowed.
+          // ─── Template lookup (if any) ─────────────────────────────────────
           let template = null;
           if (templateId) {
             const tplRow = await client.query(
-              `SELECT id, tenant_id, name, milestones, stay_type_scope, active
+              `SELECT id, tenant_id, name, milestones, stay_type_scope, active, duration_months
                  FROM payment_schedule_templates
                 WHERE id = $1
                   AND active = TRUE
@@ -169,20 +169,46 @@ module.exports = function mount(router) {
             template = tplRow.rows[0];
           }
 
-          // Generate contract number (advisory-locked inside this tx)
-          const prefix = resolveContractPrefix(tenant);
-          const year = new Date(startDate).getUTCFullYear();
-          const contractNumber = await generateContractNumber(client, {
-            tenantId, tenantPrefix: prefix, year,
-          });
+          // ─── FIXED-DURATION TEMPLATE PATH ────────────────────────────────
+          //
+          // Server is source of truth: when a fixed-duration template is
+          // selected, end_date and total_value are recomputed regardless of
+          // what the client sent. This prevents the schedule/duration
+          // mismatch that produced the bad pre-fix contracts.
 
-          // Apply template (if any) to get payment_schedule_snapshot + invoice rows.
-          // FAST-CONFIRM: when initial_status='signed' we pass signedAt so the
-          // template's date triggers (e.g. "on_signing", "on_signing+30") resolve
-          // to concrete dates. For 'draft' we pass null (matches prior behaviour).
+          const isFixedDurationTemplate = template && template.duration_months != null;
+          const isVariableDurationTemplate = template && template.duration_months == null;
+
+          if (isFixedDurationTemplate) {
+            endDate = computeFixedTermEndDate(startDate, template.duration_months);
+          } else if (!endDate) {
+            // No template, no end date — required.
+            await client.query('ROLLBACK');
+            return res.status(400).json({ error: 'end_date required (YYYY-MM-DD)' });
+          }
+
+          if (new Date(endDate) < new Date(startDate)) {
+            await client.query('ROLLBACK');
+            return res.status(400).json({ error: 'end_date must be on or after start_date' });
+          }
+
+          // total_value: for fixed-duration templates AND for None, recompute
+          // from the generator math. For variable-duration templates (Long
+          // Stay), accept client-supplied total_value (legacy behaviour).
+          if (!isVariableDurationTemplate) {
+            totalValue = computeTotalValueFromSchedule({
+              startDate, endDate, monthlyRate,
+            });
+          } else if (totalValue == null || totalValue < 0) {
+            await client.query('ROLLBACK');
+            return res.status(400).json({ error: 'total_value required for variable-duration templates' });
+          }
+
+          // ─── Generate schedule ────────────────────────────────────────────
           let snapshot = null;
           let invoiceRows = [];
-          if (template) {
+          if (isVariableDurationTemplate) {
+            // Long Stay 15-60 nights: legacy percentage-based path.
             const applied = applyTemplate({
               template,
               totalValue: roundMinor(totalValue),
@@ -191,12 +217,23 @@ module.exports = function mount(router) {
             });
             snapshot = applied.snapshot;
             invoiceRows = applied.invoiceRows;
+          } else {
+            // Fixed-duration template OR None: unified generator.
+            const generated = generateContractSchedule({
+              startDate, endDate, monthlyRate, securityDeposit,
+            });
+            snapshot = generated.snapshot;
+            invoiceRows = generated.invoiceRows;
           }
 
-          // Insert contract.
-          // FAST-CONFIRM: status, signed_at, signature_method are computed
-          // from initial_status. We use $18/$19/$20 placeholders to keep the
-          // shape uniform regardless of path.
+          // ─── Generate contract number ────────────────────────────────────
+          const prefix = resolveContractPrefix(tenant);
+          const year = new Date(startDate).getUTCFullYear();
+          const contractNumber = await generateContractNumber(client, {
+            tenantId, tenantPrefix: prefix, year,
+          });
+
+          // ─── Insert contract row ─────────────────────────────────────────
           const signedAtSql       = initialStatus === 'signed' ? 'NOW()' : 'NULL';
           const signatureMethodVal = initialStatus === 'signed' ? 'manual' : null;
           const insertRes = await client.query(
@@ -231,12 +268,7 @@ module.exports = function mount(router) {
           );
           const contract = insertRes.rows[0];
 
-          // ─── Fast-confirm side-effects (when initial_status='signed') ──
-          // Mirror what update.js does for the pending_signature → signed
-          // transition: emit invoices from the template, materialize the
-          // phantom booking onto the calendar, sync resource lease fields.
-          // All inside the same transaction — either everything commits or
-          // nothing does.
+          // ─── Fast-confirm side effects ────────────────────────────────────
           let invoicesCreated     = 0;
           let phantomBookingResult = null;
           let leaseSyncResult      = null;
@@ -253,16 +285,13 @@ module.exports = function mount(router) {
             phantomBookingResult = await materializeContractBooking(client, contract);
             leaseSyncResult      = await syncResourceLeaseFromContract(client, contract, 'apply');
           }
-          // For 'draft' contracts we deliberately do NOT create invoices yet
-          // — they're emitted on the draft → signed (or pending_signature →
-          // signed) transition. This keeps draft edits cheap; amounts/dates
-          // can shift before signing without orphaning invoice rows.
 
           await client.query('COMMIT');
 
           logger.info({
             tenantId, contractId: contract.id, contractNumber,
             initialStatus, invoicesCreated,
+            templatePath: isFixedDurationTemplate ? 'fixed' : (isVariableDurationTemplate ? 'variable' : 'none'),
             phantomBooking: phantomBookingResult,
             leaseSync: leaseSyncResult,
           }, 'contract created');
@@ -300,9 +329,7 @@ module.exports = function mount(router) {
           client.release();
         }
       } catch (err) {
-        // Surface meaningful errors for known constraints
         if (err && err.code === '23P01') {
-          // exclusion_violation — overlapping contract on same resource
           return res.status(409).json({
             error: 'Resource already has an active/signed contract overlapping these dates',
           });
@@ -319,5 +346,4 @@ module.exports = function mount(router) {
   );
 };
 
-// Expose insertContractInvoices for Session 2's sign flow (used when status → signed).
 module.exports.signFlowHelpers = { insertContractInvoices };

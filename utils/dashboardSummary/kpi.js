@@ -3,9 +3,19 @@
 // Core KPI counts (confirmed/pending/cancelled, revenue, booked minutes),
 // next 5 bookings preview, and customer pulse (active/new/returning).
 //
+// FINAL-CONTRACT-FIX (this revision):
+//   - Adds contract revenue (cash-basis): sum of contract_invoices.amount
+//     where status='paid' and paid_at falls in the period. This is necessary
+//     because the phantom contract booking now carries charge_amount = 0 (to
+//     stop attributing the entire contract value to the start month).
+//     Without this addition, contract revenue would be invisible on the
+//     dashboard.
+//   - Defensive against missing table — older deployments without the
+//     contract_invoices table get 0 (same pattern as customer_memberships).
+//
 // These are the most important queries — the dashboard's KPI row depends
 // on them. Don't wrap in try/catch except for the customer-memberships
-// table existence check (some older envs lack the table).
+// and contract_invoices table existence checks.
 
 /**
  * @param {ReturnType<import('./context').buildContext>} ctx
@@ -19,7 +29,7 @@
 async function buildKpiSection(ctx) {
   const { db, tenantId, startCol, staffClause, rangeStart, rangeEnd, revenueSelect } = ctx;
 
-  // Core counters
+  // Core counters (booking-side)
   const kpi = await db.query(
     `
     SELECT
@@ -41,7 +51,42 @@ async function buildKpiSection(ctx) {
   const pendingCount = kpi.rows?.[0]?.pending_count || 0;
   const cancelledCount = kpi.rows?.[0]?.cancelled_count || 0;
   const bookedMinutes = kpi.rows?.[0]?.booked_minutes || 0;
-  const revenueAmount = kpi.rows?.[0]?.revenue_amount != null ? String(kpi.rows[0].revenue_amount) : "0";
+  const bookingRevenue = kpi.rows?.[0]?.revenue_amount != null ? Number(kpi.rows[0].revenue_amount) : 0;
+
+  // FINAL-CONTRACT-FIX: contract revenue from paid contract_invoices in period.
+  // Best-effort — table may not exist in older envs (same pattern as
+  // customer_memberships above).
+  // Staff scope: contract_invoices isn't staff-scoped, so when a staffId
+  // filter is applied (staffClause non-empty), exclude contract revenue —
+  // contracts aren't attributable to a single staff member. This matches
+  // the existing convention where bookings get the staff filter and other
+  // tenant-wide aggregates don't double-count.
+  let contractRevenue = 0;
+  if (!staffClause || staffClause.trim() === '') {
+    try {
+      const ciReg = await db.query(`SELECT to_regclass('public.contract_invoices') AS reg`);
+      if (ciReg.rows?.[0]?.reg) {
+        const ci = await db.query(
+          `
+          SELECT COALESCE(SUM(amount), 0)::numeric AS contract_revenue
+          FROM contract_invoices
+          WHERE tenant_id = $1
+            AND status = 'paid'
+            AND paid_at >= $2
+            AND paid_at < $3
+          `,
+          [tenantId, rangeStart.toISOString(), rangeEnd.toISOString()]
+        );
+        contractRevenue = Number(ci.rows?.[0]?.contract_revenue || 0);
+      }
+    } catch (err) {
+      // Non-fatal — fall back to 0.
+      // (Don't log: this branch fires once per dashboard request.)
+    }
+  }
+
+  // Combine. Stringified to match the existing KPI shape.
+  const revenueAmount = String(bookingRevenue + contractRevenue);
 
   // Next 5 bookings (upcoming pipeline preview)
   const next = await db.query(
@@ -113,7 +158,7 @@ async function buildKpiSection(ctx) {
   const conversionPct = totalRequests > 0 ? Math.round((confirmedCount / totalRequests) * 100) : null;
   const dropoffPct = totalRequests > 0 ? Math.max(0, 100 - conversionPct) : null;
 
-  // Active memberships (best-effort; table might not exist in older envs)
+  // Active memberships
   let activeMemberships = 0;
   try {
     const memReg = await db.query(`SELECT to_regclass('public.customer_memberships') AS reg`);

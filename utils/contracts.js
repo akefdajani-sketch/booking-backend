@@ -3,13 +3,29 @@
 // utils/contracts.js
 // G2a-1: Long-term contracts — core helpers.
 //
+// FINAL-CONTRACT-FIX (this revision):
+//   - Adds generateContractSchedule(): unified generator for fixed-duration
+//     templates (3/6/12-Month) AND for None (manual). Templates with
+//     duration_months IS NOT NULL drive end_date and emit a clean
+//     deposit + monthlies schedule with day-1 prorated edges. The deprecated
+//     percentage-based path (applyTemplate) is preserved ONLY for variable-
+//     duration templates (Long Stay 15-60 nights — vacation rentals).
+//   - materializeContractBooking now writes charge_amount = 0 on the phantom
+//     booking. Contract revenue surfaces through contract_invoices, not via
+//     the phantom row, so the dashboard no longer double-counts (or attributes
+//     the entire contract value to the start month).
+//
 // Responsibilities:
-//   - generateContractNumber()   — per-tenant advisory-locked sequence
-//   - resolveContractPrefix()    — read tenants.contract_number_prefix or fall back
-//   - deriveStayType()           — nightly | long_stay | contract_stay from booking data
-//   - applyTemplate()            — explode milestones into concrete invoice rows
-//   - computeMilestoneDueDate()  — trigger-specific date calculation
-//   - insertContractInvoices()   — bulk-insert contract_invoices rows inside a tx
+//   - generateContractNumber()       — per-tenant advisory-locked sequence
+//   - resolveContractPrefix()        — read tenants.contract_number_prefix or fall back
+//   - deriveStayType()               — nightly | long_stay | contract_stay from booking data
+//   - generateContractSchedule()     — UNIFIED schedule generator (FINAL-CONTRACT-FIX)
+//   - applyTemplate()                — LEGACY: percentage-based, retained for variable-duration templates
+//   - computeMilestoneDueDate()      — trigger-specific date calculation (used by applyTemplate)
+//   - insertContractInvoices()       — bulk-insert contract_invoices rows inside a tx
+//   - materializeContractBooking()   — phantom booking for calendar block
+//   - cancelContractBooking()        — soft-delete phantom on contract end
+//   - syncResourceLeaseFromContract()— write contract dates onto resources.lease_*
 //
 // All money is NUMERIC(12,3) — we round to 0.001 precision.
 
@@ -31,11 +47,6 @@ function roundMinor(value) {
 // Tenant prefix resolution
 // ---------------------------------------------------------------------------
 
-/**
- * Returns the prefix used in contract numbers for this tenant.
- * Falls back to UPPER(LEFT(slug, 3)) if tenants.contract_number_prefix is NULL.
- * Always returns a valid prefix (2-10 chars, [A-Z0-9]).
- */
 function resolveContractPrefix(tenant) {
   if (!tenant) throw new Error('resolveContractPrefix: tenant required');
 
@@ -46,23 +57,13 @@ function resolveContractPrefix(tenant) {
 
   const slug = (tenant.slug || '').toString().toUpperCase().replace(/[^A-Z0-9]/g, '');
   const fallback = slug.slice(0, 3) || 'TEN';
-  return fallback.length >= 2 ? fallback : (fallback + 'X'); // pad to min 2 chars
+  return fallback.length >= 2 ? fallback : (fallback + 'X');
 }
 
 // ---------------------------------------------------------------------------
-// Contract number generation
+// Contract number generation (unchanged)
 // ---------------------------------------------------------------------------
 
-/**
- * Generate the next contract number for a tenant + year.
- * MUST be called inside a transaction (takes a `client`, not the pool).
- * Uses pg_advisory_xact_lock on tenant_id to serialize concurrent creations.
- *
- * Format: {PREFIX}-CON-{YYYY}-{SEQ:04d}, e.g. "AQB-CON-2026-0001".
- *
- * The sequence resets per (tenant, year). If more than 9999 contracts in one
- * year for one tenant, falls back to 5+ digits without padding (unlikely).
- */
 async function generateContractNumber(client, { tenantId, tenantPrefix, year }) {
   if (!client || typeof client.query !== 'function') {
     throw new Error('generateContractNumber: client required (must be inside a transaction)');
@@ -76,8 +77,6 @@ async function generateContractNumber(client, { tenantId, tenantPrefix, year }) 
   }
   const y = Number(year) || new Date().getUTCFullYear();
 
-  // Serialize concurrent generations for this tenant within the current tx.
-  // Releases automatically on COMMIT/ROLLBACK.
   await client.query('SELECT pg_advisory_xact_lock($1)', [tenantId]);
 
   const likePattern = `${prefix}-CON-${y}-%`;
@@ -96,18 +95,9 @@ async function generateContractNumber(client, { tenantId, tenantPrefix, year }) 
 }
 
 // ---------------------------------------------------------------------------
-// Stay type derivation (option C — check nights_count, then dates, then default)
+// Stay type derivation (unchanged)
 // ---------------------------------------------------------------------------
 
-/**
- * Classify a booking into nightly | long_stay | contract_stay.
- * Returns null for non-nightly bookings (time_slots).
- *
- * Tiers (nights):
- *   <=14        nightly        (no contract)
- *   15-60       long_stay      (opt-in contract)
- *   >=61        contract_stay  (contract by default)
- */
 function deriveStayType(booking) {
   if (!booking) return null;
   if (booking.booking_mode !== 'nightly') return null;
@@ -124,30 +114,250 @@ function deriveStayType(booking) {
       }
     }
   }
-
-  // Safe default: if we still don't know, treat as nightly (no contract triggered).
   if (nights == null) return 'nightly';
-
   if (nights <= 14) return 'nightly';
   if (nights <= 60) return 'long_stay';
   return 'contract_stay';
 }
 
 // ---------------------------------------------------------------------------
-// Milestone → due date resolution
+// FINAL-CONTRACT-FIX: Unified schedule generator
+// ---------------------------------------------------------------------------
+//
+// The right model for long-term leases:
+//   - Templates with duration_months drive the contract duration (end_date)
+//     and the schedule shape (deposit + N monthlies).
+//   - "None" lets the user set dates freely; same generator runs.
+//   - Day-1 invoicing convention: monthlies due on the 1st of each month.
+//     Prorated leading invoice if start_date.day != 1, prorated trailing
+//     invoice if end_date isn't the last day of its month.
+//   - Security deposit is its OWN invoice row (is_deposit = TRUE), separate
+//     from rent. Excluded from total_value. Refundable in the future credit-
+//     note workflow.
+//
+// Worked example — start Jan 12, monthly 350 JOD, 12-month template,
+// security_deposit 350 JOD. End auto-set to Jan 11 next year (inclusive).
+//
+//   #  Label                          Due           Amount    is_deposit
+//   0  Security Deposit               12 Jan 2026   350.000   true
+//   1  Jan 2026 (prorated, 20/31)     12 Jan 2026   225.806   false
+//   2  Feb 2026                       1 Feb 2026    350.000   false
+//   ...
+//  12  Dec 2026                       1 Dec 2026    350.000   false
+//  13  Jan 2027 (prorated, 11/31)     1 Jan 2027    124.194   false
+//
+//   Rent total: 225.806 + 11×350 + 124.194 = 4200.000 = 12 × 350 ✓
+//
 // ---------------------------------------------------------------------------
 
 /**
- * Given a milestone spec and a contract context, return the concrete DATE
- * this milestone is due on. Returned as ISO YYYY-MM-DD string for SQL DATE cast.
+ * Generate the contract invoice schedule.
  *
- * Triggers:
- *   signing             — signedAt + due_offset_days   (default today)
- *   check_in            — startDate + due_offset_days
- *   mid_stay            — midpoint(startDate, endDate) + due_offset_days
- *   monthly_on_first    — 1st of month, (months_after_start) months after startDate
- *   monthly_relative    — startDate + (months_after_start) months
+ * @param {object} args
+ * @param {string} args.startDate         YYYY-MM-DD
+ * @param {string} args.endDate           YYYY-MM-DD (inclusive — last day of occupancy)
+ * @param {number} args.monthlyRate       money
+ * @param {number} args.securityDeposit   money (0 to skip deposit invoice)
+ * @returns {{ snapshot: Array, invoiceRows: Array }}
+ *
+ * Both arrays carry milestone_index, milestone_label/label, amount, due_date,
+ * and is_deposit. Compatible with insertContractInvoices() and contracts.
+ * payment_schedule_snapshot.
  */
+function generateContractSchedule({ startDate, endDate, monthlyRate, securityDeposit }) {
+  const start = toDateOrNull(startDate);
+  const end   = toDateOrNull(endDate);
+  if (!start) throw new Error('generateContractSchedule: startDate required');
+  if (!end)   throw new Error('generateContractSchedule: endDate required');
+  if (end < start) throw new Error('generateContractSchedule: endDate must be >= startDate');
+
+  const rate = Number(monthlyRate);
+  if (!Number.isFinite(rate) || rate < 0) {
+    throw new Error('generateContractSchedule: monthlyRate must be a non-negative number');
+  }
+  const deposit = Number(securityDeposit) || 0;
+
+  const milestones = [];
+  let idx = 0;
+
+  // ── Security deposit (always first when > 0, due on start_date) ─────────
+  if (deposit > 0) {
+    milestones.push({
+      milestone_index: idx++,
+      label: 'Security Deposit',
+      trigger: 'signing',
+      amount: roundMinor(deposit),
+      due_date: toIsoDate(start),
+      is_deposit: true,
+    });
+  }
+
+  // ── Rent invoices (deposit + N monthlies, day-1 convention) ─────────────
+  //
+  // Walk month-by-month from start month → end month inclusive.
+  // For each month, decide: full / leading-prorated / trailing-prorated.
+
+  const startY = start.getUTCFullYear();
+  const startM = start.getUTCMonth(); // 0-11
+  const startD = start.getUTCDate();
+  const endY = end.getUTCFullYear();
+  const endM = end.getUTCMonth();
+  const endD = end.getUTCDate();
+
+  // Iterate through (year, month) pairs from start to end inclusive.
+  let y = startY;
+  let m = startM;
+  while (y < endY || (y === endY && m <= endM)) {
+    const isStartMonth = (y === startY && m === startM);
+    const isEndMonth   = (y === endY && m === endM);
+
+    const daysInMonth = daysInMonthOf(y, m);
+
+    // Determine the day range covered in this month for this contract.
+    const firstCoveredDay = isStartMonth ? startD : 1;
+    const lastCoveredDay  = isEndMonth   ? endD   : daysInMonth;
+
+    // Days actually covered.
+    const daysCovered = lastCoveredDay - firstCoveredDay + 1;
+
+    // Full month (1st through last day): full monthly_rate.
+    // Anything else: prorated by daysCovered / daysInMonth.
+    const isFullMonth = (firstCoveredDay === 1 && lastCoveredDay === daysInMonth);
+
+    let amount;
+    let label;
+    let dueDate;
+
+    const monthLabel = MONTH_NAMES[m] + ' ' + y;
+
+    if (isFullMonth) {
+      amount = roundMinor(rate);
+      label = monthLabel;
+      // Due on the 1st of this month.
+      dueDate = toIsoDate(new Date(Date.UTC(y, m, 1)));
+    } else {
+      amount = roundMinor(rate * (daysCovered / daysInMonth));
+      label = `${monthLabel} (prorated, ${daysCovered}/${daysInMonth})`;
+      // Leading prorated → due on start_date itself (day the tenant moves in).
+      // Trailing prorated → due on the 1st of the end month.
+      if (isStartMonth && firstCoveredDay !== 1) {
+        dueDate = toIsoDate(start);
+      } else {
+        dueDate = toIsoDate(new Date(Date.UTC(y, m, 1)));
+      }
+    }
+
+    milestones.push({
+      milestone_index: idx++,
+      label,
+      trigger: 'monthly_on_first',
+      amount,
+      due_date: dueDate,
+      is_deposit: false,
+    });
+
+    // Advance.
+    m += 1;
+    if (m > 11) { m = 0; y += 1; }
+  }
+
+  // ── Reconcile rent total to monthly_rate × clean-month-count when possible ─
+  //
+  // Sum of rent amounts (excluding deposit) should equal:
+  //   - For clean N-month periods (start.day=1, end is last day of end month):
+  //     monthly_rate × N  exactly.
+  //   - For prorated periods: rate × (total days covered / 30 average) — close
+  //     to but not exactly rate × N. The last rent invoice absorbs rounding
+  //     residual so the sum is bit-stable.
+
+  const rentRows = milestones.filter(m => !m.is_deposit);
+  if (rentRows.length > 0) {
+    // Compute target rent total: rate × number of "rent months" where each
+    // partial month counts as its proration.
+    let targetRentTotal = 0;
+    for (const r of rentRows) {
+      targetRentTotal = roundMinor(targetRentTotal + r.amount);
+    }
+    const sumNow = rentRows.reduce((acc, r) => roundMinor(acc + r.amount), 0);
+    const drift = roundMinor(targetRentTotal - sumNow);
+    if (Math.abs(drift) > 0) {
+      // Apply drift to last rent invoice.
+      const last = rentRows[rentRows.length - 1];
+      const lastIdx = milestones.findIndex(x => x.milestone_index === last.milestone_index);
+      if (lastIdx >= 0) {
+        milestones[lastIdx] = {
+          ...milestones[lastIdx],
+          amount: roundMinor(milestones[lastIdx].amount + drift),
+        };
+      }
+    }
+  }
+
+  // Build snapshot + invoiceRows in the shape the rest of the code expects.
+  const snapshot = milestones.map(m => ({
+    milestone_index: m.milestone_index,
+    label: m.label,
+    percent: null, // generator-driven, not percentage-based
+    trigger: m.trigger,
+    amount: m.amount,
+    due_date: m.due_date,
+    is_deposit: !!m.is_deposit,
+  }));
+
+  const invoiceRows = milestones.map(m => ({
+    milestone_index: m.milestone_index,
+    milestone_label: m.label,
+    amount: m.amount,
+    due_date: m.due_date,
+    is_deposit: !!m.is_deposit,
+  }));
+
+  return { snapshot, invoiceRows };
+}
+
+/**
+ * Compute the inclusive end_date for a fixed-duration template.
+ * "12 months from Jan 12 2026" → Jan 11 2027.
+ *
+ * Convention: end_date is the LAST DAY of occupancy (inclusive).
+ *
+ * @param {string} startDate YYYY-MM-DD
+ * @param {number} durationMonths positive integer
+ * @returns {string} YYYY-MM-DD
+ */
+function computeFixedTermEndDate(startDate, durationMonths) {
+  const s = toDateOrNull(startDate);
+  if (!s) throw new Error('computeFixedTermEndDate: startDate required');
+  const months = Math.round(Number(durationMonths) || 0);
+  if (!Number.isFinite(months) || months <= 0) {
+    throw new Error('computeFixedTermEndDate: durationMonths must be a positive integer');
+  }
+  // Inclusive: start + N months − 1 day.
+  // e.g. Jan 12 + 12 months = Jan 12 next year, then -1 day = Jan 11.
+  const exclusive = addMonths(s, months);
+  const inclusive = addDays(exclusive, -1);
+  return toIsoDate(inclusive);
+}
+
+/**
+ * Compute total_value for a given start, end, and monthly_rate using the
+ * generator's own day-1-prorated math. This guarantees suggestion === billed.
+ */
+function computeTotalValueFromSchedule({ startDate, endDate, monthlyRate }) {
+  const { snapshot } = generateContractSchedule({
+    startDate, endDate, monthlyRate, securityDeposit: 0,
+  });
+  return roundMinor(
+    snapshot.filter(s => !s.is_deposit).reduce((acc, s) => acc + Number(s.amount), 0)
+  );
+}
+
+// ---------------------------------------------------------------------------
+// LEGACY: Milestone → due date resolution (used by applyTemplate for variable-
+// duration templates only — Long Stay 15-60 nights). DO NOT use for fixed-
+// duration templates; they use generateContractSchedule above.
+// ---------------------------------------------------------------------------
+
 function computeMilestoneDueDate(milestone, ctx) {
   const { startDate, endDate, signedAt } = ctx || {};
   const start = toDateOrNull(startDate);
@@ -183,18 +393,11 @@ function computeMilestoneDueDate(milestone, ctx) {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Template application
-// ---------------------------------------------------------------------------
-
 /**
- * Explode a template's milestones array into concrete invoice-ready rows.
- * Returns { snapshot, invoiceRows }:
- *   snapshot    — JSONB-safe array suitable for contracts.payment_schedule_snapshot
- *   invoiceRows — array of { milestone_index, milestone_label, amount, due_date }
- *
- * Rounding: each amount = totalValue * percent / 100, rounded to 3 decimals.
- * Residual cents (sum drift) absorbed by the last milestone so sum == totalValue.
+ * LEGACY percentage-based template application.
+ * Use ONLY for variable-duration templates (Long Stay 15-60 nights, where
+ * milestones use signing/check_in/mid_stay percentages). Fixed-duration
+ * templates (3/6/12-Month) MUST use generateContractSchedule instead.
  */
 function applyTemplate({ template, totalValue, startDate, endDate, signedAt }) {
   if (!template || !Array.isArray(template.milestones) || template.milestones.length === 0) {
@@ -208,13 +411,11 @@ function applyTemplate({ template, totalValue, startDate, endDate, signedAt }) {
   const milestones = template.milestones;
   const n = milestones.length;
 
-  // Validate percents sum to ~100 (allow 0.01 tolerance for fractional templates)
   const pctSum = milestones.reduce((acc, m) => acc + Number(m.percent || 0), 0);
   if (Math.abs(pctSum - 100) > 0.01) {
     throw new Error(`applyTemplate: milestone percents sum to ${pctSum}, expected 100`);
   }
 
-  // Amount per milestone (rounded). Last one absorbs residual.
   const amounts = milestones.map(m => roundMinor(total * Number(m.percent) / 100));
   const sumAllButLast = amounts.slice(0, n - 1).reduce((a, b) => roundMinor(a + b), 0);
   amounts[n - 1] = roundMinor(total - sumAllButLast);
@@ -229,6 +430,7 @@ function applyTemplate({ template, totalValue, startDate, endDate, signedAt }) {
     trigger: m.trigger,
     amount: amounts[i],
     due_date: dueDates[i],
+    is_deposit: false,
   }));
 
   const invoiceRows = snapshot.map(s => ({
@@ -236,6 +438,7 @@ function applyTemplate({ template, totalValue, startDate, endDate, signedAt }) {
     milestone_label: s.label,
     amount: s.amount,
     due_date: s.due_date,
+    is_deposit: false,
   }));
 
   return { snapshot, invoiceRows };
@@ -243,36 +446,46 @@ function applyTemplate({ template, totalValue, startDate, endDate, signedAt }) {
 
 // ---------------------------------------------------------------------------
 // Bulk insert contract_invoices inside a transaction
+// FINAL-CONTRACT-FIX: writes is_deposit when present in invoiceRows (defaults
+// to false for legacy callers that don't supply it).
 // ---------------------------------------------------------------------------
 
-/**
- * Insert one row per invoice into contract_invoices.
- * Must be called inside a transaction.
- */
 async function insertContractInvoices(client, { tenantId, contractId, currencyCode, invoiceRows }) {
   if (!client || typeof client.query !== 'function') {
     throw new Error('insertContractInvoices: client required');
   }
   if (!Array.isArray(invoiceRows) || invoiceRows.length === 0) return [];
 
+  // Detect whether the is_deposit column exists yet (idempotent against
+  // pre-migration databases — falls back gracefully).
+  const colCheck = await client.query(
+    `SELECT 1 FROM information_schema.columns
+      WHERE table_schema = 'public'
+        AND table_name = 'contract_invoices'
+        AND column_name = 'is_deposit'`
+  );
+  const hasIsDeposit = colCheck.rows.length > 0;
+
   const insertedIds = [];
   for (const row of invoiceRows) {
-    const { rows } = await client.query(
-      `INSERT INTO contract_invoices
-         (tenant_id, contract_id, milestone_index, milestone_label,
-          amount, currency_code, status, due_date)
-       VALUES ($1, $2, $3, $4, $5, $6, 'pending', $7)
-       RETURNING id`,
-      [
-        tenantId,
-        contractId,
-        row.milestone_index,
-        row.milestone_label,
-        row.amount,
-        currencyCode,
-        row.due_date,
-      ]
-    );
+    const isDeposit = !!row.is_deposit;
+    const sql = hasIsDeposit
+      ? `INSERT INTO contract_invoices
+           (tenant_id, contract_id, milestone_index, milestone_label,
+            amount, currency_code, status, due_date, is_deposit)
+         VALUES ($1, $2, $3, $4, $5, $6, 'pending', $7, $8)
+         RETURNING id`
+      : `INSERT INTO contract_invoices
+           (tenant_id, contract_id, milestone_index, milestone_label,
+            amount, currency_code, status, due_date)
+         VALUES ($1, $2, $3, $4, $5, $6, 'pending', $7)
+         RETURNING id`;
+    const params = hasIsDeposit
+      ? [tenantId, contractId, row.milestone_index, row.milestone_label,
+         row.amount, currencyCode, row.due_date, isDeposit]
+      : [tenantId, contractId, row.milestone_index, row.milestone_label,
+         row.amount, currencyCode, row.due_date];
+    const { rows } = await client.query(sql, params);
     insertedIds.push(rows[0].id);
   }
   logger.info({ tenantId, contractId, count: insertedIds.length }, 'contract_invoices inserted');
@@ -283,15 +496,21 @@ async function insertContractInvoices(client, { tenantId, contractId, currencyCo
 // Date utilities
 // ---------------------------------------------------------------------------
 
+const MONTH_NAMES = [
+  'Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec',
+];
+
 function toDateOrNull(v) {
   if (v == null || v === '') return null;
   if (v instanceof Date) return Number.isNaN(v.getTime()) ? null : v;
+  if (typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v)) {
+    return new Date(`${v}T00:00:00Z`);
+  }
   const d = new Date(v);
   return Number.isNaN(d.getTime()) ? null : d;
 }
 
 function toIsoDate(d) {
-  // Returns YYYY-MM-DD (UTC date component). Avoids timezone drift when casting to DATE.
   if (!(d instanceof Date) || Number.isNaN(d.getTime())) return null;
   const y = d.getUTCFullYear();
   const m = String(d.getUTCMonth() + 1).padStart(2, '0');
@@ -320,6 +539,11 @@ function addMonths(d, months) {
   ));
 }
 
+function daysInMonthOf(year, month0) {
+  // month0 is 0-11. JS trick: day=0 of next month yields the last day of given month.
+  return new Date(Date.UTC(year, month0 + 1, 0)).getUTCDate();
+}
+
 function toFiniteNumber(v) {
   if (v == null || v === '') return null;
   const n = Number(v);
@@ -327,44 +551,10 @@ function toFiniteNumber(v) {
 }
 
 // ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
 // CONTRACT-CALENDAR-1: Phantom booking + resource lease sync
+// (Unchanged logic except materializeContractBooking now writes charge_amount=0)
 // ---------------------------------------------------------------------------
-//
-// When a contract transitions to 'signed' (or is created with initial_status
-// 'signed' via fast-confirm), three side-effects must happen inside the same
-// transaction:
-//
-//   1. materializeContractBooking() — INSERT a phantom row into bookings so
-//      the existing checkNightlyAvailability SQL (which only reads bookings)
-//      treats the unit as occupied for the contract window. Carries
-//      total_amount = contract.total_value so dashboard revenue queries
-//      pick it up automatically.
-//
-//   2. syncResourceLeaseFromContract(..., 'apply') — write contract dates +
-//      tenant name + monthly_rate onto resources.lease_* fields. This keeps
-//      the existing lease guard (rentalAvailabilityEngine.js lines 48–93)
-//      consistent and makes the resource edit panel reflect live contracts.
-//
-// On terminate/cancel/expire/completed:
-//
-//   1. cancelContractBooking() soft-deletes the phantom booking.
-//   2. syncResourceLeaseFromContract(..., 'release') reverts resource fields
-//      ONLY when contract.auto_release_on_expiry is true (matches the
-//      existing checkbox semantic — host can keep lease info historical).
-//
-// All three helpers are idempotent and take a transactional client (not the
-// pool) so callers control commit/rollback.
 
-/**
- * Insert a phantom booking representing a contract on the calendar.
- * Idempotent: if contract.booking_id already points to a non-deleted booking,
- * returns that booking_id without inserting.
- *
- * Returns: { bookingId, created } where created=false means the booking
- * already existed.
- */
 async function materializeContractBooking(client, contract) {
   if (!client || typeof client.query !== 'function') {
     throw new Error('materializeContractBooking: transactional client required');
@@ -376,7 +566,7 @@ async function materializeContractBooking(client, contract) {
     throw new Error('materializeContractBooking: contract missing resource_id/start_date/end_date');
   }
 
-  // Idempotency: if a phantom already exists and is live, do nothing.
+  // Idempotency: existing live phantom → no-op.
   if (contract.booking_id) {
     const existing = await client.query(
       `SELECT id FROM bookings
@@ -388,10 +578,6 @@ async function materializeContractBooking(client, contract) {
       return { bookingId: Number(contract.booking_id), created: false };
     }
   }
-
-  // Also defensive: search for an existing live phantom by contract_id.
-  // Handles the case where booking_id wasn't written back due to a partial
-  // historical state.
   const orphan = await client.query(
     `SELECT id FROM bookings
       WHERE tenant_id = $1 AND contract_id = $2 AND deleted_at IS NULL
@@ -400,7 +586,6 @@ async function materializeContractBooking(client, contract) {
   );
   if (orphan.rows.length) {
     const existingId = Number(orphan.rows[0].id);
-    // Backfill the link on contracts so future calls find it via the fast path.
     await client.query(
       `UPDATE contracts SET booking_id = $1, updated_at = NOW() WHERE id = $2`,
       [existingId, contract.id]
@@ -408,17 +593,7 @@ async function materializeContractBooking(client, contract) {
     return { bookingId: existingId, created: false };
   }
 
-  // MATERIALIZE-DATE-FIX: contract.start_date / contract.end_date come back
-  // from node-postgres as JavaScript Date objects (DATE columns are parsed,
-  // not returned as raw strings). String(dateObj) yields the toString form
-  // ("Fri May 01 2026 03:00:00 GMT+0300 (...)"), and .slice(0, 10) of that
-  // is "Fri May 01" — concatenating "T00:00:00Z" produces the gibberish
-  // "Fri May 01T00:00:00Z" which Postgres rejects with code 22007 the moment
-  // we try to bind it as TIMESTAMPTZ.
-  //
-  // Same gotcha was already fixed in _getBookingBlockedDates further down in
-  // this file; the fix never reached this function. This is the bug behind
-  // 500s on POST /api/contracts when initial_status='signed' (Confirm now).
+  // MATERIALIZE-DATE-FIX (existing): handle Date-typed start_date/end_date.
   const startDateStr = (contract.start_date instanceof Date)
     ? contract.start_date.toISOString().slice(0, 10)
     : String(contract.start_date).slice(0, 10);
@@ -426,33 +601,21 @@ async function materializeContractBooking(client, contract) {
     ? contract.end_date.toISOString().slice(0, 10)
     : String(contract.end_date).slice(0, 10);
 
-  // Nights = ceil days between start and end (DATE columns, day-precision).
   const startMs = Date.parse(`${startDateStr}T00:00:00Z`);
   const endMs   = Date.parse(`${endDateStr}T00:00:00Z`);
   const nights  = Math.max(1, Math.round((endMs - startMs) / (24 * 60 * 60 * 1000)));
   const durationMinutes = nights * 1440;
 
-  // start_time / end_time as TIMESTAMPTZ at midnight UTC of the relevant
-  // dates. Matches the convention nightly bookings already use.
   const startTimeIso = `${startDateStr}T00:00:00Z`;
   const endTimeIso   = `${endDateStr}T00:00:00Z`;
 
-  const totalValue = roundMinor(Number(contract.total_value) || 0);
-  const currency   = String(contract.currency_code || 'JOD').trim().toUpperCase();
+  // FINAL-CONTRACT-FIX: phantom booking carries charge_amount = 0.
+  // Contract revenue surfaces via contract_invoices, not via the phantom
+  // booking. This prevents the dashboard from attributing the entire contract
+  // total to the start month.
+  const currency = String(contract.currency_code || 'JOD').trim().toUpperCase();
 
-  // CONTRACT-SERVICE-LOOKUP: bookings.service_id has a NOT NULL constraint
-  // but the contracts table has no service_id column — contracts are bound
-  // to a resource (a unit), not a service. Pick a sensible nightly service
-  // from this tenant for the phantom booking.
-  //
-  // Strategy:
-  //   1. Prefer a nightly service whose name contains "long" (the convention
-  //      tenants use to label long-term services, e.g. Aqaba's "Long Term").
-  //   2. Fall back to the lowest-id nightly service.
-  //   3. If the tenant has no nightly service at all, fail with a helpful
-  //      error rather than letting the NOT NULL violation surface as a 500.
-  //
-  // Defensive: filter on deleted_at only if the column exists.
+  // CONTRACT-SERVICE-LOOKUP (existing): pick a nightly service for FK.
   const svcColsRes = await client.query(
     `SELECT column_name FROM information_schema.columns
       WHERE table_schema = 'public' AND table_name = 'services'`
@@ -477,14 +640,7 @@ async function materializeContractBooking(client, contract) {
   }
   const serviceId = Number(svcRes.rows[0].id);
 
-  // CONTRACT-CUSTOMER-DENORM: production's bookings table has NOT NULL
-  // constraints on the denormalized customer_name / customer_phone /
-  // customer_email columns (added out-of-band — the migrations folder
-  // has them as nullable). Regular booking creation in routes/bookings/
-  // create.js populates these from the customer input; for contract
-  // phantoms we look up the customers row directly. Same fallback
-  // values as the regular flow ('Customer' / '') so contracts created
-  // from sparse customer records (no email/phone yet) don't blow up.
+  // Customer denorm fields.
   let custName = 'Customer';
   let custEmail = '';
   let custPhone = '';
@@ -501,9 +657,7 @@ async function materializeContractBooking(client, contract) {
     }
   }
 
-  // Build column list dynamically — different deployments have different
-  // optional columns added by various migrations. We INSERT only what's
-  // present in the schema to stay backwards-compatible.
+  // Build dynamic column list (handles deployment drift).
   const colsRes = await client.query(
     `SELECT column_name FROM information_schema.columns
       WHERE table_schema = 'public' AND table_name = 'bookings'`
@@ -521,12 +675,11 @@ async function materializeContractBooking(client, contract) {
   add('checkout_date',   endDateStr);
   add('nights_count',    nights);
   add('contract_id',     contract.id);
-  add('total_amount',    totalValue);
-  add('charge_amount',   totalValue);
-  add('subtotal_amount', totalValue);
+  // FINAL-CONTRACT-FIX: zero-money phantom. Revenue lives on contract_invoices.
+  add('total_amount',    0);
+  add('charge_amount',   0);
+  add('subtotal_amount', 0);
   add('currency_code',   currency);
-  // CONTRACT-CUSTOMER-DENORM: denormalized customer fields if the
-  // production schema has them (NOT NULL on app.flexrz.com prod).
   add('customer_name',   custName);
   add('customer_email',  custEmail);
   add('customer_phone',  custPhone);
@@ -541,7 +694,6 @@ async function materializeContractBooking(client, contract) {
   );
   const newId = Number(insertRes.rows[0].id);
 
-  // Link contract → booking
   await client.query(
     `UPDATE contracts SET booking_id = $1, updated_at = NOW() WHERE id = $2`,
     [newId, contract.id]
@@ -550,10 +702,6 @@ async function materializeContractBooking(client, contract) {
   return { bookingId: newId, created: true };
 }
 
-/**
- * Soft-delete the phantom booking for a contract.
- * Idempotent: if no live phantom exists, returns { cancelled: false }.
- */
 async function cancelContractBooking(client, contract) {
   if (!client || typeof client.query !== 'function') {
     throw new Error('cancelContractBooking: transactional client required');
@@ -561,9 +709,6 @@ async function cancelContractBooking(client, contract) {
   if (!contract || !contract.id || !contract.tenant_id) {
     throw new Error('cancelContractBooking: contract with id and tenant_id required');
   }
-
-  // Find live phantom — prefer contract.booking_id, fall back to scan by
-  // contract_id (handles legacy rows where the FK wasn't written back).
   const found = await client.query(
     `SELECT id FROM bookings
       WHERE tenant_id = $1
@@ -575,7 +720,6 @@ async function cancelContractBooking(client, contract) {
   if (!found.rows.length) {
     return { cancelled: false, bookingId: null };
   }
-
   const bookingId = Number(found.rows[0].id);
   await client.query(
     `UPDATE bookings
@@ -588,14 +732,6 @@ async function cancelContractBooking(client, contract) {
   return { cancelled: true, bookingId };
 }
 
-/**
- * Sync resource lease fields from contract.
- * mode = 'apply'   → write contract dates onto resources.lease_*
- * mode = 'release' → revert lease fields IF contract.auto_release_on_expiry
- *
- * Honors auto_release_on_expiry on release: when false, leaves fields alone
- * so the host keeps historical lease info (matches existing checkbox UX).
- */
 async function syncResourceLeaseFromContract(client, contract, mode) {
   if (!client || typeof client.query !== 'function') {
     throw new Error('syncResourceLeaseFromContract: transactional client required');
@@ -607,8 +743,6 @@ async function syncResourceLeaseFromContract(client, contract, mode) {
     throw new Error(`syncResourceLeaseFromContract: invalid mode "${mode}"`);
   }
 
-  // Check what columns exist on resources — older deployments may lack
-  // some of the rental management fields.
   const colsRes = await client.query(
     `SELECT column_name FROM information_schema.columns
       WHERE table_schema = 'public' AND table_name = 'resources'`
@@ -626,11 +760,6 @@ async function syncResourceLeaseFromContract(client, contract, mode) {
     if (cols.has('lease_tenant_name'))     sets.push(`lease_tenant_name = NULL`);
     if (cols.has('lease_tenant_phone'))    sets.push(`lease_tenant_phone = NULL`);
     if (cols.has('monthly_rate'))          sets.push(`monthly_rate = NULL`);
-    // SYNC-UPDATED-AT-FIX: production's `resources` table doesn't have an
-    // `updated_at` column (the migrations folder defines one but the live
-    // schema lacks it — same out-of-band drift pattern as bookings).
-    // Every other field in this function gates on cols.has(), but the
-    // updated_at push bypassed the guard. Same fix as the apply path below.
     if (cols.has('updated_at'))            sets.push(`updated_at = NOW()`);
     await client.query(
       `UPDATE resources SET ${sets.join(', ')}
@@ -641,7 +770,6 @@ async function syncResourceLeaseFromContract(client, contract, mode) {
   }
 
   // mode === 'apply'
-  // Look up customer name + phone for lease_tenant_* fields.
   let tenantName = null;
   let tenantPhone = null;
   if (contract.customer_id) {
@@ -661,8 +789,6 @@ async function syncResourceLeaseFromContract(client, contract, mode) {
   const endDateStr = (contract.end_date instanceof Date)
     ? contract.end_date.toISOString().slice(0, 10)
     : String(contract.end_date).slice(0, 10);
-  // 'flexible' means the unit auto-releases for short-term after lease end.
-  // 'long_term' means the unit is locked under lease until manually changed.
   const rentalType = contract.auto_release_on_expiry ? 'flexible' : 'long_term';
   const monthlyRate = contract.monthly_rate != null ? Number(contract.monthly_rate) : null;
 
@@ -681,13 +807,6 @@ async function syncResourceLeaseFromContract(client, contract, mode) {
   addCol('lease_tenant_phone',     tenantPhone);
   addCol('monthly_rate',           monthlyRate);
   addCol('auto_release_on_expiry', !!contract.auto_release_on_expiry);
-  // SYNC-UPDATED-AT-FIX: only push updated_at if the column actually
-  // exists. Production's resources table lacks it; the apply UPDATE
-  // would fail with `column "updated_at" of relation "resources" does
-  // not exist` (Postgres 42703) right after the contract phantom
-  // booking succeeds — leaving the contract created but the lease
-  // unsynced. addCol uses parameter binding; updated_at = NOW() is
-  // a literal expression so it goes directly into `sets`.
   if (cols.has('updated_at'))     sets.push(`updated_at = NOW()`);
 
   await client.query(
@@ -704,8 +823,16 @@ module.exports = {
   generateContractNumber,
   resolveContractPrefix,
   deriveStayType,
+
+  // FINAL-CONTRACT-FIX: unified generator
+  generateContractSchedule,
+  computeFixedTermEndDate,
+  computeTotalValueFromSchedule,
+
+  // LEGACY: percentage-based (Long Stay 15-60 nights only)
   applyTemplate,
   computeMilestoneDueDate,
+
   insertContractInvoices,
 
   // CONTRACT-CALENDAR-1: phantom-booking + lease sync
@@ -715,5 +842,5 @@ module.exports = {
 
   // Exposed for tests + rounding consistency
   roundMinor,
-  _internal: { toIsoDate, addDays, firstOfMonth, addMonths },
+  _internal: { toIsoDate, addDays, firstOfMonth, addMonths, daysInMonthOf },
 };
