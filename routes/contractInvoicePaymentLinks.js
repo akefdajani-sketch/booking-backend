@@ -487,15 +487,26 @@ router.post('/public/:token/record-payment', async (req, res) => {
   const client = await db.pool.connect();
   try {
     const token = String(req.params.token || '').trim();
-    const { paidVia, amountPaid, paymentRef, notes } = req.body || {};
+    let { paidVia, amountPaid, paymentRef, notes } = req.body || {};
 
-    if (!['cliq', 'cash'].includes(paidVia)) {
-      return res.status(400).json({ error: "paidVia must be 'cliq' or 'cash'" });
+    // G2-PL-3: card path uses this same endpoint after MPGS hosted checkout
+    // returns the customer to /pay-invoice/<token>/result. The orderId is
+    // the paymentRef. amountPaid=0 (or omitted) is interpreted as "settle
+    // the full outstanding balance" — same convention as rentalPaymentLinks.
+    const ALLOWED_METHODS = ['cliq', 'cash', 'card'];
+    if (!ALLOWED_METHODS.includes(paidVia)) {
+      return res.status(400).json({ error: "paidVia must be 'cliq', 'cash', or 'card'" });
     }
-    const amount = Number(amountPaid);
-    if (!Number.isFinite(amount) || amount <= 0) {
-      return res.status(400).json({ error: 'amountPaid must be a positive number' });
+
+    let amount = Number(amountPaid);
+    const isCardSettleAll = paidVia === 'card' && (!amountPaid || amount === 0);
+    if (!isCardSettleAll) {
+      if (!Number.isFinite(amount) || amount <= 0) {
+        return res.status(400).json({ error: 'amountPaid must be a positive number' });
+      }
     }
+    // For card with paymentRef but no amount, we'll resolve outstanding inside
+    // the transaction below.
 
     await client.query('BEGIN');
 
@@ -534,6 +545,15 @@ router.post('/public/:token/record-payment', async (req, res) => {
     if (['void', 'cancelled'].includes(r.invoice_status)) {
       await client.query('ROLLBACK');
       return res.status(409).json({ error: `Invoice is ${r.invoice_status}` });
+    }
+
+    // G2-PL-3: resolve "card settle all" path — amount = outstanding.
+    if (isCardSettleAll) {
+      amount = Number(r.invoice_amount) - Number(r.invoice_amount_paid);
+      if (amount <= 0) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({ error: 'Nothing left to pay on this invoice' });
+      }
     }
 
     const newPaid    = Number(r.invoice_amount_paid) + amount;
