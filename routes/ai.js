@@ -922,3 +922,14 @@ router.post("/:tenantSlug/transcribe", optionalAuth, upload.single("audio"), asy
 
 
 module.exports = router;
+
+// VOICE-2: expose helpers for routes/voice.js to reuse without duplication.
+// These three functions encapsulate the entire chat brain's I/O — context
+// fetch, action execution, confirmation detection. routes/voice.js calls
+// them inside its booking-assistant tool bridge so the voice path produces
+// identical results to the text path.
+module.exports.fetchBusinessContext   = fetchBusinessContext;
+module.exports.fetchCustomerData      = fetchCustomerData;
+module.exports.handleAction           = handleAction;
+module.exports.isConfirmationMessage  = isConfirmationMessage;
+module.exports.optionalAuth           = optionalAuth;

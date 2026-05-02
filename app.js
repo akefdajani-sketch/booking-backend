@@ -270,6 +270,9 @@ app.use("/api/tenant-domains", tenantDomainsRouter);
 
 // AI: Claude-powered routes
 app.use("/api/ai", aiRouter);
+// VOICE-2: ElevenLabs Conversational AI integration. /session, /booking-assistant
+// (the agent's tool-bridge), /session/end, /session/event.
+app.use("/api/voice", require("./routes/voice"));
 
 if (ENABLE_DEBUG_ROUTES && process.env.NODE_ENV !== "production") {
   app.use("/api/debug", debugGoogleAuthRouter);
