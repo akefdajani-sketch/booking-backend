@@ -697,20 +697,46 @@ async function materializeContractBooking(client, contract) {
   // total to the start month.
   const currency = String(contract.currency_code || 'JOD').trim().toUpperCase();
 
-  // CONTRACT-SERVICE-LOOKUP (existing): pick a nightly service for FK.
+  // CONTRACT-SERVICE-LOOKUP (LONG-TERM-FLAG-1): pick a nightly service for FK.
+  //
+  // Preference order:
+  //   1. is_long_term = TRUE         (post-migration 061 — explicit flag)
+  //   2. name LIKE '%long%' (case-insensitive) — pre-migration backfill safety
+  //                                              net for tenants who haven't
+  //                                              yet been backfilled, or
+  //                                              tenants where someone created
+  //                                              a new long-term service
+  //                                              without flipping the flag yet
+  //   3. lowest-id nightly service   — final fallback
+  //
+  // If neither preference 1 nor 2 has a match, we still get something via
+  // ORDER BY id ASC LIMIT 1 — same fallback the original heuristic used.
+  //
+  // Schema-drift defenses kept (deleted_at conditional, is_long_term conditional)
+  // because production may still be on a column-list that predates migration 061.
   const svcColsRes = await client.query(
     `SELECT column_name FROM information_schema.columns
       WHERE table_schema = 'public' AND table_name = 'services'`
   );
-  const svcHasDeletedAt = svcColsRes.rows.some(r => r.column_name === 'deleted_at');
+  const svcCols = new Set(svcColsRes.rows.map(r => r.column_name));
+  const svcHasDeletedAt    = svcCols.has('deleted_at');
+  const svcHasIsLongTerm   = svcCols.has('is_long_term');
+
+  // Build the ORDER BY priority list dynamically based on which columns exist.
+  const orderByLines = [];
+  if (svcHasIsLongTerm) {
+    orderByLines.push(`CASE WHEN is_long_term = TRUE THEN 0 ELSE 1 END`);
+  }
+  // Name-LIKE heuristic kept as transitional fallback (preference 2 above).
+  orderByLines.push(`CASE WHEN LOWER(name) LIKE '%long%' THEN 0 ELSE 1 END`);
+  orderByLines.push(`id ASC`);
+
   const svcSql = `
     SELECT id FROM services
      WHERE tenant_id    = $1
        AND booking_mode = 'nightly'
        ${svcHasDeletedAt ? 'AND deleted_at IS NULL' : ''}
-     ORDER BY
-       CASE WHEN LOWER(name) LIKE '%long%' THEN 0 ELSE 1 END,
-       id ASC
+     ORDER BY ${orderByLines.join(', ')}
      LIMIT 1
   `;
   const svcRes = await client.query(svcSql, [contract.tenant_id]);
