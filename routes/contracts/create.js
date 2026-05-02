@@ -361,6 +361,15 @@ module.exports = function mount(router) {
           client.release();
         }
       } catch (err) {
+        // CONTRACT-CONFLICT-DEFENSE-1: backend conflict check throws this when
+        // the contract's date range overlaps an existing non-cancelled booking
+        // on the same resource. Surface as 409 with the offending booking ids.
+        if (err && err.code === 'CONTRACT_BOOKING_CONFLICT') {
+          return res.status(409).json({
+            error: 'Contract dates overlap existing booking(s) on this resource',
+            conflictingBookingIds: err.conflictingBookingIds || [],
+          });
+        }
         if (err && err.code === '23P01') {
           return res.status(409).json({
             error: 'Resource already has an active/signed contract overlapping these dates',

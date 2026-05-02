@@ -518,6 +518,19 @@ function toIsoDate(d) {
   return `${y}-${m}-${day}`;
 }
 
+// Coerce either a Date or a string to a YYYY-MM-DD ISO date string.
+// Used by materializeContractBooking and cancelContractBooking (formerly
+// duplicated 3x; centralised here). Handles node-postgres' habit of
+// returning DATE columns as Date objects with full ISO strings.
+function toIsoDateString(v) {
+  if (v == null) return null;
+  if (v instanceof Date) {
+    if (Number.isNaN(v.getTime())) return null;
+    return v.toISOString().slice(0, 10);
+  }
+  return String(v).slice(0, 10);
+}
+
 function addDays(d, days) {
   if (!(d instanceof Date)) return null;
   const out = new Date(d.getTime());
@@ -594,12 +607,14 @@ async function materializeContractBooking(client, contract) {
   }
 
   // MATERIALIZE-DATE-FIX (existing): handle Date-typed start_date/end_date.
-  const startDateStr = (contract.start_date instanceof Date)
-    ? contract.start_date.toISOString().slice(0, 10)
-    : String(contract.start_date).slice(0, 10);
-  const endDateStr = (contract.end_date instanceof Date)
-    ? contract.end_date.toISOString().slice(0, 10)
-    : String(contract.end_date).slice(0, 10);
+  // Refactored CONTRACT-CONFLICT-DEFENSE-1 to use shared toIsoDateString helper.
+  const startDateStr = toIsoDateString(contract.start_date);
+  const endDateStr   = toIsoDateString(contract.end_date);
+  if (!startDateStr || !endDateStr) {
+    throw new Error(
+      'materializeContractBooking: contract.start_date / contract.end_date are not valid dates'
+    );
+  }
 
   const startMs = Date.parse(`${startDateStr}T00:00:00Z`);
   const endMs   = Date.parse(`${endDateStr}T00:00:00Z`);
@@ -608,6 +623,73 @@ async function materializeContractBooking(client, contract) {
 
   const startTimeIso = `${startDateStr}T00:00:00Z`;
   const endTimeIso   = `${endDateStr}T00:00:00Z`;
+
+  // ─── CONTRACT-CONFLICT-DEFENSE-1: backend conflict check ─────────────────
+  //
+  // CONTRACT-CAL-1 added a frontend guard in CreateContractModal that fetches
+  // 12 months of blocked dates and disables submit on overlap, but a direct
+  // API client (or a malicious request) could still POST overlapping dates.
+  // This check fences the door at the API layer.
+  //
+  // Strategy: query for ANY non-cancelled, non-deleted booking on the same
+  // resource that overlaps the contract's [start_date, end_date) interval.
+  // The interval is treated as half-open — checkout day is free for the next
+  // guest, matching the convention used everywhere else in the booking engine
+  // (see _getBookingBlockedDates in rentalAvailabilityEngine.js).
+  //
+  // Two booking shapes overlap us:
+  //   1. Nightly bookings with checkin_date / checkout_date — date-range overlap
+  //   2. Timeslot / legacy bookings — start_time falls inside our window
+  //
+  // We exclude:
+  //   - The contract's own phantom (contract_id = our id) — rare but possible
+  //     if a prior materialization committed without setting booking_id on
+  //     contracts. Defense against double-fail.
+  //   - Cancelled and soft-deleted bookings.
+  //
+  // The query runs on the transactional `client` so it sees any uncommitted
+  // bookings created earlier in this same transaction. Currently nothing else
+  // creates bookings inside the contract creation txn, but using the client
+  // is the right pattern.
+  const conflictRes = await client.query(
+    `SELECT id, booking_mode, checkin_date, checkout_date, start_time,
+            duration_minutes, status, customer_name
+       FROM bookings
+      WHERE tenant_id   = $1
+        AND resource_id = $2
+        AND deleted_at  IS NULL
+        AND status      NOT IN ('cancelled')
+        AND COALESCE(contract_id, 0) <> $5
+        AND (
+          (booking_mode = 'nightly'
+            AND checkin_date  IS NOT NULL
+            AND checkout_date IS NOT NULL
+            AND checkin_date  <  $4::date
+            AND checkout_date >  $3::date)
+          OR
+          (COALESCE(booking_mode, 'time_slots') <> 'nightly'
+            AND start_time IS NOT NULL
+            AND start_time <  $4::timestamptz
+            AND (start_time + (duration_minutes::int || ' minutes')::interval) > $3::timestamptz)
+        )
+      ORDER BY COALESCE(checkin_date::timestamptz, start_time) ASC
+      LIMIT 5`,
+    [contract.tenant_id, contract.resource_id, startTimeIso, endTimeIso, contract.id]
+  );
+
+  if (conflictRes.rows.length) {
+    const ids = conflictRes.rows.map(r => Number(r.id));
+    const err = new Error(
+      `materializeContractBooking: resource ${contract.resource_id} has ` +
+      `${conflictRes.rows.length} conflicting booking(s) in [${startDateStr}, ${endDateStr}): ` +
+      `booking ids ${ids.join(', ')}`
+    );
+    err.code = 'CONTRACT_BOOKING_CONFLICT';
+    err.statusCode = 409;
+    err.conflictingBookingIds = ids;
+    err.conflictingBookings = conflictRes.rows;
+    throw err;
+  }
 
   // FINAL-CONTRACT-FIX: phantom booking carries charge_amount = 0.
   // Contract revenue surfaces via contract_invoices, not via the phantom
@@ -783,12 +865,8 @@ async function syncResourceLeaseFromContract(client, contract, mode) {
     }
   }
 
-  const startDateStr = (contract.start_date instanceof Date)
-    ? contract.start_date.toISOString().slice(0, 10)
-    : String(contract.start_date).slice(0, 10);
-  const endDateStr = (contract.end_date instanceof Date)
-    ? contract.end_date.toISOString().slice(0, 10)
-    : String(contract.end_date).slice(0, 10);
+  const startDateStr = toIsoDateString(contract.start_date);
+  const endDateStr   = toIsoDateString(contract.end_date);
   const rentalType = contract.auto_release_on_expiry ? 'flexible' : 'long_term';
   const monthlyRate = contract.monthly_rate != null ? Number(contract.monthly_rate) : null;
 
