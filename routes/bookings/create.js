@@ -796,9 +796,42 @@ const charge_amount = (finalCustomerMembershipId || prepaidApplied) ? 0 : price_
                 ? requestedPaymentMethod  // PAY-INTENT-1: trust client-declared method
                 : null;
 
+      // CLIQ-CONFIRM-1 (May 4, 2026): Derive payment_status alongside the
+      // method. payment_method is INTENT, payment_status is the actual money
+      // state. Backend rules:
+      //   membership/package/free/cash  → 'completed' (auto-settled)
+      //   card with networkPaymentOrderId → 'completed' (gateway already verified)
+      //   card without orderId          → 'pending'   (waiting for webhook)
+      //   cliq                          → 'pending'   (waiting for operator)
+      //   null payment_method           → null status (historical/unknown)
+      const payment_status =
+        payment_method == null ? null
+        : (payment_method === 'membership' ||
+           payment_method === 'package' ||
+           payment_method === 'free' ||
+           payment_method === 'cash')
+          ? 'completed'
+          : (payment_method === 'card' && networkPaymentOrderId)
+            ? 'completed'
+            : (payment_method === 'card' || payment_method === 'cliq')
+              ? 'pending'
+              : null;
+
       const hasMoneyCols = await ensureBookingMoneyColumns();
       const hasRateCols = await ensureBookingRateColumns();
       const hasPaymentMethodCol = await ensurePaymentMethodColumn(); // PAY-2
+
+      // CLIQ-CONFIRM-1: defensive check for payment_status column (migration 064)
+      const hasPaymentStatusCol = await (async () => {
+        try {
+          const r = await db.query(
+            `SELECT 1 FROM information_schema.columns
+              WHERE table_schema='public' AND table_name='bookings'
+                AND column_name='payment_status'`
+          );
+          return r.rows.length > 0;
+        } catch (_) { return false; }
+      })();
 
       // PR-TAX-1: detect tax columns (migration 031 guard — safe on old DBs)
       const hasTaxCols = await (async () => {
@@ -866,6 +899,8 @@ const charge_amount = (finalCustomerMembershipId || prepaidApplied) ? 0 : price_
         const guestsCount = incomingGuestsCount ? Math.max(1, Number(incomingGuestsCount)) : 1;
 
         let extraCols = hasPaymentMethodCol ? ', payment_method' : '';
+        // CLIQ-CONFIRM-1: payment_status column added by migration 064
+        if (hasPaymentStatusCol) extraCols += ', payment_status';
         if (isNightlyBooking && hasNightlyCols) {
           extraCols += ', booking_mode, checkin_date, checkout_date, nights_count';
         }
@@ -881,6 +916,7 @@ const charge_amount = (finalCustomerMembershipId || prepaidApplied) ? 0 : price_
              finalCustomerId, cleanName, cleanPhone, cleanEmail,
              initialStatus, idemKey, finalCustomerMembershipId, resolvedSessionId];
         if (hasPaymentMethodCol) baseVals.push(payment_method);
+        if (hasPaymentStatusCol) baseVals.push(payment_status);  // CLIQ-CONFIRM-1
         if (isNightlyBooking && hasNightlyCols) {
           baseVals.push('nightly');
           baseVals.push(checkin_date || null);

@@ -326,6 +326,13 @@ async function loadJoinedBookingById(bookingId, tenantId) {
       b.charge_amount,
       b.currency_code,
       b.payment_method,
+      -- CLIQ-CONFIRM-1 (migration 064): payment lifecycle. These columns
+      -- MUST exist for this query to compile — apply migration 064 before
+      -- deploying the code that selects them. Same convention as
+      -- payment_method (migration 019) and the tax columns (migration 031).
+      b.payment_status,
+      b.payment_confirmed_at,
+      b.payment_reference,
       b.applied_rate_rule_id,
       b.applied_rate_snapshot,
       rr.name AS applied_rate_rule_name,

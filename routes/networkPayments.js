@@ -247,15 +247,39 @@ router.get('/:slug/result', async (req, res) => {
 
     logger.info({ orderId, paymentId: payment.id, verifiedSuccess, mpgsResult }, 'MPGS payment result processed');
 
-    // Update booking payment_method after confirmed payment
+    // Update booking payment_method + payment_status after confirmed payment
     if (verifiedSuccess && payment.booking_id) {
       try {
-        await db.query(
-          `UPDATE bookings SET payment_method = 'card' WHERE id = $1`,
-          [payment.booking_id]
-        );
+        // CLIQ-CONFIRM-1: set payment_status='completed' if migration 064 has
+        // run. Falls back to method-only update on environments where the
+        // column doesn't exist yet.
+        const hasPaymentStatusCol = await (async () => {
+          try {
+            const r = await db.query(
+              `SELECT 1 FROM information_schema.columns
+                WHERE table_schema='public' AND table_name='bookings'
+                  AND column_name='payment_status'`
+            );
+            return r.rows.length > 0;
+          } catch (_) { return false; }
+        })();
+
+        if (hasPaymentStatusCol) {
+          await db.query(
+            `UPDATE bookings
+                SET payment_method = 'card',
+                    payment_status = 'completed'
+              WHERE id = $1`,
+            [payment.booking_id]
+          );
+        } else {
+          await db.query(
+            `UPDATE bookings SET payment_method = 'card' WHERE id = $1`,
+            [payment.booking_id]
+          );
+        }
       } catch (pmErr) {
-        logger.warn({ pmErr }, 'Could not update booking payment_method (non-fatal)');
+        logger.warn({ pmErr }, 'Could not update booking payment_method/status (non-fatal)');
       }
     }
 
