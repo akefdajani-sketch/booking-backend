@@ -5,8 +5,16 @@
 // VOICE-2: Builds the per-session system prompt override for the ElevenLabs
 // Conversational AI agent.
 //
-// VOICE-CONTEXT-1.1 (this revision):
-//   - Adds LANGUAGE MIRRORING rule: respond in the customer's language
+// VOICE-CONTEXT-1.1 / BOOKING-RULES-FIX-1 (this revision):
+//   - BOOKING-RULES-FIX-1: makes per-service payment eligibility EXPLICIT.
+//     "membership ok" was too easy for the LLM to read as descriptive
+//     metadata rather than a hard constraint, which led to the agent
+//     offering membership payment for services like Karaoke that have
+//     allow_membership=false. Now each service line includes a PAYMENT
+//     field stating both the eligible methods AND (when forbidden)
+//     "MEMBERSHIP NOT ACCEPTED" outright. The accompanying rule tells
+//     the agent to ONLY offer methods listed in that field.
+//   - VOICE-CONTEXT-1.1: Adds LANGUAGE MIRRORING rule: respond in the customer's language
 //     (Arabic or English), never mix within a single response. Allows
 //     keeping service names in their original English form ("Golf
 //     Simulator", "Karaoke") since customers use them that way locally.
@@ -116,10 +124,14 @@ VOICE CONVERSATION RULES:
 - If you don't know something, say so — never invent.
 - End calls cleanly when the customer is done. Don't keep the call open with "anything else?" loops more than once.
 
-PAYMENT — ALWAYS ASK BEFORE CONFIRMING:
-- Before calling ask_booking_assistant to CREATE a booking, you MUST know how the customer wants to pay.
-- If the customer has a membership and/or a prepaid package that could cover the booking, list them as options. Do NOT default for them.
-- Phrase the question naturally: "How would you like to pay — your Premium membership has 240 minutes left, you've got 6 sessions on the 10-pack, or we can take cash, CliQ, or card?"
+PAYMENT — ALWAYS ASK + RESPECT PER-SERVICE ELIGIBILITY:
+- Each SERVICE entry above shows a PAYMENT field stating which methods are eligible. Read that field BEFORE proposing payment options.
+- "PAYMENT: membership/prepaid/cash/CliQ/card eligible"  → all methods OK to offer
+- "PAYMENT: cash/CliQ/card only — MEMBERSHIP NOT ACCEPTED" → membership is FORBIDDEN for this service. Do NOT mention membership as a payment option for it, even if the customer has a membership balance. EXAMPLE: customer asks for Karaoke and Karaoke's PAYMENT field says "MEMBERSHIP NOT ACCEPTED" → respond with cash/CliQ/card options only. NEVER ask "do you want to use your membership" for that service.
+- Before calling ask_booking_assistant to CREATE a booking, you MUST know how the customer wants to pay AND that their chosen method is eligible per the service's PAYMENT field.
+- Phrase the question naturally, listing ONLY the eligible options for THIS service. Examples:
+  - For a membership-eligible service: "How would you like to pay — your Premium membership has 240 minutes left, the 10-pack package, cash, CliQ, or card?"
+  - For a service with PAYMENT: cash/CliQ/card only: "How would you like to pay — cash, CliQ, or card?"
 - Card and CliQ payments need the secure payment page on the booking site. If the customer chooses card or CliQ, tell them you'll send a payment link after booking.
 - Cash, membership, and prepaid package payments can be confirmed by voice.
 - After booking, confirm the deduction out loud if a membership or package was used: "Booked. 1 hour deducted from Premium — 7 left."
@@ -325,7 +337,13 @@ function formatBusinessForVoice(tenantName, ctx) {
     const maxDur = (slotInt && maxSlots && maxSlots > 1)
       ? `max ${slotInt * maxSlots} min`
       : null;
-    const allowMem = s.allow_membership ? "membership ok" : null;
+    // BOOKING-RULES-FIX-1: Make per-service payment eligibility EXPLICIT.
+    // "membership ok" was too easy for the LLM to read as descriptive
+    // metadata rather than a hard constraint. The new PAYMENT field states
+    // both eligible methods and explicit forbidden methods.
+    const paymentField = s.allow_membership
+      ? "PAYMENT: membership/prepaid/cash/CliQ/card eligible"
+      : "PAYMENT: cash/CliQ/card only — MEMBERSHIP NOT ACCEPTED";
     const desc = s.description ? `"${s.description}"` : null;
     const linkedR = serviceResourceMap[s.id];
     const resStr = linkedR && linkedR.length ? `resources: ${linkedR.map(r => `${r.name} [resource_id:${r.id}]`).join(", ")}` : null;
@@ -333,7 +351,7 @@ function formatBusinessForVoice(tenantName, ctx) {
     const staffStr = linkedS && linkedS.length ? `staff: ${linkedS.map(st => `${st.name} [staff_id:${st.id}]`).join(", ")}` : null;
     const hoursSummary = formatServiceHoursSummary(serviceHoursByService[s.id]);
     const hoursStr = hoursSummary ? `hours: ${hoursSummary}` : null;
-    const parts = [dur, interval, minDur, maxDur, price, allowMem, hoursStr, resStr, staffStr, desc].filter(Boolean).join(" | ");
+    const parts = [dur, interval, minDur, maxDur, price, paymentField, hoursStr, resStr, staffStr, desc].filter(Boolean).join(" | ");
     return `  - ${s.name} [service_id:${s.id}]: ${parts}`;
   };
 
@@ -493,7 +511,7 @@ function formatCustomerForVoice(c, paymentSettings) {
               : m.uses_remaining != null && m.uses_remaining > 0       ? `${m.uses_remaining} uses remaining`
               : null;
     if (!bal) continue;
-    paymentLines.push(`  - Membership: ${m.plan_name || "Plan"} (${bal}) — covers services with "membership ok" flag`);
+    paymentLines.push(`  - Membership: ${m.plan_name || "Plan"} (${bal}) — only valid for services whose PAYMENT field lists "membership"`);
   }
   for (const p of activePackages) {
     const rem = p.remaining_quantity != null ? `${p.remaining_quantity}` : "?";
