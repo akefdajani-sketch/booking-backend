@@ -768,11 +768,22 @@ const charge_amount = (finalCustomerMembershipId || prepaidApplied) ? 0 : price_
 
       // Derive payment_method for this booking
       // Membership/package/free are always derived server-side.
-      // Cash is sent from client and trusted directly.
-      // Card/Cliq: when sent alongside a networkPaymentOrderId (i.e., the result
-      // page is creating the booking AFTER the gateway confirmed payment), trust
-      // the client value. Without an orderId, card/cliq stay null (legacy path
-      // where payment_method is updated post-capture by the gateway webhook).
+      // Cash/CliQ/Card record customer INTENT — payment success/failure is a
+      // separate concern tracked by network_payments.status (for card) or
+      // operator confirmation (for CliQ bank transfers and cash).
+      //
+      // PAY-INTENT-1 (May 4, 2026): Removed the `&& networkPaymentOrderId`
+      // guard for card/cliq. The old guard required an MPGS order ID before
+      // recording the method, which:
+      //   - permanently dropped CliQ on the floor (CliQ never has an order ID
+      //     because it's a manual bank transfer, not a gateway transaction)
+      //   - left card bookings NULL whenever the post-payment result page
+      //     didn't reach the success endpoint (mobile abandons, network drops)
+      // Both produced the 412/657 (63%) NULL rate found in the May audit.
+      //
+      // The networkPayments.js webhook still updates payment_method = 'card'
+      // on verified gateway success; that update is now a no-op when the
+      // create-booking call already wrote 'card' — idempotent.
       const payment_method = finalCustomerMembershipId
         ? 'membership'
         : prepaidApplied
@@ -781,8 +792,8 @@ const charge_amount = (finalCustomerMembershipId || prepaidApplied) ? 0 : price_
             ? 'free'
             : requestedPaymentMethod === 'cash'
               ? 'cash'
-              : (requestedPaymentMethod === 'card' || requestedPaymentMethod === 'cliq') && networkPaymentOrderId
-                ? requestedPaymentMethod  // PAY-FIX: trust card/cliq when order ID proves gateway payment
+              : (requestedPaymentMethod === 'card' || requestedPaymentMethod === 'cliq')
+                ? requestedPaymentMethod  // PAY-INTENT-1: trust client-declared method
                 : null;
 
       const hasMoneyCols = await ensureBookingMoneyColumns();
