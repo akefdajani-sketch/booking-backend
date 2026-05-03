@@ -40,7 +40,16 @@ function buildBusinessContext({ name, services = [], memberships = [], rates = [
     const maxSlots   = s.max_consecutive_slots ? `max ${s.max_consecutive_slots} slots per booking` : null;
     const minSlots   = s.min_consecutive_slots ? `min ${s.min_consecutive_slots} slots` : null;
     const parallel   = s.max_parallel_bookings > 1 ? `${s.max_parallel_bookings} bookings can run simultaneously` : null;
-    const allowMem   = s.allow_membership ? "membership credits accepted" : null;
+    // BOOKING-RULES-FIX-1: Make per-service payment eligibility EXPLICIT and
+    // unambiguous. Previously this read "membership credits accepted" only
+    // when allow_membership was true — leaving the eligibility check up to
+    // the LLM to infer, which led to the agent universally offering
+    // membership for any booking the customer's credits "could" cover.
+    // Now both the positive AND negative cases are stated outright. The
+    // PAYMENT ELIGIBILITY rule below references this field directly.
+    const paymentField = s.allow_membership
+      ? "PAYMENT: membership/prepaid/cash/CliQ/card eligible"
+      : "PAYMENT: cash/CliQ/card only — MEMBERSHIP NOT ACCEPTED for this service";
     const desc       = s.description ? `"${s.description}"` : null;
 
     const linkedResources = serviceResourceMap[s.id];
@@ -53,11 +62,11 @@ function buildBusinessContext({ name, services = [], memberships = [], rates = [
       ? `staff: ${linkedStaff.map(st => `${st.name} [staff_id:${st.id}]`).join(", ")}`
       : null;
 
-    // Compact mode (>10 services): drop verbose details but always keep resources/staff
+    // Compact mode (>10 services): drop verbose details but always keep resources/staff/payment
     const compactMode = services.length > 10;
     const detailFields = compactMode
-      ? [duration, price, resourcesStr, staffStr]
-      : [duration, interval, price, maxSlots, minSlots, parallel, allowMem, resourcesStr, staffStr, desc];
+      ? [duration, price, paymentField, resourcesStr, staffStr]
+      : [duration, interval, price, maxSlots, minSlots, parallel, paymentField, resourcesStr, staffStr, desc];
     const details = detailFields.filter(Boolean).join(" | ");
     return `  - ${s.name} [service_id:${s.id}]: ${details}`;
   };
@@ -327,14 +336,24 @@ RULES:
 - Use ONLY the real data above — never invent prices, services, times, or balances.
 - RESOURCES: Each service listing above shows exactly which resources (simulators, rooms, etc.) it can use with their IDs. When a customer requests a specific resource by name, find its resource_id from the service listing and pass it in the ACTION.
 - PRICING: Always calculate and quote prices using the rate rules above. Peak hours, member discounts, and time-based pricing all apply. Tell the customer the exact price before confirming.
-- MEMBERSHIP: If the customer has an active membership with remaining balance, proactively mention they can use it. Include membership_id in the create_booking ACTION if they want to.
+- PAYMENT ELIGIBILITY (CRITICAL — READ THE SERVICE'S PAYMENT FIELD):
+  Each SERVICE entry above shows a PAYMENT field listing which methods are eligible for that specific service. Examples:
+    - "PAYMENT: membership/prepaid/cash/CliQ/card eligible"  → all methods OK
+    - "PAYMENT: cash/CliQ/card only — MEMBERSHIP NOT ACCEPTED for this service"  → membership is FORBIDDEN here
+  When proposing a booking or asking the customer how to pay, you MUST:
+    1. Look up the chosen service's PAYMENT field.
+    2. Offer ONLY the methods listed in that field.
+    3. If the field says "MEMBERSHIP NOT ACCEPTED", do NOT mention membership as a payment option for that booking — even if the customer has a membership with credits remaining.
+    4. Never include membership_id in a create_booking ACTION for a service whose PAYMENT field excludes membership.
+  Example: customer asks for "Karaoke" and Karaoke's PAYMENT field says "MEMBERSHIP NOT ACCEPTED" → respond with cash/CliQ/card options only, NEVER offer membership credits.
+- MEMBERSHIP USAGE: When the chosen service is membership-eligible AND the customer has an active membership with remaining balance, you MAY proactively mention it as one of the payment choices. Always include all eligible options together so the customer chooses ("Pay with your Pro membership — 240 minutes left — or with cash/CliQ/card?"). Include membership_id in the create_booking ACTION only when the customer explicitly chose membership.
 - AVAILABILITY: Always call check_availability before confirming any slot. Pass the specific resource_id if the customer named a resource.
-- BOOKING FLOW: 1) Check availability → 2) Show available slots → 3) Confirm details + price with customer → 4) Create booking only after explicit customer confirmation.
+- BOOKING FLOW: 1) Check availability → 2) Show available slots → 3) Confirm details + price + ASK PAYMENT METHOD with customer → 4) Create booking only after explicit customer confirmation including their chosen payment method.
 - PENDING_BOOKING REQUIRED: Whenever you are presenting booking details and asking "Shall I confirm this booking?", you MUST append this line at the very end of your message (after all other text), on its own line, with no extra characters before or after:
 PENDING_BOOKING:{"service_id":SERVICE_ID_NUMBER,"start_time":"YYYY-MM-DDTHH:MM:00${tzOffsetStr}","resource_id":RESOURCE_ID_OR_NULL,"staff_id":STAFF_ID_OR_NULL,"membership_id":MEMBERSHIP_ID_OR_NULL,"duration_minutes":DURATION_NUMBER}
 Replace values with exact numbers from the business context. ALWAYS append the timezone offset ${tzOffsetStr} to start_time — never omit it. staff_id is null if no staff is required. membership_id is null if cash payment. This line is parsed by the system and not displayed.
 - CONFIRMATION CRITICAL: When the customer says YES to confirming a booking (any of: "yes", "confirm", "go ahead", "book it", "do it", "yes please", "confirm it"), you MUST output ACTION:{...create_booking...} immediately with all booking details from the conversation. Do NOT just say "I'll do it" or "creating now" - output the ACTION line directly.
-- PACKAGE PAYMENT: If the customer has a prepaid package with remaining sessions, offer to use it. Include prepaid_entitlement_id from their [package id:X] in the ACTION.
+- PACKAGE PAYMENT: Prepaid packages may apply to certain services. When a service's PAYMENT field includes "prepaid" AND the customer has a package with remaining sessions, you MAY offer it as a payment choice alongside the others. The booking action will validate eligibility — if a package isn't valid for the chosen service the action will fail and you can fall back to other methods. Include prepaid_entitlement_id from the customer's [package id:X] in the ACTION only when the customer explicitly chose the package.
 - CANCELLATION: Always show booking details and ask "Shall I go ahead and cancel?" before acting.
 - Be concise, warm, and professional. Use bullet points for lists.
 - If you don't know something not in the data, say so honestly.
