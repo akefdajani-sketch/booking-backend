@@ -5,7 +5,23 @@
 // VOICE-2: Builds the per-session system prompt override for the ElevenLabs
 // Conversational AI agent.
 //
-// VOICE-CONTEXT-1.1 / BOOKING-RULES-FIX-1 (this revision):
+// BOOKING-PAYMENT-METHOD-FIX-1 (this revision):
+//   - Resolves the contradiction at the old "send a payment link after
+//     booking" line for card/CliQ — that flow doesn't exist; the backend
+//     returns a "use the Book now button" redirect message. The voice rule
+//     now matches the actual backend behaviour: agent tells the customer
+//     it'll send them to the secure booking page.
+//   - Tells the agent to ALWAYS include the customer's chosen payment
+//     method (one of: membership, package, cash, card, cliq) in the
+//     query string when invoking ask_booking_assistant to create a
+//     booking — so the booking-assistant tool captures it deterministically
+//     instead of inferring it from history.
+//   - Pairs with claudeService.js (which gains payment_method in
+//     PENDING_BOOKING and create_booking ACTION schemas + a PAYMENT METHOD
+//     FIELD rule) and with frontend changes to PendingBooking type +
+//     PendingBookingCard "Pay" row.
+//
+// VOICE-CONTEXT-1.1 / BOOKING-RULES-FIX-1:
 //   - BOOKING-RULES-FIX-1: makes per-service payment eligibility EXPLICIT.
 //     "membership ok" was too easy for the LLM to read as descriptive
 //     metadata rather than a hard constraint, which led to the agent
@@ -132,8 +148,8 @@ PAYMENT — ALWAYS ASK + RESPECT PER-SERVICE ELIGIBILITY:
 - Phrase the question naturally, listing ONLY the eligible options for THIS service. Examples:
   - For a membership-eligible service: "How would you like to pay — your Premium membership has 240 minutes left, the 10-pack package, cash, CliQ, or card?"
   - For a service with PAYMENT: cash/CliQ/card only: "How would you like to pay — cash, CliQ, or card?"
-- Card and CliQ payments need the secure payment page on the booking site. If the customer chooses card or CliQ, tell them you'll send a payment link after booking.
-- Cash, membership, and prepaid package payments can be confirmed by voice.
+- Cash, membership, and prepaid package payments can be confirmed entirely by voice — booking is created immediately.
+- Card and CliQ payments require the secure payment page. If the customer chooses card or CliQ, tell them you'll send them to the booking page to complete payment securely (e.g. "For card payments I'll point you to our secure booking page to finish — it'll keep the same time slot. Sound good?"). The booking is NOT created until they finish on the page. Do not promise a payment link by SMS/WhatsApp; that flow is not wired yet.
 - After booking, confirm the deduction out loud if a membership or package was used: "Booked. 1 hour deducted from Premium — 7 left."
 
 BOOKING RULES — EXPLAIN, DON'T BLINDLY CHECK:
@@ -164,6 +180,7 @@ CURRENT DATE & TIME: ${nowStr}
 - "Tomorrow" means: ${tomorrowStr}
 - Business timezone: ${tenantTz} (UTC offset: ${tzOffsetStr})
 - When you call ask_booking_assistant with a time-sensitive question, always include the explicit date in YYYY-MM-DD format, never relative phrases like "tomorrow".
+- When you call ask_booking_assistant to CREATE a booking, ALWAYS include the customer's chosen payment method explicitly in the query string (one of: membership, package, cash, card, cliq). Example: "Confirm Sim Bay 1 on 2026-05-04 at 17:00 for 2 hours, paying cash". This guarantees the booking-assistant captures it. For card or CliQ, expect a redirect message back asking the customer to use the public Book now button — speak that message back and don't retry.
 `;
 
   return `You are the voice booking concierge for ${tenantName}. Your job is to help customers check availability and book in a single, fast, friendly conversation.
