@@ -6,6 +6,8 @@ const db = pool;
 
 const requireAdminOrTenantRole = require("../middleware/requireAdminOrTenantRole");
 const { requireTenant } = require("../middleware/requireTenant");
+// VOICE-PERF-1: Bust AI context on resource writes.
+const aiContextCache = require("../utils/aiContextCache");
 async function resolveTenantFromResourceId(req, res, next) {
   try {
     const id = Number(req.params.id);
@@ -102,6 +104,7 @@ router.post("/", requireTenant, requireAdminOrTenantRole("manager"), async (req,
       [tenant_id, name, type || "", is_active ?? true]
     );
 
+    aiContextCache.bustBusiness(tenant_id);
     res.json(result.rows[0]);
   } catch (err) {
     console.error("POST /api/resources error:", err);
@@ -119,6 +122,7 @@ router.delete("/:id", resolveTenantFromResourceId, requireAdminOrTenantRole("man
 
     try {
       await db.query(`DELETE FROM resources WHERE id=$1`, [id]);
+      aiContextCache.bustBusiness(req.tenantId);
       return res.json({ ok: true, deleted: true });
     } catch (err) {
       // 23503 = foreign_key_violation
@@ -130,6 +134,7 @@ router.delete("/:id", resolveTenantFromResourceId, requireAdminOrTenantRole("man
         if (!result.rows.length) {
           return res.status(404).json({ error: "Resource not found" });
         }
+        aiContextCache.bustBusiness(req.tenantId);
         return res.json({ ok: true, deleted: false, deactivated: true });
       }
       throw err;
@@ -287,6 +292,7 @@ router.patch("/:id", resolveTenantFromResourceId, requireAdminOrTenantRole("mana
     const q = `UPDATE resources SET ${sets.join(", ")} WHERE id = $${params.length} RETURNING *`;
     const result = await db.query(q, params);
     if (!result.rows.length) return res.status(404).json({ error: "Resource not found" });
+    aiContextCache.bustBusiness(req.tenantId);
     return res.json({ ok: true, resource: result.rows[0] });
   } catch (err) {
     console.error("PATCH /api/resources/:id error:", err);

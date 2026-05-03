@@ -22,6 +22,8 @@ const { pool } = require("../db");
 const db = pool;
 
 const { computeRateForBookingLike } = require("../utils/ratesEngine");
+// VOICE-PERF-1: Bust AI context on rate-rule writes (price changes).
+const aiContextCache = require("../utils/aiContextCache");
 
 const router = express.Router();
 
@@ -229,6 +231,7 @@ router.post(
           require_any_prepaid,
         ]
       );
+      aiContextCache.bustBusiness(tenantId);
       return res.json({ item: insert.rows[0] });
     } catch (err) {
       console.error("POST tenant rates error:", err);
@@ -301,6 +304,7 @@ router.patch(
         RETURNING *
       `;
       const { rows } = await db.query(sql, params);
+      aiContextCache.bustBusiness(tenantId);
       return res.json({ item: rows[0] });
     } catch (err) {
       console.error("PATCH tenant rates error:", err);
@@ -327,6 +331,7 @@ router.delete(
 
       const del = await db.query(`DELETE FROM rate_rules WHERE tenant_id=$1 AND id=$2 RETURNING id`, [tenantId, id]);
       if (!del.rows.length) return res.status(404).json({ error: "Not found." });
+      aiContextCache.bustBusiness(tenantId);
       return res.json({ ok: true });
     } catch (err) {
       console.error("DELETE tenant rates error:", err);

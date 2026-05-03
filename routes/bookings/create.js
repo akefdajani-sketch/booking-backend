@@ -23,6 +23,10 @@ const {
   loadMembershipCheckoutPolicy, roundUpMinutes, buildMembershipResolution,
   buildMembershipInsufficientPayload,
 } = require("../../utils/bookingRouteHelpers");
+// VOICE-PERF-1: Bust the customer's AI context cache after a booking lands
+// so subsequent voice/chat turns see updated balance + the new booking in
+// recent history.
+const aiContextCache = require("../../utils/aiContextCache");
 
 
 module.exports = function mount(router) {
@@ -1576,6 +1580,21 @@ const charge_amount = (finalCustomerMembershipId || prepaidApplied) ? 0 : price_
         });
       }
       // ── End email ─────────────────────────────────────────────────────────
+
+      // VOICE-PERF-1: Invalidate the customer's AI context cache. The new
+      // booking + any membership/package debit needs to surface to the next
+      // voice/chat turn instantly. Email comes from the booking's customer
+      // record (joined.customer_email) or falls back to the auth user.
+      try {
+        const custEmail = joined?.customer_email || joined?.email || req.auth?.email || null;
+        const tenantIdForBust = joined?.tenant_id ?? req.tenantId ?? null;
+        if (tenantIdForBust && custEmail) {
+          aiContextCache.bustCustomer(tenantIdForBust, custEmail);
+        } else if (tenantIdForBust) {
+          // Fallback: bust whole tenant's customer cache rather than risk staleness.
+          aiContextCache.bustCustomer(tenantIdForBust);
+        }
+      } catch (_) { /* never block booking response on cache hygiene */ }
 
       return res.status(created ? 201 : 200).json({
         booking: joined,

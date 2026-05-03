@@ -9,6 +9,8 @@ const requireAppAuth = require("../../middleware/requireAppAuth");
 const { requireTenant } = require("../../middleware/requireTenant");
 const { getExistingColumns, firstExisting, pickCol, safeIntExpr } = require("../../utils/customerQueryHelpers");
 const { loadMembershipCheckoutPolicy, roundUpMinutes, applyMembershipTopUp } = require("../../utils/membershipTopUpHelpers");
+// VOICE-PERF-1: Bust customer-data cache when balances are topped up.
+const aiContextCache = require("../../utils/aiContextCache");
 
 
 module.exports = function mount(router) {
@@ -106,6 +108,7 @@ router.post("/:id/top-up", requireAppAuth, requireTenant, async (req, res) => {
     });
 
     if (!result.ok) return res.status(result.status).json({ error: result.error });
+    aiContextCache.bustCustomer(req.tenantId);
     return res.json({ membership: result.membership });
   } catch (err) {
     console.error("customer top-up error", err);
@@ -147,6 +150,7 @@ router.post("/:id/top-up-admin", requireTenant, requireAdminOrTenantRole("manage
     });
 
     if (!result.ok) return res.status(result.status).json({ error: result.error });
+    aiContextCache.bustCustomer(tenantId);
     return res.json({ membership: result.membership });
   } catch (err) {
     console.error("admin top-up error", err);

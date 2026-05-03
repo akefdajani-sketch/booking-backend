@@ -13,6 +13,9 @@ const {
   getServicesColumns, getTenantsColumns, serviceHoursTableExists,
 } = require("../../utils/servicesHelpers");
 const { assertWithinPlanLimit } = require("../../utils/planEnforcement");
+// VOICE-PERF-1: Bust the AI context cache on writes so dashboard edits
+// (price changes, new services, deletions) surface to the AI immediately.
+const aiContextCache = require("../../utils/aiContextCache");
 
 
 module.exports = function mount(router) {
@@ -376,6 +379,7 @@ router.post("/", requireTenant, requireAdminOrTenantRole("manager"), async (req,
     `;
 
     const { rows } = await db.query(q, params);
+    aiContextCache.bustBusiness(rows[0]?.tenant_id);
     return res.status(201).json(rows[0]);
   } catch (err) {
     console.error("Error creating service:", err);
@@ -516,6 +520,7 @@ router.patch("/:id", resolveTenantFromServiceId, requireAdminOrTenantRole("manag
     const { rows } = await db.query(q, params);
     if (!rows.length) return res.status(404).json({ error: "not found" });
 
+    aiContextCache.bustBusiness(rows[0]?.tenant_id);
     return res.json(rows[0]);
   } catch (err) {
     console.error("Error updating service:", err);
@@ -532,6 +537,7 @@ router.delete("/:id", resolveTenantFromServiceId, requireAdminOrTenantRole("mana
     if (!id) return res.status(400).json({ error: "invalid id" });
 
     await db.query("DELETE FROM services WHERE id = $1", [id]);
+    aiContextCache.bustBusiness(req.tenantId);
     return res.json({ ok: true });
   } catch (err) {
     console.error("Error deleting service:", err);

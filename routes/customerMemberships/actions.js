@@ -9,6 +9,9 @@ const requireAppAuth = require("../../middleware/requireAppAuth");
 const { requireTenant } = require("../../middleware/requireTenant");
 const { requireFeature } = require("../../utils/entitlements"); // D4.6: plan-gated features
 const { getExistingColumns, firstExisting, pickCol, safeIntExpr } = require("../../utils/customerQueryHelpers");
+// VOICE-PERF-1: Bust customer-data cache on membership state changes
+// (subscribe, consume, archive, status flip).
+const aiContextCache = require("../../utils/aiContextCache");
 
 
 module.exports = function mount(router) {
@@ -34,6 +37,10 @@ router.patch("/:id/archive", requireTenant, requireAdminOrTenantRole("staff"), a
       return res.status(404).json({ error: "membership not found" });
     }
 
+    // VOICE-PERF-1: Bust all customer caches for this tenant — we don't
+    // have the email here without an extra lookup, and bust-by-tenant is
+    // cheap and only affects in-flight voice/chat sessions.
+    aiContextCache.bustCustomer(tenantId);
     return res.json({ membership: result.rows[0] });
   } catch (err) {
     console.error("archive membership error", err);
@@ -72,6 +79,7 @@ router.patch("/:id/status", requireTenant, requireAdminOrTenantRole("staff"), as
       return res.status(404).json({ error: "membership not found" });
     }
 
+    aiContextCache.bustCustomer(tenantId);
     return res.json({ membership: result.rows[0] });
   } catch (err) {
     console.error("membership status update error", err);
@@ -189,6 +197,7 @@ router.post("/subscribe", requireTenant, requireFeature("memberships"), requireA
       [tenantId, membership.id, minutesRemaining, usesRemaining, `Initial grant for ${plan.name}`]
     );
 
+    aiContextCache.bustCustomer(tenantId);
     return res.json({ membership, customerId, membershipPlanId, planName: plan.name });
   } catch (err) {
     console.error("POST /api/customer-memberships/subscribe error:", err);
@@ -322,6 +331,7 @@ router.post("/consume-next", requireTenant, requireAdminOrTenantRole("staff"), a
       [membershipId, tenantId]
     );
 
+    aiContextCache.bustCustomer(tenantId);
     return res.json({ membership: upd.rows[0] });
   } catch (err) {
     // Idempotency: if this booking was already debited, return the current membership state.
@@ -344,6 +354,7 @@ router.post("/consume-next", requireTenant, requireAdminOrTenantRole("staff"), a
             `SELECT * FROM customer_memberships WHERE tenant_id = $1 AND id = $2 LIMIT 1`,
             [tenantId, cmId]
           );
+          aiContextCache.bustCustomer(tenantId);
           return res.json({ membership: cm.rows[0], alreadyDebited: true, alreadyDebitted: true, bookingId, customerMembershipId: cmId });
 }
       } catch (_) {

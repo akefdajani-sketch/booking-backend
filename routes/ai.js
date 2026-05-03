@@ -6,6 +6,9 @@ const { pool } = require("../db");
 const { getTenantBySlug } = require("../utils/tenants");
 const { runSupportAgent, generateLandingCopy } = require("../utils/claudeService");
 const requireAppAuth = require("../middleware/requireAppAuth");
+// VOICE-PERF-1: 60s TTL cache for fetchBusinessContext + fetchCustomerData.
+// Mutation routes call bustBusiness / bustCustomer / bustTenant on writes.
+const aiContextCache = require("../utils/aiContextCache");
 
 const router = express.Router();
 // Detect when user is confirming a previously discussed booking
@@ -53,6 +56,12 @@ async function columnExists(table, column) {
 
 // ── Fetch full business context ───────────────────────────────────────
 async function fetchBusinessContext(tenantId, tenantSlug) {
+  // VOICE-PERF-1: Cache lookup — saves ~300-500ms per voice/chat turn after
+  // the first. Bust hooks fire from mutation routes (services CRUD, rate
+  // rules, hours, blackouts, etc.) so dashboard edits surface immediately.
+  const cached = aiContextCache.getBusiness(tenantId);
+  if (cached) return cached;
+
   // Check every column before using it — schema varies between installs
   const [
     hasDescription, hasMaxParallel, hasMinSlots, hasAllowMem,
@@ -315,12 +324,20 @@ async function fetchBusinessContext(tenantId, tenantSlug) {
   } else {
     console.log(`[AI ctx services] EMPTY — tenantId=${tenantId} hasIsActive=${hasIsActive}`);
   }
+  // VOICE-PERF-1: Store in cache for subsequent turns within the 60s window.
+  aiContextCache.setBusiness(tenantId, result);
   return result;
 }
 
 // ── Fetch full customer data ──────────────────────────────────────────
 async function fetchCustomerData(tenantId, email) {
   if (!email) return null;
+
+  // VOICE-PERF-1: Cache lookup. Bust hooks fire from bookings/create.js,
+  // bookings/crud.js (cancel), customerMemberships routes, and prepaid
+  // redemption — wherever a customer's balances or bookings change.
+  const cached = aiContextCache.getCustomer(tenantId, email);
+  if (cached) return cached;
 
   const profileRes = await db.query(
     `SELECT id, name, email, phone, notes, created_at
@@ -436,12 +453,15 @@ async function fetchCustomerData(tenantId, email) {
     })(),
   ]);
 
-  return {
+  const result = {
     profile: customer,
     bookings: bookingsRes.rows,
     memberships: membershipsRes.rows,
     packages: packagesRes.rows,
   };
+  // VOICE-PERF-1: Cache the customer view for the next turn within TTL.
+  aiContextCache.setCustomer(tenantId, email, result);
+  return result;
 }
 
 // ── Execute actions ───────────────────────────────────────────────────

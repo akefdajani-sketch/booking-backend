@@ -30,6 +30,9 @@ const requireGoogleAuth     = require('../middleware/requireGoogleAuth');
 const requireAppAuth = require('../middleware/requireAppAuth'); // AUTH-FIX
 const ensureUser            = require('../middleware/ensureUser');
 const { requireTenantRole } = require('../middleware/requireTenantRole');
+// VOICE-PERF-1: Bust AI context on payment-settings writes (changes which
+// payment methods the agent offers).
+const aiContextCache = require('../utils/aiContextCache');
 
 // ─── Auth helpers (same pattern as tenantMembershipCheckout.js) ───────────────
 
@@ -163,6 +166,7 @@ router.post('/:slug/payment-settings', resolveTenant, requireOwnerOrAdmin, async
 
     logger.info({ tenantId: req.tenantId, merchantId }, 'Tenant payment credentials saved');
 
+    aiContextCache.bustBusiness(req.tenantId);
     return res.json({
       ok:        true,
       message:   'Payment gateway connected successfully.',
@@ -185,6 +189,7 @@ router.delete('/:slug/payment-settings', resolveTenant, requireOwnerOrAdmin, asy
   try {
     await clearNetworkCredentials(req.tenantId);
     logger.info({ tenantId: req.tenantId }, 'Tenant payment credentials cleared');
+    aiContextCache.bustBusiness(req.tenantId);
     return res.json({ ok: true, message: 'Payment gateway disconnected.' });
   } catch (err) {
     logger.error({ err }, 'DELETE payment-settings error');
@@ -240,6 +245,7 @@ router.put('/:slug/payment-methods', resolveTenant, requireOwnerOrAdmin, async (
     );
 
     logger.info({ tenantId: req.tenantId, settings }, 'Payment methods updated');
+    aiContextCache.bustBusiness(req.tenantId);
     return res.json({ ok: true, ...settings });
   } catch (err) {
     logger.error({ err }, 'PUT payment-methods error');
