@@ -23,6 +23,8 @@ const requireAdmin      = require("../middleware/requireAdmin");
 const ensureUser        = require("../middleware/ensureUser");
 const { getTenantIdFromSlug } = require("../utils/tenants");
 const { requireTenantRole }   = require("../middleware/requireTenantRole");
+// VOICE-PERF-1: Bust AI context on service-hour writes.
+const aiContextCache = require("../utils/aiContextCache");
 
 // ─── auth helpers (mirrors tenantStaffSchedule.js pattern) ───────────────────
 
@@ -261,6 +263,7 @@ router.put(
         client.release();
       }
 
+      aiContextCache.bustBusiness(req.tenantId);
       return res.json({ ok: true, windows, disabled_days: disabledDays });
     } catch (err) {
       if (err && err.code === "42P01") {

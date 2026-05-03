@@ -14,6 +14,8 @@ const db = pool;
 const requireAdminOrTenantRole = require("../middleware/requireAdminOrTenantRole");
 const { requireTenant } = require("../middleware/requireTenant");
 const { getTenantIdFromSlug } = require("../utils/tenants");
+// VOICE-PERF-1: Bust AI context on blackout writes.
+const aiContextCache = require("../utils/aiContextCache");
 
 async function resolveTenantIdFromQuery(query) {
   const tenantSlug = query?.tenantSlug ?? query?.slug ?? query?.tenant_slug ?? null;
@@ -206,6 +208,7 @@ router.post("/", requireTenant, requireAdminOrTenantRole("manager"), async (req,
       [resolvedTenantId, startsAt, endsAt, resource_id, staff_id, service_id, reason]
     );
 
+    aiContextCache.bustBusiness(resolvedTenantId);
     return res.json({ blackout: insert.rows[0] });
   } catch (err) {
     console.error("Error creating tenant blackout:", err);
@@ -311,6 +314,7 @@ router.put("/:id", requireTenant, requireAdminOrTenantRole("manager"), async (re
     );
 
     if (!upd.rows.length) return res.status(404).json({ error: "Not found." });
+    aiContextCache.bustBusiness(resolvedTenantId);
     return res.json({ blackout: upd.rows[0] });
   } catch (err) {
     console.error("Error updating tenant blackout:", err);
@@ -340,6 +344,7 @@ router.delete("/:id", requireTenant, requireAdminOrTenantRole("manager"), async 
     );
 
     if (!upd.rows.length) return res.status(404).json({ error: "Not found." });
+    aiContextCache.bustBusiness(resolvedTenantId);
     return res.json({ ok: true });
   } catch (err) {
     console.error("Error deleting tenant blackout:", err);

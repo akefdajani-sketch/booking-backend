@@ -6,6 +6,8 @@ const db = pool;
 
 const { requireTenant } = require("../middleware/requireTenant");
 const requireAdminOrTenantRole = require("../middleware/requireAdminOrTenantRole");
+// VOICE-PERF-1: Bust AI context on plan writes.
+const aiContextCache = require("../utils/aiContextCache");
 
 
 function toNullableText(value) {
@@ -137,6 +139,7 @@ router.post("/", requireTenant, requireAdminOrTenantRole("staff"), async (req, r
       ]
     );
 
+    aiContextCache.bustBusiness(tenantId);
     return res.status(201).json({ plan: inserted.rows[0] || null });
   } catch (err) {
     console.error("POST /api/membership-plans error:", err);
@@ -223,6 +226,7 @@ router.patch("/:id", requireTenant, requireAdminOrTenantRole("staff"), async (re
       ]
     );
 
+    aiContextCache.bustBusiness(tenantId);
     return res.json({ plan: updated.rows[0] || null });
   } catch (err) {
     console.error("PATCH /api/membership-plans/:id error:", err);

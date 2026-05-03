@@ -6,6 +6,8 @@ const db = pool;
 
 const requireAdminOrTenantRole = require("../middleware/requireAdminOrTenantRole");
 const { requireTenant } = require("../middleware/requireTenant");
+// VOICE-PERF-1: Bust AI context on tenant-hours writes.
+const aiContextCache = require("../utils/aiContextCache");
 const { getTenantIdFromSlug } = require("../utils/tenants");
 
 // ---------------------------------------------------------------------------
@@ -151,6 +153,7 @@ router.post("/", requireTenant, requireAdminOrTenantRole("manager"), async (req,
           }
 
           await db.query("COMMIT");
+          aiContextCache.bustBusiness(resolvedTenantId);
           return res.json({ hours: saved });
         }
 
@@ -184,6 +187,7 @@ router.post("/", requireTenant, requireAdminOrTenantRole("manager"), async (req,
           }
         
           await db.query("COMMIT");
+          aiContextCache.bustBusiness(resolvedTenantId);
           return res.json({ hours: saved });
         }
 
@@ -223,6 +227,7 @@ router.post("/", requireTenant, requireAdminOrTenantRole("manager"), async (req,
       ]
     );
 
+    aiContextCache.bustBusiness(resolvedTenantId);
     return res.json({ hour: result.rows[0] });
   } catch (err) {
     console.error("Error saving tenant hours:", err);

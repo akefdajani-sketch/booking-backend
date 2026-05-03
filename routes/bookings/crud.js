@@ -11,6 +11,8 @@ const { ensureBookingMoneyColumns } = require("../../utils/ensureBookingMoneyCol
 const { parseBookingListParams, buildBookingListWhere } = require("../../utils/bookingQueryBuilder");
 const resolveStaffScope = require("../../middleware/resolveStaffScope");
 const { loadJoinedBookingById, decrementSessionCount, reverseMembershipForBooking } = require("../../utils/bookings");
+// VOICE-PERF-1: Bust customer cache on status changes (cancel) + edits.
+const aiContextCache = require("../../utils/aiContextCache");
 const {
   shouldUseCustomerHistory, checkBlackoutOverlap, servicesHasColumn, getServiceAllowMembership,
   getIdempotencyKey, mustHaveTenantSlug, canTransitionStatus, bumpTenantBookingChange,
@@ -335,6 +337,16 @@ router.patch("/:id/status", requireTenant, requireAdminOrTenantRole("staff"), re
     await bumpTenantBookingChange(tenantId);
 
     const joined = await loadJoinedBookingById(bookingId, tenantId);
+    // VOICE-PERF-1: Status changes (cancel especially) reverse membership/
+    // package debits — surface the new balance to the AI immediately.
+    try {
+      const custEmail = joined?.customer_email || joined?.email || null;
+      if (tenantId && custEmail) {
+        aiContextCache.bustCustomer(tenantId, custEmail);
+      } else if (tenantId) {
+        aiContextCache.bustCustomer(tenantId);
+      }
+    } catch (_) { /* never block response on cache hygiene */ }
     return res.json({ booking: joined });
   } catch (err) {
     console.error("Error updating booking status:", err);
@@ -522,6 +534,17 @@ router.delete("/:id", requireTenant, requireAdminOrTenantRole("staff"), async (r
     }
     // ── End email cancellation ────────────────────────────────────────────
 
+    // VOICE-PERF-1: Cancel reverses membership/package debits and removes
+    // the booking from the customer's recent history shown to the AI.
+    try {
+      const custEmail = joined?.customer_email || joined?.email || null;
+      const tenantIdForBust = joined?.tenant_id ?? null;
+      if (tenantIdForBust && custEmail) {
+        aiContextCache.bustCustomer(tenantIdForBust, custEmail);
+      } else if (tenantIdForBust) {
+        aiContextCache.bustCustomer(tenantIdForBust);
+      }
+    } catch (_) { /* never block response on cache hygiene */ }
     return res.json({ booking: joined });
   } catch (err) {
     console.error("Error cancelling booking:", err);
