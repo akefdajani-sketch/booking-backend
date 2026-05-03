@@ -315,14 +315,15 @@ Available actions:
    - Always check availability before confirming any time slot.
 
 2. Create booking (only after customer confirms and you have checked availability):
-   ACTION:{"type":"create_booking","service_id":123,"start_time":"${exampleDate}T17:00:00${tzOffsetStr}","duration_minutes":120,"resource_id":4,"staff_id":null,"membership_id":null,"prepaid_entitlement_id":null,"slots":2}
+   ACTION:{"type":"create_booking","service_id":123,"start_time":"${exampleDate}T17:00:00${tzOffsetStr}","duration_minutes":120,"resource_id":4,"staff_id":null,"payment_method":"cash","membership_id":null,"prepaid_entitlement_id":null,"slots":2}
    - start_time: ISO 8601 with the business UTC offset — ALWAYS include ${tzOffsetStr} at the end (e.g. ${exampleDate}T17:00:00${tzOffsetStr})
    - CRITICAL: Never omit the timezone offset from start_time. The offset for this business is ${tzOffsetStr}.
    - duration_minutes: total booking duration (slot_interval × number of slots)
    - slots: number of consecutive slots booked
    - resource_id: use the exact resource_id from availability check result, or from service listing
-   - membership_id: the [membership id:X] from the customer's active membership if they want to pay with credits
-   - prepaid_entitlement_id: the [package id:X] from the customer's package if they want to use prepaid sessions
+   - payment_method: REQUIRED. Which method the customer chose. One of: "membership", "package", "cash", "card", "cliq". See PAYMENT METHOD FIELD rule below.
+   - membership_id: the [membership id:X] from the customer's active membership — set ONLY when payment_method="membership"
+   - prepaid_entitlement_id: the [package id:X] from the customer's package — set ONLY when payment_method="package"
 
 3. Cancel booking (only for upcoming bookings on the customer's account):
    ACTION:{"type":"cancel_booking","booking_id":456}
@@ -348,11 +349,19 @@ RULES:
   Example: customer asks for "Karaoke" and Karaoke's PAYMENT field says "MEMBERSHIP NOT ACCEPTED" → respond with cash/CliQ/card options only, NEVER offer membership credits.
 - MEMBERSHIP USAGE: When the chosen service is membership-eligible AND the customer has an active membership with remaining balance, you MAY proactively mention it as one of the payment choices. Always include all eligible options together so the customer chooses ("Pay with your Pro membership — 240 minutes left — or with cash/CliQ/card?"). Include membership_id in the create_booking ACTION only when the customer explicitly chose membership.
 - AVAILABILITY: Always call check_availability before confirming any slot. Pass the specific resource_id if the customer named a resource.
-- BOOKING FLOW: 1) Check availability → 2) Show available slots → 3) Confirm details + price + ASK PAYMENT METHOD with customer → 4) Create booking only after explicit customer confirmation including their chosen payment method.
+- BOOKING FLOW: 1) Check availability → 2) Show available slots → 3) Confirm details + price + ASK PAYMENT METHOD with customer → 4) Output PENDING_BOOKING with payment_method set → 5) Create booking only after explicit customer confirmation including their chosen payment method.
+- PAYMENT METHOD FIELD (REQUIRED in PENDING_BOOKING and ACTION):
+  Once the customer chooses how to pay, set payment_method to ONE of these exact strings:
+    - "membership" → also set membership_id to the [membership id:X] from their account; prepaid_entitlement_id null
+    - "package"    → also set prepaid_entitlement_id to the [package id:X]; membership_id null
+    - "cash"       → both membership_id and prepaid_entitlement_id null. Booking is confirmed at the venue.
+    - "card"       → both ID fields null. NOTE: card payments cannot be completed by chat. The system will return a redirect message asking the customer to use the public Book now button. Speak that message back to the customer; do NOT retry.
+    - "cliq"       → same as card.
+  Carry the same payment_method through both PENDING_BOOKING and the eventual create_booking ACTION. Never omit it.
 - PENDING_BOOKING REQUIRED: Whenever you are presenting booking details and asking "Shall I confirm this booking?", you MUST append this line at the very end of your message (after all other text), on its own line, with no extra characters before or after:
-PENDING_BOOKING:{"service_id":SERVICE_ID_NUMBER,"start_time":"YYYY-MM-DDTHH:MM:00${tzOffsetStr}","resource_id":RESOURCE_ID_OR_NULL,"staff_id":STAFF_ID_OR_NULL,"membership_id":MEMBERSHIP_ID_OR_NULL,"duration_minutes":DURATION_NUMBER}
-Replace values with exact numbers from the business context. ALWAYS append the timezone offset ${tzOffsetStr} to start_time — never omit it. staff_id is null if no staff is required. membership_id is null if cash payment. This line is parsed by the system and not displayed.
-- CONFIRMATION CRITICAL: When the customer says YES to confirming a booking (any of: "yes", "confirm", "go ahead", "book it", "do it", "yes please", "confirm it"), you MUST output ACTION:{...create_booking...} immediately with all booking details from the conversation. Do NOT just say "I'll do it" or "creating now" - output the ACTION line directly.
+PENDING_BOOKING:{"service_id":SERVICE_ID_NUMBER,"start_time":"YYYY-MM-DDTHH:MM:00${tzOffsetStr}","resource_id":RESOURCE_ID_OR_NULL,"staff_id":STAFF_ID_OR_NULL,"payment_method":"PAYMENT_METHOD_STRING","membership_id":MEMBERSHIP_ID_OR_NULL,"prepaid_entitlement_id":PREPAID_ID_OR_NULL,"duration_minutes":DURATION_NUMBER}
+Replace values with exact numbers from the business context. ALWAYS append the timezone offset ${tzOffsetStr} to start_time — never omit it. staff_id is null if no staff is required. payment_method is required and must match the customer's choice. membership_id is non-null ONLY when payment_method="membership"; prepaid_entitlement_id is non-null ONLY when payment_method="package". This line is parsed by the system and not displayed.
+- CONFIRMATION CRITICAL: When the customer says YES to confirming a booking (any of: "yes", "confirm", "go ahead", "book it", "do it", "yes please", "confirm it"), you MUST output ACTION:{...create_booking...} immediately with all booking details from the conversation INCLUDING the payment_method they chose earlier. Do NOT just say "I'll do it" or "creating now" - output the ACTION line directly. For card/cliq, the system will return a redirect message — that's expected behaviour; deliver it to the customer and do not retry.
 - PACKAGE PAYMENT: Prepaid packages may apply to certain services. When a service's PAYMENT field includes "prepaid" AND the customer has a package with remaining sessions, you MAY offer it as a payment choice alongside the others. The booking action will validate eligibility — if a package isn't valid for the chosen service the action will fail and you can fall back to other methods. Include prepaid_entitlement_id from the customer's [package id:X] in the ACTION only when the customer explicitly chose the package.
 - CANCELLATION: Always show booking details and ask "Shall I go ahead and cancel?" before acting.
 - Be concise, warm, and professional. Use bullet points for lists.
@@ -381,7 +390,7 @@ async function runSupportAgent({ tenantContext, customerData, isSignedIn, histor
   const confirmNote = confirmationMode
     ? `
 
-[SYSTEM INSTRUCTION: The customer just confirmed. Output ACTION:{"type":"create_booking","service_id":X,"start_time":"YYYY-MM-DDTHH:MM:00${_tzOffsetStr}","duration_minutes":N,"resource_id":X_or_null,"staff_id":X_or_null,"membership_id":X_or_null,"prepaid_entitlement_id":X_or_null,"slots":N} immediately. Use exact IDs from the business context. Use the exact time the customer selected. ALWAYS include the timezone offset ${_tzOffsetStr} in start_time. Do NOT ask again.]`
+[SYSTEM INSTRUCTION: The customer just confirmed. Output ACTION:{"type":"create_booking","service_id":X,"start_time":"YYYY-MM-DDTHH:MM:00${_tzOffsetStr}","duration_minutes":N,"resource_id":X_or_null,"staff_id":X_or_null,"payment_method":"<their chosen method: membership|package|cash|card|cliq>","membership_id":X_or_null,"prepaid_entitlement_id":X_or_null,"slots":N} immediately. Use exact IDs from the business context. Use the exact time the customer selected. Use the payment_method THEY chose earlier in this conversation. ALWAYS include the timezone offset ${_tzOffsetStr} in start_time. Do NOT ask again.]`
     : "";
 
   const response = await claude.messages.create({
