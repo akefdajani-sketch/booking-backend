@@ -111,7 +111,7 @@ async function fetchBusinessContext(tenantId, tenantSlug) {
   const mpCurrencyCol = hasMpCurrency    ? "currency"        : "NULL::text AS currency";
   const mpDescCol     = hasMpDescription ? "description"     : "NULL::text AS description";
 
-  const [servicesRes, membershipsRes, ratesRes, hoursRes, resourcesRes, staffRes, categoriesRes, packagesCheckRes, resourceLinksRes, staffLinksRes] =
+  const [servicesRes, membershipsRes, ratesRes, hoursRes, resourcesRes, staffRes, categoriesRes, packagesCheckRes, resourceLinksRes, staffLinksRes, serviceHoursRes] =
     await Promise.all([
       db.query(
         `SELECT s.id, s.name, ${descCol},
@@ -211,6 +211,18 @@ async function fetchBusinessContext(tenantId, tenantSlug) {
          WHERE ssl.tenant_id = $1`,
         [tenantId]
       ).catch(() => ({ rows: [] })),
+
+      // VOICE-CONTEXT-1: Per-service operating hours (e.g. Karaoke 8pm–2am).
+      // Used by the voice/text agent to explain rules when a customer asks
+      // for a time outside the service window, instead of just saying
+      // "no slots available".
+      db.query(
+        `SELECT service_id, day_of_week, open_time, close_time
+         FROM service_hours
+         WHERE tenant_id = $1
+         ORDER BY service_id, day_of_week`,
+        [tenantId]
+      ).catch(() => ({ rows: [] })),
     ]);
 
   const hasPrePaid = !!packagesCheckRes.rows?.[0]?.prod;
@@ -294,6 +306,7 @@ async function fetchBusinessContext(tenantId, tenantSlug) {
     prepaidProducts,
     resourceLinks: resourceLinksRes.rows,
     staffLinks: staffLinksRes.rows,
+    serviceHours: serviceHoursRes.rows,
   };
   // Diagnostic: visible in Render logs — tells us exactly what each tenant's AI context contains
   console.log(`[AI ctx] tenant=${tenantSlug} services=${result.services.length} memberships=${result.memberships.length} resources=${result.resources.length} staff=${result.staff.length} isActiveColExists=${hasIsActive} resIsActiveColExists=${hasResourceIsActive}`);
