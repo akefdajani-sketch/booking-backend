@@ -73,6 +73,24 @@ router.post("/:tenantSlug/session", optionalAuth, async (req, res) => {
     const tenant = await getTenantBySlug(req.params.tenantSlug);
     if (!tenant) return res.status(404).json({ error: "tenant_not_found" });
 
+    // VOICE-CONTEXT-1: getTenantBySlug returns a slim tenant row that doesn't
+    // include voice_instructions or branding. Pull those here so the prompt
+    // builder can use the per-tenant tone override and payment settings.
+    // Both columns are optional — tolerate missing/older schemas.
+    try {
+      const enrichRes = await require("../db").query(
+        `SELECT voice_instructions, branding
+         FROM tenants
+         WHERE id = $1
+         LIMIT 1`,
+        [tenant.id]
+      );
+      if (enrichRes.rows?.[0]) {
+        tenant.voice_instructions = enrichRes.rows[0].voice_instructions || null;
+        tenant.branding           = enrichRes.rows[0].branding || null;
+      }
+    } catch (_) { /* older schema without these columns — safe to skip */ }
+
     const email      = req.auth?.email || req.googleUser?.email || null;
     const isSignedIn = !!email;
 
