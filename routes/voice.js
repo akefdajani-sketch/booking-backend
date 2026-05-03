@@ -152,13 +152,37 @@ router.post("/:tenantSlug/session", optionalAuth, async (req, res) => {
       ? customerData.profile.name.split(" ")[0]
       : null;
 
+    // VOICE-LANG-1: Per-call language selection.
+    // Adding multiple languages to an EL agent locks STT/TTS to whichever
+    // language is selected at session start (per EL docs — the language is
+    // fixed for the whole call). Without an override, EL defaults to the
+    // agent's "Default" language (English), and STT can't transcribe other
+    // languages. So when the customer picks Arabic in the overlay, we MUST
+    // pass `language: "ar"` in the SDK overrides at startSession.
+    //
+    // Allowed values are limited to the languages actually configured on
+    // the EL agent. Add more here as new languages are enabled in the
+    // dashboard.
+    const requestedLang = String(req.query.lang || "en").toLowerCase();
+    const lang = ["en", "ar"].includes(requestedLang) ? requestedLang : "en";
+
+    // Localize the first message to the chosen language. The agent base
+    // first-message in the EL dashboard remains English; this override
+    // takes effect per-session.
+    const firstMessage = lang === "ar"
+      ? (firstName
+          ? `أهلاً ${firstName}! أنا حسابك مفتوح. كيف ممكن أساعدك — حجز جديد، أرصدتك، أو شي ثاني؟`
+          : `أهلاً! أنا مساعد الحجوزات لـ ${tenant.name}. شو ممكن أساعدك فيه؟`)
+      : (firstName
+          ? `Hi ${firstName}! I have your account open. How can I help — book something, check your balance, anything?`
+          : `Hi! I'm the booking assistant for ${tenant.name}. What can I help with?`);
+
     const out = {
       connection_type: requestedType,
       agent_id: agentId,
       prompt_override: promptOverride,
-      first_message_override: firstName
-        ? `Hi ${firstName}! I have your account open. How can I help — book something, check your balance, anything?`
-        : `Hi! I'm the booking assistant for ${tenant.name}. What can I help with?`,
+      first_message_override: firstMessage,
+      language_override: lang,
       max_session_seconds: VOICE_MAX_SESSION_SECONDS,
       customer_first_name: firstName,
       tenant_name: tenant.name,
@@ -166,7 +190,7 @@ router.post("/:tenantSlug/session", optionalAuth, async (req, res) => {
     };
     out[clientField] = tokenValue;
 
-    console.log(`[voice] session opened: tenant=${tenant.slug} signedIn=${isSignedIn} type=${requestedType}`);
+    console.log(`[voice] session opened: tenant=${tenant.slug} signedIn=${isSignedIn} type=${requestedType} lang=${lang}`);
     res.json(out);
   } catch (err) {
     console.error("[voice] session error:", err.message);
