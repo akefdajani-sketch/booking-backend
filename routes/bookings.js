@@ -14,5 +14,6 @@ const router  = express.Router();
 require("./bookings/history")(router);
 require("./bookings/crud")(router);
 require("./bookings/create")(router);
+require("./bookings/confirmPayment")(router); // CLIQ-CONFIRM-1: operator marks payment received
 
 module.exports = router;
