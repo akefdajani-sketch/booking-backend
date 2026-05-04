@@ -420,6 +420,8 @@ router.patch("/:id", resolveTenantFromServiceId, requireAdminOrTenantRole("manag
       checkin_time,
       checkout_time,
       price_per_night,
+      // LONG-TERM-FLAG-2: explicit flag (replaces name-LIKE heuristic from migration 061)
+      is_long_term,
       // PR-TAX-1: per-service VAT overrides
       vat_rate,
       vat_label,
@@ -495,6 +497,10 @@ router.patch("/:id", resolveTenantFromServiceId, requireAdminOrTenantRole("manag
       add("checkout_time", checkout_time || "11:00");
     if (price_per_night !== undefined && svcCols.has("price_per_night"))
       add("price_per_night", price_per_night == null ? null : Number(price_per_night));
+
+    // LONG-TERM-FLAG-2: explicit boolean (column added by migration 061)
+    if (is_long_term !== undefined && svcCols.has("is_long_term"))
+      add("is_long_term", !!is_long_term);
 
     // PR-TAX-1: per-service VAT overrides (migration 031 guard)
     if (vat_rate !== undefined && svcCols.has("vat_rate")) {
