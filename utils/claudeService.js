@@ -361,7 +361,18 @@ RULES:
 - PENDING_BOOKING REQUIRED: Whenever you are presenting booking details and asking "Shall I confirm this booking?", you MUST append this line at the very end of your message (after all other text), on its own line, with no extra characters before or after:
 PENDING_BOOKING:{"service_id":SERVICE_ID_NUMBER,"start_time":"YYYY-MM-DDTHH:MM:00${tzOffsetStr}","resource_id":RESOURCE_ID_OR_NULL,"staff_id":STAFF_ID_OR_NULL,"payment_method":"PAYMENT_METHOD_STRING","membership_id":MEMBERSHIP_ID_OR_NULL,"prepaid_entitlement_id":PREPAID_ID_OR_NULL,"duration_minutes":DURATION_NUMBER}
 Replace values with exact numbers from the business context. ALWAYS append the timezone offset ${tzOffsetStr} to start_time — never omit it. staff_id is null if no staff is required. payment_method is required and must match the customer's choice. membership_id is non-null ONLY when payment_method="membership"; prepaid_entitlement_id is non-null ONLY when payment_method="package". This line is parsed by the system and not displayed.
-- CONFIRMATION CRITICAL: When the customer says YES to confirming a booking (any of: "yes", "confirm", "go ahead", "book it", "do it", "yes please", "confirm it"), you MUST output ACTION:{...create_booking...} immediately with all booking details from the conversation INCLUDING the payment_method they chose earlier. Do NOT just say "I'll do it" or "creating now" - output the ACTION line directly. For card/cliq, the system will return a redirect message — that's expected behaviour; deliver it to the customer and do not retry.
+- CONFIRMATION CRITICAL — ACTION LINE IS NON-NEGOTIABLE:
+  When the customer says YES to confirming a booking (any of: "yes", "confirm", "go ahead", "book it", "do it", "yes please", "confirm it"), the FIRST LINE of your response MUST be:
+    ACTION:{"type":"create_booking",...all fields including payment_method...}
+  Then your spoken acknowledgement on the next line.
+
+  CRITICAL: Without the ACTION line, the booking will NOT be saved in the database. If you confirm verbally ("Booked!", "All set!", "Done!") without emitting the ACTION line, the customer will be misled — they will believe they have a booking when in fact NO BOOKING EXISTS. This is a critical failure that damages trust.
+
+  Output the ACTION line FIRST, before any spoken text. Format:
+    ACTION:{"type":"create_booking","service_id":X,...}
+    Great, I've booked Sim Bay 1 for tomorrow at 5pm.
+
+  For card/cliq, the system will return a redirect message — that's expected behaviour; deliver it to the customer and do not retry.
 - PACKAGE PAYMENT: Prepaid packages may apply to certain services. When a service's PAYMENT field includes "prepaid" AND the customer has a package with remaining sessions, you MAY offer it as a payment choice alongside the others. The booking action will validate eligibility — if a package isn't valid for the chosen service the action will fail and you can fall back to other methods. Include prepaid_entitlement_id from the customer's [package id:X] in the ACTION only when the customer explicitly chose the package.
 - CANCELLATION: Always show booking details and ask "Shall I go ahead and cancel?" before acting.
 - Be concise, warm, and professional. Use bullet points for lists.
@@ -387,10 +398,28 @@ async function runSupportAgent({ tenantContext, customerData, isSignedIn, histor
 
   // When user is confirming a previously-discussed booking, inject an explicit instruction
   // so Claude reliably outputs ACTION:create_booking with the correct IDs from context.
+  //
+  // BOOKING-DROP-FIX-1 (May 4, 2026): the previous wording said "Output ACTION
+  // immediately" but production logs show ~3% of confirmations still come back
+  // with verbal "Booked!" but no ACTION line. The retry catches most but not
+  // all of those. Tightening the instruction to require ACTION as the FIRST
+  // LINE of the response (with the spoken acknowledgement on subsequent lines)
+  // makes it much harder for Claude to "forget" by reordering.
   const confirmNote = confirmationMode
     ? `
 
-[SYSTEM INSTRUCTION: The customer just confirmed. Output ACTION:{"type":"create_booking","service_id":X,"start_time":"YYYY-MM-DDTHH:MM:00${_tzOffsetStr}","duration_minutes":N,"resource_id":X_or_null,"staff_id":X_or_null,"payment_method":"<their chosen method: membership|package|cash|card|cliq>","membership_id":X_or_null,"prepaid_entitlement_id":X_or_null,"slots":N} immediately. Use exact IDs from the business context. Use the exact time the customer selected. Use the payment_method THEY chose earlier in this conversation. ALWAYS include the timezone offset ${_tzOffsetStr} in start_time. Do NOT ask again.]`
+[SYSTEM INSTRUCTION — BOOKING CONFIRMATION:
+The customer just confirmed. Your response MUST start with this ACTION line as line 1, exactly:
+
+ACTION:{"type":"create_booking","service_id":X,"start_time":"YYYY-MM-DDTHH:MM:00${_tzOffsetStr}","duration_minutes":N,"resource_id":X_or_null,"staff_id":X_or_null,"payment_method":"<membership|package|cash|card|cliq>","membership_id":X_or_null,"prepaid_entitlement_id":X_or_null,"slots":N}
+
+Then on a new line, give the customer your short acknowledgement.
+
+Use exact IDs from the business context. Use the exact time the customer selected. Use the payment_method THEY chose earlier in this conversation. ALWAYS include the timezone offset ${_tzOffsetStr} in start_time.
+
+DO NOT output a confirmation acknowledgement WITHOUT the ACTION line — the database write only happens via the ACTION line. Without it the customer will believe they are booked but no booking exists.
+
+Do NOT ask again. Do NOT output a PENDING_BOOKING line — only the ACTION line.]`
     : "";
 
   // VOICE-PERF-1: Build the system prompt once and reuse via Anthropic
@@ -426,42 +455,47 @@ async function runSupportAgent({ tenantContext, customerData, isSignedIn, histor
 
   const text = response.content[0].text;
 
-  // Parse ACTION line
-  const actionMatch = text.match(/^ACTION:(\{.+\})$/m);
-  let action = null;
-  if (actionMatch) {
-    try { action = JSON.parse(actionMatch[1]); } catch (e) {
-      console.warn("[claudeService] ACTION JSON parse failed:", actionMatch[1].slice(0, 200), "err:", e.message);
+  // BOOKING-DROP-FIX-1: Looser ACTION regex.
+  // Original required ACTION at start of line with no space after colon. In
+  // practice Claude occasionally emits "ACTION: {…}" (one space) or wraps the
+  // line. Allow optional whitespace after the colon and don't require $ end-
+  // of-line — JSON ends at the closing brace anyway. Multi-line flag stays.
+  function parseActionFromText(t) {
+    if (!t) return null;
+    const m = t.match(/^ACTION:\s*(\{[\s\S]+?\})\s*$/m);
+    if (!m) return null;
+    try {
+      return JSON.parse(m[1]);
+    } catch (e) {
+      console.warn("[claudeService] ACTION JSON parse failed:", m[1].slice(0, 200), "err:", e.message);
+      return null;
     }
   }
 
-  // VOICE-PERF-1: One-shot retry on missing ACTION in confirmation mode.
+  let action = parseActionFromText(text);
+
+  // BOOKING-DROP-FIX-1: One-shot retry on missing ACTION in confirmation mode.
   // We expect Claude to fire create_booking when the user just said "yes".
   // If it didn't (or output broken JSON), nudge it once with an explicit
-  // correction instead of silently dropping. Cheap insurance — only fires
-  // on the ~2-3% of confirmation turns that drift.
+  // correction instead of silently dropping. The corrective prompt is short
+  // and forceful: ACTION line ONLY, no prose. Cuts retry-failure rate further.
   if (confirmationMode && !action) {
     console.warn("[claudeService] confirmationMode=true but no valid ACTION parsed — issuing one-shot correction");
     try {
       const retry = await claude.messages.create({
         ...claudeRequest,
-        max_tokens: 600,
+        max_tokens: 400,
         messages: [
           ...history,
           { role: "user",      content: message + confirmNote },
           { role: "assistant", content: text },
-          { role: "user",      content: "[CORRECTION: Your previous reply was missing the ACTION:{...} line, or its JSON was malformed. Output ONLY the ACTION:{\"type\":\"create_booking\",...} line now, with all required fields including payment_method. No prose. No other text. Just the ACTION line.]" },
+          { role: "user",      content: '[CORRECTION: Your previous reply confirmed the booking but did not emit the ACTION:{...} line, so the booking was NOT saved. Output ONLY the ACTION:{"type":"create_booking",...} line now — no prose, no acknowledgement, no prefix, no markdown. Just one line beginning with ACTION:{ and ending with }. Include payment_method. The system will use this line to write the booking to the database.]' },
         ],
       });
-      const retryText  = retry.content[0].text;
-      const retryMatch = retryText.match(/^ACTION:(\{.+\})$/m);
-      if (retryMatch) {
-        try {
-          action = JSON.parse(retryMatch[1]);
-          console.log("[claudeService] retry succeeded — got valid ACTION");
-        } catch (e) {
-          console.warn("[claudeService] retry ACTION JSON still malformed:", e.message);
-        }
+      const retryText = retry.content[0].text;
+      action = parseActionFromText(retryText);
+      if (action) {
+        console.log("[claudeService] retry succeeded — got valid ACTION");
       } else {
         console.warn("[claudeService] retry produced no ACTION line either");
       }
@@ -470,7 +504,21 @@ async function runSupportAgent({ tenantContext, customerData, isSignedIn, histor
     }
   }
 
-  const cleanText = text.replace(/^ACTION:\{.+\}$/m, "").trim();
+  // BOOKING-DROP-FIX-1: SAFETY NET. If after retry we still have
+  // confirmationMode=true and no action, the original text likely contains a
+  // false-success acknowledgement ("Booked!", "All set!") — delivering that
+  // to the customer would be a trust disaster (customer thinks they're
+  // booked when they are not). Override the response with a recovery
+  // message that asks them to confirm one more time, and clear `text` so the
+  // ACTION-stripper below doesn't accidentally leak any of the failed text.
+  let cleanText;
+  if (confirmationMode && !action) {
+    console.error("[claudeService] BOOKING DROP — confirmation reached returnpath with no action. Replacing reply with safe recovery prompt to avoid misleading the customer.");
+    cleanText =
+      "Sorry — I had a hiccup recording that booking and want to make sure I got it right. Could you confirm one more time by saying 'book it'?";
+  } else {
+    cleanText = text.replace(/^ACTION:\s*\{[\s\S]+?\}\s*$/m, "").trim();
+  }
   return { reply: cleanText, action };
 }
 
