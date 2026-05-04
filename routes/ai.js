@@ -15,14 +15,20 @@ const router = express.Router();
 function isConfirmationMessage(msg) {
   if (!msg) return false;
   const t = msg.toLowerCase().replace(/[!.?]/g, "").trim();
+  // OPTION-A-FINAL (May 4, 2026): Arabic confirmation words added so voice
+  // sessions in Arabic correctly trigger confirmationMode (turn N+1) and
+  // route through the create_booking ACTION path.
   const patterns = [
     "yes", "yeah", "yep", "sure", "ok", "okay", "confirm", "confirmed",
     "go ahead", "book it", "do it", "please", "yes please", "yes confirm",
     "create it", "make it", "perfect", "great", "correct", "that works",
-    "lets do it", "yes go ahead", "please do", "yes confirm it"
+    "lets do it", "yes go ahead", "please do", "yes confirm it",
+    // Arabic
+    "نعم", "أكد", "احجز", "تمام", "اوكي", "اوك", "اكد", "اكيد",
+    "تمام احجز", "نعم احجز", "احجزها", "اوك احجز",
   ];
   // Also match emoji-suffixed versions like "Yes, confirm it checkmark"
-  const clean = t.replace(/[^a-z ,]/g, "").trim();
+  const clean = t.replace(/[^a-z \u0600-\u06ff,]/g, "").trim();
   return patterns.some(p => clean === p || clean.startsWith(p + " ") || clean === "yes confirm it");
 }
 
