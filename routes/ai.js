@@ -439,10 +439,18 @@ async function fetchCustomerData(tenantId, email) {
       ).catch(() => ({ rows: [{ ent: null }] }));
       if (!check.rows?.[0]?.ent) return { rows: [] };
       return db.query(
+        // PAYMENT-FILTER-1 (May 4, 2026): include p.eligible_service_ids so
+        // the AI prompt can render which services each package applies to.
+        // Without this, Claude offered Lesson packages to pay for Sim Bay
+        // bookings because the prompt only said "customer has packages" with
+        // no eligibility constraint surfaced. The booking would then fail
+        // server-side validation (resolvePrepaidSelection enforces it), but
+        // by then the customer already heard "you can use your Lesson pack".
         `SELECT e.id, e.status, e.remaining_quantity, e.original_quantity,
                 e.starts_at, e.expires_at,
                 p.name AS product_name, p.product_type,
-                p.session_count, p.minutes_total, p.credit_amount
+                p.session_count, p.minutes_total, p.credit_amount,
+                p.eligible_service_ids
          FROM customer_prepaid_entitlements e
          LEFT JOIN prepaid_products p ON p.id = e.prepaid_product_id
          WHERE e.tenant_id = $1 AND e.customer_id = $2
