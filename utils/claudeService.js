@@ -194,7 +194,7 @@ ${hoursBlock}`;
 }
 
 // ── Format customer context ───────────────────────────────────────────
-function buildCustomerContext({ profile, bookings = [], memberships = [], packages = [] }) {
+function buildCustomerContext({ profile, bookings = [], memberships = [], packages = [] }, services = []) {
   if (!profile) return null;
 
   const now = Date.now();
@@ -236,11 +236,31 @@ function buildCustomerContext({ profile, bookings = [], memberships = [], packag
       }).join("\n")
     : "    None";
 
+  // PAYMENT-FILTER-1: Build a quick id→name lookup from services so we can
+  // render package eligibility human-readably in the customer context.
+  const serviceNameById = new Map(
+    (services || []).map(s => [String(s.id), String(s.name || `Service #${s.id}`)])
+  );
+
   const packagesBlock = packages.length > 0
     ? packages.map(p => {
         const rem     = p.remaining_quantity != null ? `${p.remaining_quantity}/${p.original_quantity || "?"} remaining` : "";
         const expires = p.expires_at ? `expires ${new Date(p.expires_at).toLocaleDateString("en-GB")}` : null;
-        return `    - [package id:${p.id}] ${p.product_name || "Package"} | status: ${p.status} | ${rem}${expires ? ` | ${expires}` : ""} (use prepaid_entitlement_id:${p.id} in create_booking to redeem)`;
+        // PAYMENT-FILTER-1: eligible_service_ids comes back as JSONB. NULL or
+        // empty array means the package applies to all services. A non-empty
+        // array means it's restricted to those services only.
+        const eligibleIds = Array.isArray(p.eligible_service_ids) ? p.eligible_service_ids.map(String) : [];
+        let eligibilityStr;
+        if (eligibleIds.length === 0) {
+          eligibilityStr = "applies to: all services";
+        } else {
+          const names = eligibleIds.map(id => {
+            const nm = serviceNameById.get(id);
+            return nm ? `${nm} [service_id:${id}]` : `[service_id:${id}]`;
+          });
+          eligibilityStr = `ONLY VALID FOR: ${names.join(", ")} — DO NOT offer this package for any other service`;
+        }
+        return `    - [package id:${p.id}] ${p.product_name || "Package"} | status: ${p.status} | ${rem}${expires ? ` | ${expires}` : ""} | ${eligibilityStr} (use prepaid_entitlement_id:${p.id} in create_booking to redeem)`;
       }).join("\n")
     : "    None";
 
@@ -263,7 +283,9 @@ ${packagesBlock}`;
 // ── Build system prompt ───────────────────────────────────────────────
 function buildSystemPrompt({ tenantContext, customerData, isSignedIn }) {
   const businessCtx  = buildBusinessContext(tenantContext);
-  const customerCtx  = isSignedIn && customerData ? buildCustomerContext(customerData) : null;
+  const customerCtx  = isSignedIn && customerData
+    ? buildCustomerContext(customerData, tenantContext.services || [])
+    : null;
 
   // Inject current date/time in tenant timezone
   const tenantTz = tenantContext.timezone || "Asia/Amman";
@@ -373,7 +395,17 @@ Replace values with exact numbers from the business context. ALWAYS append the t
     Great, I've booked Sim Bay 1 for tomorrow at 5pm.
 
   For card/cliq, the system will return a redirect message — that's expected behaviour; deliver it to the customer and do not retry.
-- PACKAGE PAYMENT: Prepaid packages may apply to certain services. When a service's PAYMENT field includes "prepaid" AND the customer has a package with remaining sessions, you MAY offer it as a payment choice alongside the others. The booking action will validate eligibility — if a package isn't valid for the chosen service the action will fail and you can fall back to other methods. Include prepaid_entitlement_id from the customer's [package id:X] in the ACTION only when the customer explicitly chose the package.
+- PACKAGE PAYMENT — STRICT ELIGIBILITY:
+  Each prepaid package the customer holds shows either "applies to: all services" OR "ONLY VALID FOR: <service list>". This is the customer-side restriction.
+
+  When proposing a payment method, you MUST:
+    1. Check the package's eligibility line.
+    2. If it says "ONLY VALID FOR: ...", offer the package as a payment option ONLY for the services listed there. Never offer it for other services even if the service's PAYMENT field includes "prepaid".
+    3. If it says "applies to: all services", you may offer it for any service whose PAYMENT field includes "prepaid".
+
+  Example: customer has "Lesson Pack [package id:9] | ONLY VALID FOR: Group Lesson [service_id:5]". Customer wants to book Sim Bay 1 [service_id:1]. → DO NOT mention the Lesson Pack as a payment option, even though it has remaining sessions. The Lesson Pack is restricted to Group Lesson only.
+
+  Include prepaid_entitlement_id from [package id:X] in the ACTION only when (a) the customer explicitly chose that package, AND (b) the package is eligible for the chosen service.
 - CANCELLATION: Always show booking details and ask "Shall I go ahead and cancel?" before acting.
 - Be concise, warm, and professional. Use bullet points for lists.
 - If you don't know something not in the data, say so honestly.
