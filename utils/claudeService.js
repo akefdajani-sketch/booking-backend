@@ -383,18 +383,16 @@ RULES:
 - PENDING_BOOKING REQUIRED: Whenever you are presenting booking details and asking "Shall I confirm this booking?", you MUST append this line at the very end of your message (after all other text), on its own line, with no extra characters before or after:
 PENDING_BOOKING:{"service_id":SERVICE_ID_NUMBER,"start_time":"YYYY-MM-DDTHH:MM:00${tzOffsetStr}","resource_id":RESOURCE_ID_OR_NULL,"staff_id":STAFF_ID_OR_NULL,"payment_method":"PAYMENT_METHOD_STRING","membership_id":MEMBERSHIP_ID_OR_NULL,"prepaid_entitlement_id":PREPAID_ID_OR_NULL,"duration_minutes":DURATION_NUMBER}
 Replace values with exact numbers from the business context. ALWAYS append the timezone offset ${tzOffsetStr} to start_time — never omit it. staff_id is null if no staff is required. payment_method is required and must match the customer's choice. membership_id is non-null ONLY when payment_method="membership"; prepaid_entitlement_id is non-null ONLY when payment_method="package". This line is parsed by the system and not displayed.
-- CONFIRMATION CRITICAL — ACTION LINE IS NON-NEGOTIABLE:
-  When the customer says YES to confirming a booking (any of: "yes", "confirm", "go ahead", "book it", "do it", "yes please", "confirm it"), the FIRST LINE of your response MUST be:
-    ACTION:{"type":"create_booking",...all fields including payment_method...}
-  Then your spoken acknowledgement on the next line.
+- CONFIRMATION FLOW (TWO-TURN — DO NOT SKIP):
+  Turn 1 — Customer asks to book ("book sim 3 at 5pm", "I want a karaoke session tomorrow"): your job is to gather all required fields (service, time, payment method) and emit a PENDING_BOOKING line at the end of your message. DO NOT emit ACTION on turn 1. The frontend renders the PENDING_BOOKING as a summary card with a Confirm button — that is the customer's chance to review before committing.
 
-  CRITICAL: Without the ACTION line, the booking will NOT be saved in the database. If you confirm verbally ("Booked!", "All set!", "Done!") without emitting the ACTION line, the customer will be misled — they will believe they have a booking when in fact NO BOOKING EXISTS. This is a critical failure that damages trust.
+  Turn 2 — Customer confirms ("yes", "confirm", "book it"): only NOW you emit ACTION:{"type":"create_booking",...} with all the fields from the prior PENDING_BOOKING. The system uses the ACTION line to write the booking to the database. If you confirm verbally without the ACTION line on turn 2, the booking will NOT be saved. Always include payment_method.
 
-  Output the ACTION line FIRST, before any spoken text. Format:
-    ACTION:{"type":"create_booking","service_id":X,...}
-    Great, I've booked Sim Bay 1 for tomorrow at 5pm.
+  Format on turn 2:
+    ACTION:{"type":"create_booking","service_id":X,"start_time":"...","payment_method":"...","duration_minutes":N,...}
+    Great, you're booked for Sim Bay 1 tomorrow at 5pm.
 
-  For card/cliq, the system will return a redirect message — that's expected behaviour; deliver it to the customer and do not retry.
+  For card/cliq payment_method, the system returns a redirect message — speak that back to the customer; do not retry.
 - PACKAGE PAYMENT — STRICT ELIGIBILITY:
   Each prepaid package the customer holds shows either "applies to: all services" OR "ONLY VALID FOR: <service list>". This is the customer-side restriction.
 
@@ -431,27 +429,22 @@ async function runSupportAgent({ tenantContext, customerData, isSignedIn, histor
   // When user is confirming a previously-discussed booking, inject an explicit instruction
   // so Claude reliably outputs ACTION:create_booking with the correct IDs from context.
   //
-  // BOOKING-DROP-FIX-1 (May 4, 2026): the previous wording said "Output ACTION
-  // immediately" but production logs show ~3% of confirmations still come back
-  // with verbal "Booked!" but no ACTION line. The retry catches most but not
-  // all of those. Tightening the instruction to require ACTION as the FIRST
-  // LINE of the response (with the spoken acknowledgement on subsequent lines)
-  // makes it much harder for Claude to "forget" by reordering.
+  // BOOKING-DROP-FIX-1.1 (May 4, 2026): the original "ACTION must be FIRST LINE"
+  // wording was too aggressive — Claude started emitting ACTION on turn 1 too,
+  // skipping the PENDING_BOOKING summary card entirely. This restored wording
+  // requires ACTION but does NOT force ordering, leaving room for Claude to
+  // include a brief acknowledgement and the ACTION line in either order.
   const confirmNote = confirmationMode
     ? `
 
 [SYSTEM INSTRUCTION — BOOKING CONFIRMATION:
-The customer just confirmed. Your response MUST start with this ACTION line as line 1, exactly:
+The customer just confirmed an existing pending booking. Output an ACTION line in your response, formatted exactly:
 
 ACTION:{"type":"create_booking","service_id":X,"start_time":"YYYY-MM-DDTHH:MM:00${_tzOffsetStr}","duration_minutes":N,"resource_id":X_or_null,"staff_id":X_or_null,"payment_method":"<membership|package|cash|card|cliq>","membership_id":X_or_null,"prepaid_entitlement_id":X_or_null,"slots":N}
 
-Then on a new line, give the customer your short acknowledgement.
-
 Use exact IDs from the business context. Use the exact time the customer selected. Use the payment_method THEY chose earlier in this conversation. ALWAYS include the timezone offset ${_tzOffsetStr} in start_time.
 
-DO NOT output a confirmation acknowledgement WITHOUT the ACTION line — the database write only happens via the ACTION line. Without it the customer will believe they are booked but no booking exists.
-
-Do NOT ask again. Do NOT output a PENDING_BOOKING line — only the ACTION line.]`
+Without the ACTION line the booking will NOT be saved. Do NOT output a PENDING_BOOKING line — only the ACTION line. Do NOT ask again.]`
     : "";
 
   // VOICE-PERF-1: Build the system prompt once and reuse via Anthropic
@@ -536,21 +529,17 @@ Do NOT ask again. Do NOT output a PENDING_BOOKING line — only the ACTION line.
     }
   }
 
-  // BOOKING-DROP-FIX-1: SAFETY NET. If after retry we still have
-  // confirmationMode=true and no action, the original text likely contains a
-  // false-success acknowledgement ("Booked!", "All set!") — delivering that
-  // to the customer would be a trust disaster (customer thinks they're
-  // booked when they are not). Override the response with a recovery
-  // message that asks them to confirm one more time, and clear `text` so the
-  // ACTION-stripper below doesn't accidentally leak any of the failed text.
-  let cleanText;
-  if (confirmationMode && !action) {
-    console.error("[claudeService] BOOKING DROP — confirmation reached returnpath with no action. Replacing reply with safe recovery prompt to avoid misleading the customer.");
-    cleanText =
-      "Sorry — I had a hiccup recording that booking and want to make sure I got it right. Could you confirm one more time by saying 'book it'?";
-  } else {
-    cleanText = text.replace(/^ACTION:\s*\{[\s\S]+?\}\s*$/m, "").trim();
-  }
+  // BOOKING-DROP-FIX-1.1 (May 4, 2026): The aggressive safety-net override
+  // (which replaced Claude's reply with a generic "could you confirm again?"
+  // recovery message whenever confirmationMode=true and no action was parsed)
+  // has been REMOVED. It was destroying valid turn-1 conversations where
+  // confirmationMode was triggered by an ambiguous opener like "ok book sim 3"
+  // — there was no actual pending booking to act on, so the override was just
+  // garbling the conversation. The retry above is sufficient insurance; in the
+  // rare residual case where retry also fails, returning Claude's reply
+  // verbatim is preferable to a confusing forced-recovery that may not match
+  // the actual conversational state.
+  const cleanText = text.replace(/^ACTION:\s*\{[\s\S]+?\}\s*$/m, "").trim();
   return { reply: cleanText, action };
 }
 
