@@ -354,9 +354,6 @@ router.get("/:slug", async (req, res) => {
     };
   }
 
-module.exports = router;
-
-
   res.json({
     ok: true,
     tenantSlug: tenant.slug,
