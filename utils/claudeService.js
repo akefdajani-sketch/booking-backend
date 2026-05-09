@@ -4,7 +4,7 @@ const Anthropic = require("@anthropic-ai/sdk");
 const claude = new Anthropic();
 
 // ── Format business context ───────────────────────────────────────────
-function buildBusinessContext({ name, services = [], memberships = [], rates = [], workingHours = [], resources = [], staff = [], categories = [], prepaidProducts = [], resourceLinks = [], staffLinks = [] }) {
+function buildBusinessContext({ name, services = [], memberships = [], rates = [], workingHours = [], resources = [], staff = [], categories = [], prepaidProducts = [], resourceLinks = [], staffLinks = [], serviceHours = [] }) {
 
   const DAY = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
   const DAY_SHORT = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
@@ -29,6 +29,74 @@ function buildBusinessContext({ name, services = [], memberships = [], rates = [
   // For dense tenants (many services), omit per-service staff links from services block
   // — staff section below already lists all staff with their service links
   const showStaffPerService = services.length <= 10;
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // VOICE-FIX-3 (Bug 1): Per-service rate/duration constraints derived from DB.
+  //
+  // Previously, rate rules rendered as "RATE RULES (how pricing works...)" which
+  // biased the LLM to read them as price tiers, not booking constraints. Karaoke
+  // has rate rules with min_duration_mins=120/180/240 — the agent was rattling
+  // off operating hours instead of computing "latest start = close - min duration".
+  //
+  // We now compute, per service, from the DB rate rules + service hours:
+  //   - DURATIONS available (e.g. 2hr / 3hr / 4hr)
+  //   - LATEST START time (so a min-duration booking ends before close)
+  //
+  // The agent reads these as constraints, not pricing.
+  // ─────────────────────────────────────────────────────────────────────────
+  const serviceRatesMap = {};
+  rates.forEach(r => {
+    if (!r.service_id) return;
+    if (!serviceRatesMap[r.service_id]) serviceRatesMap[r.service_id] = [];
+    serviceRatesMap[r.service_id].push(r);
+  });
+
+  // Service hours per service: pick the latest close_time across the week
+  // (used to compute "latest start" — assumes weekly close is consistent;
+  // edge case where Karaoke closes earlier on some days is handled by the
+  // engine at query time, not here).
+  const serviceCloseMap = {};
+  serviceHours.forEach(sh => {
+    if (!sh.service_id || !sh.close_time) return;
+    const closeStr = String(sh.close_time).slice(0, 5); // "HH:MM"
+    const prev = serviceCloseMap[sh.service_id];
+    // Prefer the latest close time in the week (e.g. Karaoke midnight)
+    if (!prev || closeStr > prev) serviceCloseMap[sh.service_id] = closeStr;
+  });
+
+  function deriveServiceConstraints(s) {
+    const svcRates = serviceRatesMap[s.id] || [];
+    // Distinct min_duration values from rate rules — these are the bookable durations
+    const durSet = new Set();
+    svcRates.forEach(r => {
+      if (r.min_duration_mins != null) durSet.add(Number(r.min_duration_mins));
+    });
+    const durations = Array.from(durSet).filter(n => n > 0).sort((a, b) => a - b);
+
+    // Minimum duration (used for latest start calc)
+    const minDur = durations.length > 0 ? durations[0] : (s.duration_minutes ? Number(s.duration_minutes) : null);
+
+    // Service close time (HH:MM). For services with explicit service_hours, use those.
+    // Otherwise fall back to null (engine will use tenant hours).
+    const serviceClose = serviceCloseMap[s.id] || null;
+
+    // Latest start = close - min duration
+    let latestStart = null;
+    if (serviceClose && minDur) {
+      const [h, m] = serviceClose.split(":").map(n => parseInt(n, 10));
+      let closeMin = h * 60 + m;
+      // Handle midnight close (00:00) → treat as 24:00
+      if (closeMin === 0) closeMin = 24 * 60;
+      const latestMin = closeMin - minDur;
+      if (latestMin > 0) {
+        const lh = Math.floor(latestMin / 60) % 24;
+        const lm = latestMin % 60;
+        latestStart = `${String(lh).padStart(2, "0")}:${String(lm).padStart(2, "0")}`;
+      }
+    }
+
+    return { durations, latestStart, serviceClose };
+  }
 
   // Services — group by category when categories exist, include linked resources and staff per service
   const buildServiceLine = (s) => {
@@ -62,11 +130,23 @@ function buildBusinessContext({ name, services = [], memberships = [], rates = [
       ? `staff: ${linkedStaff.map(st => `${st.name} [staff_id:${st.id}]`).join(", ")}`
       : null;
 
-    // Compact mode (>10 services): drop verbose details but always keep resources/staff/payment
+    // VOICE-FIX-3: derived booking constraints (durations + latest start + service hours)
+    const constraints = deriveServiceConstraints(s);
+    const durationsStr = constraints.durations.length > 0
+      ? `BOOKABLE DURATIONS: ${constraints.durations.map(m => m % 60 === 0 ? `${m / 60}hr` : `${m}min`).join(" / ")}`
+      : null;
+    const latestStartStr = constraints.latestStart
+      ? `LATEST START: ${constraints.latestStart}${constraints.serviceClose ? ` (service closes ${constraints.serviceClose})` : ""}`
+      : null;
+    const serviceHoursStr = constraints.serviceClose && !latestStartStr
+      ? `SERVICE HOURS: closes ${constraints.serviceClose}`
+      : null;
+
+    // Compact mode (>10 services): drop verbose details but always keep resources/staff/payment + new constraints
     const compactMode = services.length > 10;
     const detailFields = compactMode
-      ? [duration, price, paymentField, resourcesStr, staffStr]
-      : [duration, interval, price, maxSlots, minSlots, parallel, paymentField, resourcesStr, staffStr, desc];
+      ? [duration, price, paymentField, resourcesStr, staffStr, durationsStr, latestStartStr, serviceHoursStr]
+      : [duration, interval, price, maxSlots, minSlots, parallel, paymentField, resourcesStr, staffStr, durationsStr, latestStartStr, serviceHoursStr, desc];
     const details = detailFields.filter(Boolean).join(" | ");
     return `  - ${s.name} [service_id:${s.id}]: ${details}`;
   };
@@ -516,6 +596,22 @@ RULES:
     - "card"       → both ID fields null. NOTE: card payments cannot be completed by chat. The system will return a redirect message asking the customer to use the public Book now button. Speak that message back to the customer; do NOT retry.
     - "cliq"       → same as card.
   Carry the same payment_method through both PENDING_BOOKING and the eventual create_booking ACTION. Never omit it.
+- AVAILABILITY QUESTIONS (REQUIRED — VOICE-FIX-3):
+  When the customer asks ANY question about whether something is available — including
+  phrases like "is X open", "can I book Y", "is there a slot at Z", "are both sims free",
+  "what times are available", "anything tomorrow" — you MUST call check_availability
+  before answering. Do NOT answer from the SERVICE block alone.
+
+  The SERVICE block tells you WHEN the service runs (operating hours) and the LATEST
+  START / BOOKABLE DURATIONS — these are constraints, not live availability. Whether
+  a specific resource or staff member is FREE right now requires querying the database
+  via check_availability. The result will tell you per-resource and per-staff status,
+  including whether the customer's own existing bookings conflict.
+
+  Use the LATEST START as a hard rule when answering: if the customer asks for a time
+  past LATEST START, refuse with the reason ("Karaoke needs 2 hours minimum and we
+  close at midnight, so the latest start is 22:00") — do not propose a shorter booking
+  unless the rate rules support that duration.
 - BOOKING FLOW (REQUIRED — NEVER SKIP STEPS):
   Step 1: Check availability via check_availability ACTION.
   Step 2: Show available slots to the customer.
