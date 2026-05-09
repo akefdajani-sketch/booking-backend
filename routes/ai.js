@@ -601,58 +601,228 @@ async function handleAction(action, tenantId, tenantSlug, customerId, customerEm
         const tzRes = await db.query(`SELECT timezone FROM tenants WHERE id = $1 LIMIT 1`, [tenantId]);
         const tenantTz = tzRes.rows?.[0]?.timezone || "UTC";
 
-        // Auto-pick resource if not provided
-        // Try resource_service_links first (explicit link), then any resource for tenant
-        let resourceId = action.resource_id ? Number(action.resource_id) : null;
-        if (!resourceId) {
-          // Try linked resources first
-          const linkedRes = await db.query(
-            `SELECT r.id FROM resources r
+        // ─────────────────────────────────────────────────────────────
+        // VOICE-FIX-3 (Bug 2): Multi-resource × multi-staff coverage.
+        //
+        // Previously this picked ONE resource (lowest id) when none was
+        // specified, leaving the agent blind to whether other resources
+        // were free. For Karaoke (Sim 1 + Sim 3), the agent reported
+        // "available" based on Sim 1 alone, even when Sim 3 was booked.
+        //
+        // Now: query all linked resources × all linked staff (capped at 36
+        // tuples per request — when bigger tenants need this, gate it
+        // behind a tenant tier flag in the per-tenant AI config panel).
+        // ─────────────────────────────────────────────────────────────
+        const SLOT_TUPLE_CAP = 36;
+
+        // Build candidate resource list
+        let resourceCandidates = [];
+        if (action.resource_id) {
+          // Customer specified a resource — use only that one
+          const r = await db.query(
+            `SELECT id, name FROM resources WHERE id = $1 AND tenant_id = $2 LIMIT 1`,
+            [Number(action.resource_id), tenantId]
+          ).catch(() => ({ rows: [] }));
+          resourceCandidates = r.rows;
+        } else {
+          // No resource specified — fan out across all linked active resources
+          const linked = await db.query(
+            `SELECT r.id, r.name FROM resources r
              JOIN resource_service_links rsl ON rsl.resource_id = r.id
              WHERE rsl.service_id = $1 AND r.tenant_id = $2
                AND COALESCE(r.is_active, true) = true
-             ORDER BY r.id ASC LIMIT 1`,
+             ORDER BY r.id ASC`,
             [action.service_id, tenantId]
           ).catch(() => ({ rows: [] }));
-
-          if (linkedRes.rows.length > 0) {
-            resourceId = Number(linkedRes.rows[0].id);
-          } else {
-            // Fall back to any active resource for this tenant
-            const anyRes = await db.query(
-              `SELECT id FROM resources
+          resourceCandidates = linked.rows;
+          if (resourceCandidates.length === 0) {
+            // No linked resources — fall back to any active resource (legacy single-resource tenants)
+            const any = await db.query(
+              `SELECT id, name FROM resources
                WHERE tenant_id = $1 AND COALESCE(is_active, true) = true
                ORDER BY id ASC LIMIT 1`,
               [tenantId]
             ).catch(() => ({ rows: [] }));
-            if (anyRes.rows.length > 0) resourceId = Number(anyRes.rows[0].id);
+            resourceCandidates = any.rows;
           }
         }
 
+        // Build candidate staff list
+        let staffCandidates = [];
+        if (action.staff_id) {
+          const s = await db.query(
+            `SELECT id, name FROM staff WHERE id = $1 AND tenant_id = $2 LIMIT 1`,
+            [Number(action.staff_id), tenantId]
+          ).catch(() => ({ rows: [] }));
+          staffCandidates = s.rows;
+        } else if (service.requires_staff) {
+          // Service requires staff — fan out across all linked active staff
+          const linkedStaff = await db.query(
+            `SELECT st.id, st.name FROM staff st
+             JOIN staff_service_links ssl ON ssl.staff_id = st.id
+             WHERE ssl.service_id = $1 AND st.tenant_id = $2
+               AND COALESCE(st.is_active, true) = true
+             ORDER BY st.id ASC`,
+            [action.service_id, tenantId]
+          ).catch(() => ({ rows: [] }));
+          staffCandidates = linkedStaff.rows;
+        }
+        // Always include a "no staff" entry so the engine gets called even when service doesn't require staff
+        if (staffCandidates.length === 0) staffCandidates = [{ id: null, name: null }];
+
+        // If we ended up with no resources (service doesn't require resource), include a single null entry
+        if (resourceCandidates.length === 0) resourceCandidates = [{ id: null, name: null }];
+
+        // Cap the cartesian
+        const allTuples = [];
+        for (const r of resourceCandidates) {
+          for (const s of staffCandidates) {
+            allTuples.push({ resource: r, staff: s });
+          }
+        }
+        let tuples = allTuples;
+        let capHit = false;
+        if (allTuples.length > SLOT_TUPLE_CAP) {
+          tuples = allTuples.slice(0, SLOT_TUPLE_CAP);
+          capHit = true;
+          console.warn(`[AI availability] CAP HIT — ${allTuples.length} tuples truncated to ${SLOT_TUPLE_CAP}`);
+        }
+
         const normalizedDate = normalizeDateInput(action.date);
-        console.log(`[AI availability] service=${action.service_id} date=${normalizedDate} resourceId=${resourceId} basis=${service.availability_basis}`);
+        console.log(`[AI availability] service=${action.service_id} date=${normalizedDate} tuples=${tuples.length}/${allTuples.length} basis=${service.availability_basis}`);
 
-        const result = await buildAvailabilitySlots({
-          tenantId,
-          tenantSlug,
-          date: normalizedDate,
-          serviceId: Number(action.service_id),
-          staffId: action.staff_id ? Number(action.staff_id) : null,
-          resourceId,
-          tenantTz,
-          service,
-        });
+        // Run the engine for each tuple in parallel
+        const tupleResults = await Promise.all(
+          tuples.map(async (t) => {
+            const r = await buildAvailabilitySlots({
+              tenantId,
+              tenantSlug,
+              date: normalizedDate,
+              serviceId: Number(action.service_id),
+              staffId: t.staff?.id ?? null,
+              resourceId: t.resource?.id ?? null,
+              tenantTz,
+              service,
+            });
+            return { tuple: t, result: r };
+          })
+        );
 
-        const reason = result.meta?.reason;
-        console.log(`[AI availability] reason=${reason} totalSlots=${(result.slots||[]).length}`);
+        // ─────────────────────────────────────────────────────────────
+        // VOICE-FIX-3 (Bug 3 part 2): Look up customer-id of conflicting
+        // bookings so the agent can say "that's YOUR booking" vs "OTHER
+        // customer". Side query — does NOT modify the engine.
+        //
+        // For each tuple, find which slots are NOT free and check who owns
+        // the conflicting booking on that resource. If matches calling
+        // customer → tag YOUR. Else tag OTHER. (Engine itself returns
+        // is_available; we just enrich the busy ones.)
+        // ─────────────────────────────────────────────────────────────
+        const durationMin = Number(service.duration_minutes) || 60;
 
-        if (reason && reason !== "ok" && reason !== "success") {
+        // Helper: look up conflicting booking owner for a given (resource, time)
+        async function lookupConflictOwner(resourceId, slotTimeISO) {
+          if (!resourceId || !slotTimeISO) return null;
+          try {
+            const c = await db.query(
+              `SELECT customer_id FROM bookings
+                WHERE tenant_id = $1
+                  AND resource_id = $2
+                  AND status IN ('pending','confirmed')
+                  AND deleted_at IS NULL
+                  AND booking_range && tstzrange($3::timestamptz, $3::timestamptz + make_interval(mins => $4), '[)')
+                ORDER BY id ASC LIMIT 1`,
+              [tenantId, resourceId, slotTimeISO, durationMin]
+            );
+            return c.rows?.[0]?.customer_id ?? null;
+          } catch (e) {
+            return null;
+          }
+        }
+
+        // Aggregate per timeslot — group resource/staff status by time
+        // Shape: { "20:00": { resources: [{ name, free, ownership }], staff: [...], any_free: bool } }
+        const slotsByTime = {};
+
+        for (const { tuple, result } of tupleResults) {
+          const slots = result.slots || [];
+          for (const s of slots) {
+            const t = s.time;
+            if (!t) continue;
+            if (!slotsByTime[t]) slotsByTime[t] = { resources: [], staff: [], any_free: false };
+            const isFree = s.is_available !== false && s.available !== false;
+            // Determine slot's UTC ISO for conflict lookup if needed
+            // (slot.time is HH:MM in tenant TZ — combine with date)
+            // We only need conflict lookup for BUSY slots on resource basis.
+            if (tuple.resource?.id) {
+              const existing = slotsByTime[t].resources.find(r => r.id === tuple.resource.id);
+              if (!existing) {
+                slotsByTime[t].resources.push({
+                  id: tuple.resource.id,
+                  name: tuple.resource.name,
+                  free: isFree,
+                  ownership: null, // filled in below if busy
+                });
+              } else if (isFree) {
+                existing.free = true; // any tuple says free → resource is free at that time
+              }
+            }
+            if (tuple.staff?.id) {
+              const existing = slotsByTime[t].staff.find(st => st.id === tuple.staff.id);
+              if (!existing) {
+                slotsByTime[t].staff.push({
+                  id: tuple.staff.id,
+                  name: tuple.staff.name,
+                  free: isFree,
+                });
+              } else if (isFree) {
+                existing.free = true;
+              }
+            }
+            if (isFree) slotsByTime[t].any_free = true;
+          }
+        }
+
+        // For all BUSY resources, look up conflict owner (customer id)
+        for (const [time, info] of Object.entries(slotsByTime)) {
+          for (const r of info.resources) {
+            if (r.free) continue;
+            // Build slot ISO from date + time + tenant tz offset
+            const slotISO = `${normalizedDate}T${time}:00`;
+            // Use tenant tz to compute UTC. Simpler: format with offset from tzOffsetStr
+            // We compute offset server-side using Intl
+            const tzOffset = (() => {
+              try {
+                const offsetPart = new Intl.DateTimeFormat("en", {
+                  timeZone: tenantTz, timeZoneName: "longOffset",
+                }).formatToParts(new Date(`${normalizedDate}T${time}:00Z`)).find(p => p.type === "timeZoneName")?.value || "GMT+0";
+                const m = offsetPart.match(/GMT([+-])(\d{1,2})(?::?(\d{2}))?/);
+                if (!m) return "+00:00";
+                return `${m[1]}${m[2].padStart(2, "0")}:${(m[3] || "00").padStart(2, "0")}`;
+              } catch { return "+00:00"; }
+            })();
+            const conflictISO = `${slotISO}${tzOffset}`;
+            const ownerId = await lookupConflictOwner(r.id, conflictISO);
+            r.ownership = ownerId == null ? "BUSY"
+                        : (Number(ownerId) === Number(customerId)) ? "YOUR"
+                        : "OTHER";
+          }
+        }
+
+        // Determine if there are ANY available slots overall
+        const anyAvailable = Object.values(slotsByTime).some(v => v.any_free);
+
+        // Get a reason from the first non-empty result for failure cases
+        const firstResult = tupleResults[0]?.result;
+        const reason = firstResult?.meta?.reason;
+        if (!anyAvailable && reason && reason !== "ok" && reason !== "success") {
           const reasonMap = {
             tenant_closed: "The business is closed on that day.",
             resource_required: "This service requires a specific resource selection.",
             staff_required: "This service requires staff selection.",
             no_working_hours: "No working hours configured for that day.",
             invalid_working_hours: "Working hours configuration issue.",
+            service_hours_outside_business_hours: "Service hours don't overlap with business hours that day.",
           };
           return {
             success: true, slots: [],
@@ -660,20 +830,50 @@ async function handleAction(action, tenantId, tenantSlug, customerId, customerEm
           };
         }
 
-        const allSlots = result.slots || result.times || [];
-        const available = allSlots.filter(s => s.is_available !== false && s.available !== false);
-
-        if (available.length === 0) {
+        if (Object.keys(slotsByTime).length === 0) {
           return { success: true, slots: [], message: `No available slots on ${action.date}. The business may be closed or fully booked.` };
         }
-        // VOICE-FIX-1 (Bugs 2 + 3): cache the available slots for this customer/service/date
-        // so create_booking can verify the agent's proposed slot was actually offered.
-        const slotsForCache = available.slice(0, 20).map(s => ({
-          time: s.time,
-          resource_id: s.resource_id ?? resourceId ?? null,
-        }));
+
+        // Build the structured response: sorted by time
+        const sortedTimes = Object.keys(slotsByTime).sort();
+        const structuredSlots = sortedTimes.map(time => {
+          const info = slotsByTime[time];
+          return {
+            time,
+            any_free: info.any_free,
+            resources: info.resources, // [{ id, name, free, ownership }]
+            staff: info.staff,         // [{ id, name, free }]
+          };
+        });
+
+        // Cache the slots for create_booking gate (Bug 2/3 of VOICE-FIX-1).
+        // Only cache slots where at least one resource is free, and tag the
+        // first-free resource per time so create_booking can verify.
+        const slotsForCache = structuredSlots
+          .filter(s => s.any_free)
+          .map(s => {
+            const firstFreeRes = s.resources.find(r => r.free);
+            return {
+              time: s.time,
+              resource_id: firstFreeRes?.id ?? null,
+            };
+          });
         slotConfirmationCache.set(tenantId, customerId, Number(action.service_id), normalizedDate, slotsForCache);
-        return { success: true, slots: available.slice(0, 20), resourceId, message: null };
+
+        // Determine the resourceId to surface — either the customer's choice,
+        // or "auto" if multiple are available
+        const surfaceResourceId = action.resource_id
+          ? Number(action.resource_id)
+          : (resourceCandidates.length === 1 ? resourceCandidates[0]?.id : null);
+
+        return {
+          success: true,
+          slots: structuredSlots.slice(0, 20),
+          structured: true, // tells voice.js to format per-resource
+          resourceId: surfaceResourceId,
+          capHit,
+          message: null,
+        };
       } catch (e) {
         console.error("[AI check_availability error]", e);
         return { success: false, message: "Could not fetch availability right now." };
@@ -943,12 +1143,36 @@ router.post("/:tenantSlug/chat", optionalAuth, async (req, res) => {
 
       if (action.type === "check_availability") {
         if (actionResult.success && actionResult.slots && actionResult.slots.length > 0) {
-          const slotTimes = actionResult.slots
-            .map(s => s.time || s.label)
-            .filter(Boolean)
-            .slice(0, 15)
-            .join(", ");
-          actionContext = `AVAILABILITY RESULT: Found ${actionResult.slots.length} available slots on ${action.date}: ${slotTimes}. The resource_id to use is ${actionResult.resourceId || action.resource_id || "auto-selected"}.`;
+          // VOICE-FIX-3 (Bug 2): Structured per-resource formatting matching voice.js
+          if (actionResult.structured) {
+            const lines = actionResult.slots.map(s => {
+              const parts = [];
+              if (s.resources && s.resources.length > 0) {
+                const resStr = s.resources.map(r => {
+                  if (r.free) return `${r.name} FREE`;
+                  if (r.ownership === "YOUR")  return `${r.name} BOOKED (YOUR existing booking)`;
+                  if (r.ownership === "OTHER") return `${r.name} BOOKED (other customer)`;
+                  return `${r.name} BUSY`;
+                }).join(", ");
+                parts.push(resStr);
+              }
+              if (s.staff && s.staff.length > 0) {
+                const stStr = s.staff.map(st => `${st.name} ${st.free ? "FREE" : "BUSY"}`).join(", ");
+                parts.push(`staff: ${stStr}`);
+              }
+              return `  - ${s.time}: ${parts.join(" | ")}`;
+            }).join("\n");
+            const capNote = actionResult.capHit ? "\n(Showing first 36 resource/staff combinations — narrow by resource or staff for full coverage.)" : "";
+            actionContext = `AVAILABILITY RESULT for ${action.date} (${actionResult.slots.length} slot times):\n${lines}${capNote}\n\nWhen relaying to the customer: name the specific free resources, flag any of YOUR existing bookings, and never claim "all sims free" without naming them.`;
+          } else {
+            // Legacy fallback (shouldn't fire post-VOICE-FIX-3)
+            const slotTimes = actionResult.slots
+              .map(s => s.time || s.label)
+              .filter(Boolean)
+              .slice(0, 15)
+              .join(", ");
+            actionContext = `AVAILABILITY RESULT: Found ${actionResult.slots.length} available slots on ${action.date}: ${slotTimes}. The resource_id to use is ${actionResult.resourceId || action.resource_id || "auto-selected"}.`;
+          }
         } else if (actionResult.success) {
           actionContext = `AVAILABILITY RESULT: ${actionResult.message || `No available slots on ${action.date}.`}`;
         } else {
