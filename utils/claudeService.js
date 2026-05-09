@@ -194,7 +194,13 @@ ${hoursBlock}`;
 }
 
 // ── Format customer context ───────────────────────────────────────────
-function buildCustomerContext({ profile, bookings = [], memberships = [], packages = [] }, services = []) {
+// VOICE-FIX-2: tenantTz parameter ensures booking/membership/package dates
+// render in the tenant's timezone, not the server's (Render runs UTC).
+// Without it, a 22:00 Amman booking shows up as "19:00" in the agent's
+// view because new Date(...).toLocaleString without timeZone uses server
+// locale. Defaults to "Asia/Amman" (the only tenant TZ in production today)
+// so legacy callers without the third argument keep working.
+function buildCustomerContext({ profile, bookings = [], memberships = [], packages = [] }, services = [], tenantTz = "Asia/Amman") {
   if (!profile) return null;
 
   const now = Date.now();
@@ -264,7 +270,7 @@ function buildCustomerContext({ profile, bookings = [], memberships = [], packag
     patternsLines.push(`  - Most-booked resource (last 90 days): ${topResource} (${topResourceCount} of last ${recentPast.length} sessions)`);
   }
   if (lastBooking) {
-    const lastDate = new Date(lastBooking.start_time).toLocaleDateString("en-GB", { dateStyle: "medium" });
+    const lastDate = new Date(lastBooking.start_time).toLocaleDateString("en-GB", { timeZone: tenantTz, dateStyle: "medium" });
     const lastRes  = lastBooking.resource_name ? ` (${lastBooking.resource_name})` : "";
     patternsLines.push(`  - Last booked: ${lastBooking.service_name} on ${lastDate}${lastRes}`);
   }
@@ -272,7 +278,7 @@ function buildCustomerContext({ profile, bookings = [], memberships = [], packag
 
   const upcomingBlock = upcoming.length > 0
     ? upcoming.map(b => {
-        const dt     = new Date(b.start_time).toLocaleString("en-GB", { dateStyle: "medium", timeStyle: "short" });
+        const dt     = new Date(b.start_time).toLocaleString("en-GB", { timeZone: tenantTz, dateStyle: "medium", timeStyle: "short" });
         const price  = b.price_amount != null ? ` | ${Number(b.price_amount).toFixed(2)} ${b.currency_code || "JD"}` : "";
         const res    = b.resource_name ? ` | ${b.resource_name}` : "";
         const st     = b.staff_name    ? ` | staff: ${b.staff_name}` : "";
@@ -282,7 +288,7 @@ function buildCustomerContext({ profile, bookings = [], memberships = [], packag
 
   const pastBlock = past.length > 0
     ? past.map(b => {
-        const dt = new Date(b.start_time).toLocaleDateString("en-GB", { dateStyle: "medium" });
+        const dt = new Date(b.start_time).toLocaleDateString("en-GB", { timeZone: tenantTz, dateStyle: "medium" });
         return `    - [booking id:${b.id}] ${b.service_name || "Service"} | ${dt} | ${b.status}`;
       }).join("\n")
     : "    None";
@@ -291,7 +297,7 @@ function buildCustomerContext({ profile, bookings = [], memberships = [], packag
     ? memberships.map(m => {
         const bal     = m.minutes_remaining != null  ? `${m.minutes_remaining} min remaining`
                       : m.uses_remaining != null     ? `${m.uses_remaining} uses remaining` : "balance unknown";
-        const expires = m.end_at ? `expires ${new Date(m.end_at).toLocaleDateString("en-GB")}` : null;
+        const expires = m.end_at ? `expires ${new Date(m.end_at).toLocaleDateString("en-GB", { timeZone: tenantTz })}` : null;
         const status  = m.status || "unknown";
         return `    - [membership id:${m.id}] ${m.plan_name || "Plan"} | status: ${status} | ${bal}${expires ? ` | ${expires}` : ""}`;
       }).join("\n")
@@ -306,7 +312,7 @@ function buildCustomerContext({ profile, bookings = [], memberships = [], packag
   const packagesBlock = packages.length > 0
     ? packages.map(p => {
         const rem     = p.remaining_quantity != null ? `${p.remaining_quantity}/${p.original_quantity || "?"} remaining` : "";
-        const expires = p.expires_at ? `expires ${new Date(p.expires_at).toLocaleDateString("en-GB")}` : null;
+        const expires = p.expires_at ? `expires ${new Date(p.expires_at).toLocaleDateString("en-GB", { timeZone: tenantTz })}` : null;
         // PAYMENT-FILTER-1: eligible_service_ids comes back as JSONB. NULL or
         // empty array means the package applies to all services. A non-empty
         // array means it's restricted to those services only.
@@ -348,7 +354,7 @@ function buildCustomerContext({ profile, bookings = [], memberships = [], packag
     : "\n  USABLE NOW: None — offer cash / CliQ / card only.\n";
 
   return `CUSTOMER ACCOUNT (${profile.name || "Unknown"} | ${profile.email} | phone: ${profile.phone || "not set"}):
-  Member since: ${profile.created_at ? new Date(profile.created_at).toLocaleDateString("en-GB") : "N/A"}
+  Member since: ${profile.created_at ? new Date(profile.created_at).toLocaleDateString("en-GB", { timeZone: tenantTz }) : "N/A"}
 ${patternsBlock}
   UPCOMING BOOKINGS:
 ${upcomingBlock}
@@ -367,12 +373,12 @@ ${usableBlock}`;
 // ── Build system prompt ───────────────────────────────────────────────
 function buildSystemPrompt({ tenantContext, customerData, isSignedIn }) {
   const businessCtx  = buildBusinessContext(tenantContext);
-  const customerCtx  = isSignedIn && customerData
-    ? buildCustomerContext(customerData, tenantContext.services || [])
-    : null;
-
-  // Inject current date/time in tenant timezone
+  // VOICE-FIX-2: Compute tenantTz BEFORE buildCustomerContext so booking
+  // times render in the tenant's timezone instead of the server's UTC.
   const tenantTz = tenantContext.timezone || "Asia/Amman";
+  const customerCtx  = isSignedIn && customerData
+    ? buildCustomerContext(customerData, tenantContext.services || [], tenantTz)
+    : null;
   const now = new Date();
   const todayStr = now.toLocaleDateString("en-CA", { timeZone: tenantTz }); // YYYY-MM-DD
   const nowStr   = now.toLocaleString("en-GB", { timeZone: tenantTz, dateStyle: "full", timeStyle: "short" });

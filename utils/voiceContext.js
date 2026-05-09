@@ -481,7 +481,7 @@ function formatCustomerForVoice(c, paymentSettings) {
 
   const upcomingBlock = upcoming.length
     ? upcoming.map(b => {
-        const dt = new Date(b.start_time).toLocaleString("en-GB", { dateStyle: "medium", timeStyle: "short" });
+        const dt = new Date(b.start_time).toLocaleString("en-GB", { timeZone: tenantTz, dateStyle: "medium", timeStyle: "short" });
         return `  - [booking_id:${b.id}] ${b.service_name || "Service"} | ${dt} | ${b.duration_minutes || "?"}min | ${b.status}`;
       }).join("\n")
     : "  None";
@@ -498,7 +498,7 @@ function formatCustomerForVoice(c, paymentSettings) {
         const bal = m.minutes_remaining != null ? `${m.minutes_remaining} min remaining`
                   : m.uses_remaining != null    ? `${m.uses_remaining} uses remaining`
                   : "balance unknown";
-        const exp = m.end_at ? `expires ${new Date(m.end_at).toLocaleDateString("en-GB")}` : "";
+        const exp = m.end_at ? `expires ${new Date(m.end_at).toLocaleDateString("en-GB", { timeZone: tenantTz })}` : "";
         return `  - [membership_id:${m.id}] ${m.plan_name || "Plan"} | ${m.status || "?"} | ${bal}${exp ? " | " + exp : ""}`;
       }).join("\n")
     : "  None";
@@ -514,7 +514,7 @@ function formatCustomerForVoice(c, paymentSettings) {
   const packagesBlock = activePackages.length
     ? activePackages.map(p => {
         const rem = p.remaining_quantity != null ? `${p.remaining_quantity}/${p.original_quantity || "?"}` : "?";
-        const exp = p.expires_at ? `expires ${new Date(p.expires_at).toLocaleDateString("en-GB")}` : "";
+        const exp = p.expires_at ? `expires ${new Date(p.expires_at).toLocaleDateString("en-GB", { timeZone: tenantTz })}` : "";
         return `  - [package_id:${p.id}] ${p.product_name || "Package"} | ${p.status} | ${rem} remaining${exp ? " | " + exp : ""}`;
       }).join("\n")
     : "  None";
@@ -543,7 +543,7 @@ function formatCustomerForVoice(c, paymentSettings) {
     : "  (No payment methods configured — agent should fall back to asking the customer)";
 
   return `CUSTOMER: ${profile.name || "Customer"} (${profile.email}${profile.phone ? `, ${profile.phone}` : ""})
-- Member since: ${profile.created_at ? new Date(profile.created_at).toLocaleDateString("en-GB") : "N/A"}
+- Member since: ${profile.created_at ? new Date(profile.created_at).toLocaleDateString("en-GB", { timeZone: tenantTz }) : "N/A"}
 
 UPCOMING BOOKINGS:
 ${upcomingBlock}
