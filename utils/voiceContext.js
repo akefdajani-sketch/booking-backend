@@ -116,7 +116,7 @@ function buildVoiceSystemPromptOverride({ tenant, businessContext, customerData,
 
   // ── Customer context (signed-in only) ────────────────────────────────────
   const customerBlock = isSignedIn && customerData
-    ? formatCustomerForVoice(customerData, paymentSettings)
+    ? formatCustomerForVoice(customerData, paymentSettings, tenantTz)
     : `CUSTOMER: Not signed in. Provide general business information only. Do NOT reveal other customers' data. If they want to book, gently let them know they'll need to sign in first.
 
 PAYMENT OPTIONS (for general info — booking requires sign-in):
@@ -468,7 +468,7 @@ BUSINESS WORKING HOURS (tenant-wide; per-service hours appear inline above as "h
 ${hoursBlock}`;
 }
 
-function formatCustomerForVoice(c, paymentSettings) {
+function formatCustomerForVoice(c, paymentSettings, tenantTz = "Asia/Amman") {
   if (!c?.profile) return "CUSTOMER: Signed in but profile data unavailable.";
 
   const { profile, bookings = [], memberships = [], packages = [] } = c;
