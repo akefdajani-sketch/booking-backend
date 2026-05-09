@@ -90,9 +90,19 @@
  * @param {boolean} args.isSignedIn
  * @returns {string} The prompt override (pass as overrides.agent.prompt.prompt)
  */
-function buildVoiceSystemPromptOverride({ tenant, businessContext, customerData, isSignedIn }) {
+function buildVoiceSystemPromptOverride({ tenant, businessContext, customerData, isSignedIn, lang = "en" }) {
   const tenantName = tenant?.name || "this business";
   const tenantTz   = tenant?.timezone || "Asia/Amman";
+
+  // VOICE-FIX-4: Session language is locked at startup by the customer's
+  // language toggle. ElevenLabs uses different TTS models per language
+  // ("v2" for English-only, "v2.5 Multilingual" for everything else), so
+  // generating Arabic text in an English-locked session produces phonetically
+  // butchered output ("lame Arabic accent"). The button is the single source
+  // of truth — Claude must respond in the locked language regardless of what
+  // language the customer happens to speak.
+  const sessionLang = lang === "ar" ? "Arabic" : "English";
+  const otherLang   = lang === "ar" ? "English" : "Arabic";
 
   // Compute current date/time in the tenant's TZ. The agent needs this so
   // it can interpret "tomorrow" / "this Saturday" against the right day.
@@ -167,13 +177,17 @@ SERVICE NAME DISAMBIGUATION:
 - If a shortening is genuinely ambiguous (multiple services match), ask one short clarifying question: "The simulator or mini golf?"
 - If exact-name matching works, use it without asking.
 
-LANGUAGE MIRRORING:
-- The customer may speak Arabic or English. Detect their language and respond in the SAME language for the entire turn. Never mix languages within a single response.
-- If the customer speaks Arabic, respond entirely in Arabic — including all confirmations, prices, payment options, and rule explanations.
-- If they speak English, respond in English.
-- Service names ("Golf Simulator", "Karaoke", "Mini Golf") may remain in their original English form even when the rest of the response is in Arabic, since customers use them that way locally.
-- Numbers, times, currencies, and dates should follow the language being spoken: Arabic responses use Arabic-language time phrasing ("الساعة الخامسة"), English responses use English ("five o'clock").
-- These instructions apply both to the voice agent's spoken output AND to the text reply returned by the ask_booking_assistant tool. The tool will mirror the customer's language automatically when given an Arabic query.
+LANGUAGE LOCK (VOICE-FIX-4 — session is locked to ${sessionLang}):
+- This session is locked to ${sessionLang} by the customer's language toggle. Always respond in ${sessionLang} regardless of what language the customer speaks. Never mix languages within a single response.
+- If the customer speaks ${otherLang} during a ${sessionLang} session, respond in ${sessionLang} and gently let them know once: ${lang === "ar"
+    ? '"الجلسة مضبوطة على العربية حالياً — يمكنك التبديل للإنجليزية من زر اللغة في الأعلى."'
+    : '"This session is set to English — you can switch to Arabic using the language toggle at the top."'}
+- After mentioning the language toggle once per session, do NOT keep repeating it — just continue answering in ${sessionLang}. The customer can switch when they want.
+- Service names ("Golf Simulator", "Karaoke", "Mini Golf") may remain in their original English form even within Arabic responses, since customers use them that way locally.
+- Numbers, times, currencies, and dates follow ${sessionLang}: ${lang === "ar"
+    ? 'use Arabic-language time phrasing ("الساعة الخامسة"), Arabic numerals are fine.'
+    : 'use English ("five o\'clock", "twelve fifty piasters").'}
+- These instructions apply both to the voice agent's spoken output AND to the text reply returned by the ask_booking_assistant tool.
 
 CURRENT DATE & TIME: ${nowStr}
 - "Today" means: ${todayStr}
