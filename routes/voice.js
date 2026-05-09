@@ -289,8 +289,37 @@ router.post("/:tenantSlug/booking-assistant", optionalAuth, async (req, res) => 
       if (action.type === "check_availability" && actionResult) {
         let actionContext = "";
         if (actionResult.success && actionResult.slots && actionResult.slots.length > 0) {
-          const slotTimes = actionResult.slots.map(s => s.time || s.label).filter(Boolean).slice(0, 12).join(", ");
-          actionContext = `AVAILABILITY RESULT: Found ${actionResult.slots.length} available slots on ${action.date}: ${slotTimes}. resource_id=${actionResult.resourceId || action.resource_id || "auto"}.`;
+          // ─────────────────────────────────────────────────────────────
+          // VOICE-FIX-3 (Bug 2): Structured per-resource / per-staff
+          // formatting with customer-ownership tagging. Replaces the old
+          // "Found N slots: 20:00, 21:00, ..." dump that hid which
+          // resource was actually free.
+          // ─────────────────────────────────────────────────────────────
+          if (actionResult.structured) {
+            const lines = actionResult.slots.map(s => {
+              const parts = [];
+              if (s.resources && s.resources.length > 0) {
+                const resStr = s.resources.map(r => {
+                  if (r.free) return `${r.name} FREE`;
+                  if (r.ownership === "YOUR")  return `${r.name} BOOKED (YOUR existing booking)`;
+                  if (r.ownership === "OTHER") return `${r.name} BOOKED (other customer)`;
+                  return `${r.name} BUSY`;
+                }).join(", ");
+                parts.push(resStr);
+              }
+              if (s.staff && s.staff.length > 0) {
+                const stStr = s.staff.map(st => `${st.name} ${st.free ? "FREE" : "BUSY"}`).join(", ");
+                parts.push(`staff: ${stStr}`);
+              }
+              return `  - ${s.time}: ${parts.join(" | ")}`;
+            }).join("\n");
+            const capNote = actionResult.capHit ? "\n(Showing first 36 resource/staff combinations — narrow by resource or staff for full coverage.)" : "";
+            actionContext = `AVAILABILITY RESULT for ${action.date} (${actionResult.slots.length} slot times):\n${lines}${capNote}\n\nWhen relaying to the customer: name the specific free resources, flag any of YOUR existing bookings, and never claim "all sims free" without naming them.`;
+          } else {
+            // Legacy fallback (shouldn't fire post-VOICE-FIX-3)
+            const slotTimes = actionResult.slots.map(s => s.time || s.label).filter(Boolean).slice(0, 12).join(", ");
+            actionContext = `AVAILABILITY RESULT: Found ${actionResult.slots.length} available slots on ${action.date}: ${slotTimes}. resource_id=${actionResult.resourceId || action.resource_id || "auto"}.`;
+          }
         } else if (actionResult.success) {
           actionContext = `AVAILABILITY RESULT: ${actionResult.message || `No available slots on ${action.date}.`}`;
         } else {
