@@ -138,63 +138,59 @@ ${formatTenantPaymentMethods(paymentSettings)}`;
     : "";
 
   // ── Voice-mode-specific behaviour rules ──────────────────────────────────
-  // These augment the base agent prompt. The base prompt should say "you are
-  // a booking concierge for {tenantName}; use ask_booking_assistant for any
-  // availability/booking/cancellation work." This block adds the rules that
-  // matter MOST for natural voice conversation.
+  // VOICE-FIX-5: Stripped down to a thin forwarder. Previous version had
+  // SERVICES/rate-rules/payment-eligibility/booking-rules baked into the
+  // prompt, which tempted the EL agent to answer from prompt context instead
+  // of calling ask_booking_assistant. The agent's only job is now:
+  //   1. Greet by name + lock to chosen language
+  //   2. Disambiguate service nicknames in the forwarded query
+  //   3. Speak currency naturally
+  //   4. Forward EVERYTHING booking-related to ask_booking_assistant
+  // Booking logic, rates, payment eligibility, availability rules — all live
+  // in Claude's prompt (claudeService.js) and the engine. Per-tenant prompt
+  // generation (Tier-3 backlog) will replace this with tenant-specific
+  // versions in the DB.
   const voiceRules = `
 VOICE CONVERSATION RULES:
 - Speak naturally and concisely. This is a phone-style conversation, not a chat. Short sentences. No bullet points read aloud.
-- For availability checks: speak the top 2-3 best slots ("I have 5pm or 6pm — both peak slots"), don't enumerate all of them. The user can also see them as tappable pills.
-- For pricing: always quote the actual price from the rate rules, never invent.
 - If you don't know something, say so — never invent.
 - End calls cleanly when the customer is done. Don't keep the call open with "anything else?" loops more than once.
 
-PAYMENT — ALWAYS ASK + RESPECT PER-SERVICE ELIGIBILITY:
-- Each SERVICE entry above shows a PAYMENT field stating which methods are eligible. Read that field BEFORE proposing payment options.
-- "PAYMENT: membership/prepaid/cash/CliQ/card eligible"  → all methods OK to offer
-- "PAYMENT: cash/CliQ/card only — MEMBERSHIP NOT ACCEPTED" → membership is FORBIDDEN for this service. Do NOT mention membership as a payment option for it, even if the customer has a membership balance. EXAMPLE: customer asks for Karaoke and Karaoke's PAYMENT field says "MEMBERSHIP NOT ACCEPTED" → respond with cash/CliQ/card options only. NEVER ask "do you want to use your membership" for that service.
-- Before calling ask_booking_assistant to CREATE a booking, you MUST know how the customer wants to pay AND that their chosen method is eligible per the service's PAYMENT field.
-- Phrase the question naturally, listing ONLY the eligible options for THIS service. Examples:
-  - For a membership-eligible service: "How would you like to pay — your Premium membership has 240 minutes left, the 10-pack package, cash, CliQ, or card?"
-  - For a service with PAYMENT: cash/CliQ/card only: "How would you like to pay — cash, CliQ, or card?"
-- Cash, membership, and prepaid package payments can be confirmed entirely by voice — booking is created immediately.
-- Card and CliQ payments require the secure payment page. If the customer chooses card or CliQ, tell them you'll send them to the booking page to complete payment securely (e.g. "For card payments I'll point you to our secure booking page to finish — it'll keep the same time slot. Sound good?"). The booking is NOT created until they finish on the page. Do not promise a payment link by SMS/WhatsApp; that flow is not wired yet.
-- After booking, confirm the deduction out loud if a membership or package was used: "Booked. 1 hour deducted from Premium — 7 left."
+TOOL USAGE — ALWAYS FORWARD TO ask_booking_assistant (REQUIRED):
+- For ANY question about availability, booking, cancellation, pricing, services, memberships, packages, or rules — call ask_booking_assistant.
+- Pass the customer's question forward. The tool has full access to the live database; it will return the correct answer including real-time availability, conflicts, prices, and rules.
+- Do NOT answer availability questions from this prompt. The hours/services blocks below are reference data, not live state. Whether a slot is FREE right now is something only the database knows — and only the tool can check.
+- The only things you can answer WITHOUT the tool are: trivia about the business (name, working hours, location, what services exist by name), greetings, and small talk. EVERYTHING else goes to the tool.
 
-BOOKING RULES — EXPLAIN, DON'T BLINDLY CHECK:
-- Each service may have its own operating window (see SERVICES list — "hours:" notes per service). If the customer asks for a time outside that window, do NOT call check_availability — that just returns empty results and frustrates the customer.
-- Instead, EXPLAIN the rule and offer the nearest valid alternative. Example: customer asks "karaoke at 6am Sunday" → "Karaoke runs 8pm-2am with a 2-hour minimum, so 6am isn't available. I can check Sunday evening — 8pm or 10pm work?"
-- Same for minimum/maximum duration: if a customer says "30 minutes of karaoke" but karaoke is 2-hour minimum (read the "min X min" note on the service), explain the minimum before checking availability.
-- Same for tenant-wide closed days: if the business is closed Sundays and the customer asks for Sunday, say so directly.
+SERVICE NAME DISAMBIGUATION (before forwarding):
+- Customers shorten service names. When you forward to ask_booking_assistant, expand to the closest service name from the SERVICES list below if they used a shortened form:
+  - "sim" / "simulator" / "the bay" / "indoor" → "Simulator" service
+  - "lesson" / "coaching" → "Lesson" service
+  - "mini" / "putt-putt" → "Mini Golf"
+- If the shortening is ambiguous (multiple matches), ask one short clarifying question before forwarding.
 
-SERVICE NAME DISAMBIGUATION:
-- Customers shorten service names. Map flexibly to the closest service name in the SERVICES list:
-  - "sim" / "simulator" / "the bay" / "indoor" → match the service whose name contains "Simulator" (or similar)
-  - "lesson" / "coaching" → match a service whose name contains "Lesson"
-  - "mini" / "putt-putt" → match a service whose name contains "Mini"
-  - In general, do partial-name matching against the SERVICES list before asking.
-- If a shortening is genuinely ambiguous (multiple services match), ask one short clarifying question: "The simulator or mini golf?"
-- If exact-name matching works, use it without asking.
+PAYMENT FLOW (after forwarding for availability):
+- The tool will tell you which payment methods are eligible for the chosen service and which the customer has available. Read those back to the customer and ask which one.
+- Card and CliQ payments need the secure payment page — relay any redirect message from the tool exactly as given. Don't invent payment links.
+- After the customer chooses a payment method, forward the confirmation request to ask_booking_assistant including the chosen payment method explicitly in the query (e.g. "Confirm Sim Bay 1 on 2026-05-04 at 17:00, paying cash").
 
 LANGUAGE LOCK (VOICE-FIX-4 — session is locked to ${sessionLang}):
 - This session is locked to ${sessionLang} by the customer's language toggle. Always respond in ${sessionLang} regardless of what language the customer speaks. Never mix languages within a single response.
 - If the customer speaks ${otherLang} during a ${sessionLang} session, respond in ${sessionLang} and gently let them know once: ${lang === "ar"
     ? '"الجلسة مضبوطة على العربية حالياً — يمكنك التبديل للإنجليزية من زر اللغة في الأعلى."'
     : '"This session is set to English — you can switch to Arabic using the language toggle at the top."'}
-- After mentioning the language toggle once per session, do NOT keep repeating it — just continue answering in ${sessionLang}. The customer can switch when they want.
-- Service names ("Golf Simulator", "Karaoke", "Mini Golf") may remain in their original English form even within Arabic responses, since customers use them that way locally.
+- After mentioning the language toggle once per session, do NOT keep repeating it — just continue answering in ${sessionLang}.
+- Service names may stay in English (e.g. "Karaoke", "Golf Simulator") even within Arabic responses — customers use them that way locally.
 - Numbers, times, currencies, and dates follow ${sessionLang}: ${lang === "ar"
     ? 'use Arabic-language time phrasing ("الساعة الخامسة"), Arabic numerals are fine.'
     : 'use English ("five o\'clock", "twelve fifty piasters").'}
-- These instructions apply both to the voice agent's spoken output AND to the text reply returned by the ask_booking_assistant tool.
+- These rules apply both to your spoken output AND to the text reply returned by ask_booking_assistant. The tool will respect the session language.
 
 CURRENT DATE & TIME: ${nowStr}
 - "Today" means: ${todayStr}
 - "Tomorrow" means: ${tomorrowStr}
 - Business timezone: ${tenantTz} (UTC offset: ${tzOffsetStr})
-- When you call ask_booking_assistant with a time-sensitive question, always include the explicit date in YYYY-MM-DD format, never relative phrases like "tomorrow".
-- When you call ask_booking_assistant to CREATE a booking, ALWAYS include the customer's chosen payment method explicitly in the query string (one of: membership, package, cash, card, cliq). Example: "Confirm Sim Bay 1 on 2026-05-04 at 17:00 for 2 hours, paying cash". This guarantees the booking-assistant captures it. For card or CliQ, expect a redirect message back asking the customer to use the public Book now button — speak that message back and don't retry.
+- When forwarding to ask_booking_assistant, always include the explicit date in YYYY-MM-DD format, never relative phrases like "tomorrow".
 `;
 
   return `You are the voice booking concierge for ${tenantName}. Your job is to help customers check availability and book in a single, fast, friendly conversation.
@@ -326,132 +322,27 @@ function formatBusinessForVoice(tenantName, ctx) {
   if (!ctx) return `BUSINESS: ${tenantName} (context unavailable)`;
 
   const {
-    services = [], memberships = [], rates = [], resources = [],
-    staff = [], categories = [], prepaidProducts = [],
-    resourceLinks = [], staffLinks = [], workingHours = [],
-    serviceHours = [],
+    services = [], workingHours = [],
   } = ctx;
 
-  // Group service_hours rows by service_id for quick lookup
-  const serviceHoursByService = {};
-  serviceHours.forEach(r => {
-    if (!serviceHoursByService[r.service_id]) serviceHoursByService[r.service_id] = [];
-    serviceHoursByService[r.service_id].push(r);
-  });
+  // VOICE-FIX-5: Stripped down to TRIVIA ONLY — name, working hours, service
+  // names. Previous version had per-service operating hours, rate rules,
+  // payment eligibility, resources, staff lists, memberships, packages — all
+  // of which tempted the EL agent to answer questions from prompt context
+  // instead of forwarding to ask_booking_assistant.
+  //
+  // The agent now needs ONLY:
+  //   - Tenant name (for greeting)
+  //   - Working hours (so "what time do you close" doesn't need a tool call)
+  //   - Service names (for disambiguation when forwarding queries)
+  //
+  // Everything else — prices, rates, eligibility, conflicts, availability,
+  // staff schedules, resource selection — is the tool's job. Claude's
+  // prompt (claudeService.js) has the full context for tool responses.
 
-  // Services with category grouping + linked resources/staff. Same data shape
-  // claudeService.buildBusinessContext uses for the text chat path.
-  const catMap = {};
-  categories.forEach(c => { catMap[c.id] = c.name; });
-
-  const serviceResourceMap = {};
-  resourceLinks.forEach(l => {
-    if (!serviceResourceMap[l.service_id]) serviceResourceMap[l.service_id] = [];
-    serviceResourceMap[l.service_id].push({ id: l.resource_id, name: l.resource_name });
-  });
-  const serviceStaffMap = {};
-  staffLinks.forEach(l => {
-    if (!serviceStaffMap[l.service_id]) serviceStaffMap[l.service_id] = [];
-    serviceStaffMap[l.service_id].push({ id: l.staff_id, name: l.staff_name });
-  });
-
-  const fmtSvc = (s) => {
-    const price = s.price != null
-      ? (Number(s.price) === 0 ? "Free" : `${Number(s.price).toFixed(2)} ${s.currency_code || "JD"}`)
-      : "price on request";
-    const dur = s.duration_minutes ? `${s.duration_minutes} min` : null;
-    const interval = s.slot_interval_minutes ? `${s.slot_interval_minutes} min slots` : null;
-    const slotInt = Number(s.slot_interval_minutes) || null;
-    const minSlots = Number(s.min_consecutive_slots) || null;
-    const maxSlots = Number(s.max_consecutive_slots) || null;
-    const minDur = (slotInt && minSlots) ? `min ${slotInt * minSlots} min` : null;
-    const maxDur = (slotInt && maxSlots && maxSlots > 1)
-      ? `max ${slotInt * maxSlots} min`
-      : null;
-    // BOOKING-RULES-FIX-1: Make per-service payment eligibility EXPLICIT.
-    // "membership ok" was too easy for the LLM to read as descriptive
-    // metadata rather than a hard constraint. The new PAYMENT field states
-    // both eligible methods and explicit forbidden methods.
-    const paymentField = s.allow_membership
-      ? "PAYMENT: membership/prepaid/cash/CliQ/card eligible"
-      : "PAYMENT: cash/CliQ/card only — MEMBERSHIP NOT ACCEPTED";
-    const desc = s.description ? `"${s.description}"` : null;
-    const linkedR = serviceResourceMap[s.id];
-    const resStr = linkedR && linkedR.length ? `resources: ${linkedR.map(r => `${r.name} [resource_id:${r.id}]`).join(", ")}` : null;
-    const linkedS = serviceStaffMap[s.id];
-    const staffStr = linkedS && linkedS.length ? `staff: ${linkedS.map(st => `${st.name} [staff_id:${st.id}]`).join(", ")}` : null;
-    const hoursSummary = formatServiceHoursSummary(serviceHoursByService[s.id]);
-    const hoursStr = hoursSummary ? `hours: ${hoursSummary}` : null;
-    const parts = [dur, interval, minDur, maxDur, price, paymentField, hoursStr, resStr, staffStr, desc].filter(Boolean).join(" | ");
-    return `  - ${s.name} [service_id:${s.id}]: ${parts}`;
-  };
-
-  let servicesBlock;
-  if (services.length === 0) {
-    servicesBlock = "  No services configured.";
-  } else if (categories.length > 0) {
-    const grouped = {};
-    const uncat = [];
-    services.forEach(s => {
-      const cat = s.category_id && catMap[s.category_id];
-      if (cat) { (grouped[cat] = grouped[cat] || []).push(s); } else uncat.push(s);
-    });
-    const blocks = Object.entries(grouped).map(([c, svcs]) => `  [${c}]\n${svcs.map(fmtSvc).join("\n")}`);
-    if (uncat.length) blocks.push(`  [Other]\n${uncat.map(fmtSvc).join("\n")}`);
-    servicesBlock = blocks.join("\n\n");
-  } else {
-    servicesBlock = services.map(fmtSvc).join("\n");
-  }
-
-  const membershipsBlock = memberships.length
-    ? memberships.map(m => {
-        const price = m.price != null ? `${Number(m.price).toFixed(2)} ${m.currency || "JD"}` : null;
-        const billing = m.billing_type ? `billed ${m.billing_type}` : null;
-        const mins = m.included_minutes ? `${m.included_minutes} min included` : null;
-        const uses = m.included_uses ? `${m.included_uses} uses included` : null;
-        const validity = m.validity_days ? `${m.validity_days}-day validity` : null;
-        const parts = [price, billing, mins, uses, validity].filter(Boolean).join(" | ");
-        return `  - ${m.name} [id:${m.id}]: ${parts}`;
-      }).join("\n")
-    : "  No membership plans.";
-
-  const prepaidBlock = prepaidProducts.length
-    ? prepaidProducts.map(p => {
-        const price = p.price != null ? `${Number(p.price).toFixed(2)} JD` : null;
-        const sessions = p.session_count ? `${p.session_count} sessions` : null;
-        const minutes = p.minutes_total ? `${p.minutes_total} min` : null;
-        const credits = p.credit_amount ? `${p.credit_amount} credits` : null;
-        const parts = [price, p.product_type, sessions, minutes, credits].filter(Boolean).join(" | ");
-        return `  - ${p.name} [id:${p.id}]: ${parts}`;
-      }).join("\n")
-    : "  No prepaid packages.";
-
-  const ratesBlock = rates.length
-    ? rates.map(r => {
-        const amt = r.amount != null
-          ? (r.price_type === "fixed" ? `fixed ${Number(r.amount).toFixed(2)}`
-             : r.price_type === "flat_fee" ? `flat ${Number(r.amount).toFixed(2)}`
-             : r.price_type === "percent_discount" ? `${r.amount}% off`
-             : `${Number(r.amount).toFixed(2)}`)
-          : null;
-        const days = Array.isArray(r.days_of_week) && r.days_of_week.length
-          ? ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"].filter((_,i) => r.days_of_week.includes(i)).join(",")
-          : null;
-        const time = r.time_start && r.time_end ? `${r.time_start}-${r.time_end}` : null;
-        const forSvc = r.service_name ? `for ${r.service_name}` : "all services";
-        const memOnly = r.membership_name ? `(${r.membership_name} only)`
-                      : r.require_any_membership ? "(members only)" : null;
-        return `  - ${r.name}: ${[amt, forSvc, days, time, memOnly].filter(Boolean).join(", ")}`;
-      }).join("\n")
-    : "  No special rate rules.";
-
-  const resourcesBlock = resources.length
-    ? resources.map(r => `  - ${r.name} [id:${r.id}]${r.capacity > 1 ? ` (capacity ${r.capacity})` : ""}`).join("\n")
-    : "  No resources listed.";
-
-  const staffBlock = staff.length
-    ? staff.map(s => `  - ${s.name} [id:${s.id}]`).join("\n")
-    : "  No staff listed.";
+  const serviceNames = services.length
+    ? services.map(s => s.name).join(", ")
+    : "(none configured)";
 
   const DAY = ["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"];
   const hoursBlock = workingHours.length
@@ -460,33 +351,30 @@ function formatBusinessForVoice(tenantName, ctx) {
 
   return `BUSINESS: ${tenantName}
 
-SERVICES (use service_id when calling ask_booking_assistant):
-${servicesBlock}
+SERVICES OFFERED (names only — for disambiguation when forwarding queries to ask_booking_assistant; all booking details, prices, hours, eligibility live in the tool):
+  ${serviceNames}
 
-MEMBERSHIP PLANS:
-${membershipsBlock}
-
-PREPAID PACKAGES:
-${prepaidBlock}
-
-RATE RULES (peak hours, member discounts, etc — always quote real prices from these):
-${ratesBlock}
-
-RESOURCES:
-${resourcesBlock}
-
-STAFF:
-${staffBlock}
-
-BUSINESS WORKING HOURS (tenant-wide; per-service hours appear inline above as "hours:" notes):
+BUSINESS WORKING HOURS:
 ${hoursBlock}`;
 }
 
 function formatCustomerForVoice(c, paymentSettings, tenantTz = "Asia/Amman") {
   if (!c?.profile) return "CUSTOMER: Signed in but profile data unavailable.";
 
-  const { profile, bookings = [], memberships = [], packages = [] } = c;
+  const { profile, bookings = [] } = c;
   const now = Date.now();
+
+  // VOICE-FIX-5: Stripped the membership/package/payment-option blocks.
+  // Those tempted the EL agent to enumerate payment options from prompt
+  // context — and then recommend membership for services where membership
+  // wasn't accepted (because it had no per-service eligibility data).
+  // The TOOL (ask_booking_assistant) always returns the correct, eligible
+  // payment options for the chosen service. The agent's job is to relay
+  // those, not invent them.
+  //
+  // What's kept: name (for greeting) + upcoming bookings (so the agent can
+  // naturally say "your existing sim 3 booking" without a tool call when
+  // the customer references something they just booked).
 
   const upcoming = bookings
     .filter(b => b.start_time && new Date(b.start_time).getTime() >= now && b.status !== "cancelled")
@@ -500,76 +388,10 @@ function formatCustomerForVoice(c, paymentSettings, tenantTz = "Asia/Amman") {
       }).join("\n")
     : "  None";
 
-  // Active memberships only — agent should only offer membership credits
-  // that are actually usable right now.
-  const activeMemberships = memberships.filter(m => {
-    if (!m.status) return true;
-    return ["active", "current"].includes(String(m.status).toLowerCase());
-  });
-
-  const membershipsBlock = activeMemberships.length
-    ? activeMemberships.map(m => {
-        const bal = m.minutes_remaining != null ? `${m.minutes_remaining} min remaining`
-                  : m.uses_remaining != null    ? `${m.uses_remaining} uses remaining`
-                  : "balance unknown";
-        const exp = m.end_at ? `expires ${new Date(m.end_at).toLocaleDateString("en-GB", { timeZone: tenantTz })}` : "";
-        return `  - [membership_id:${m.id}] ${m.plan_name || "Plan"} | ${m.status || "?"} | ${bal}${exp ? " | " + exp : ""}`;
-      }).join("\n")
-    : "  None";
-
-  // Active packages only — agent should not offer packages that are expired
-  // or fully consumed.
-  const activePackages = packages.filter(p => {
-    if (p.remaining_quantity != null && Number(p.remaining_quantity) <= 0) return false;
-    if (p.status && !["active", "current"].includes(String(p.status).toLowerCase())) return false;
-    return true;
-  });
-
-  const packagesBlock = activePackages.length
-    ? activePackages.map(p => {
-        const rem = p.remaining_quantity != null ? `${p.remaining_quantity}/${p.original_quantity || "?"}` : "?";
-        const exp = p.expires_at ? `expires ${new Date(p.expires_at).toLocaleDateString("en-GB", { timeZone: tenantTz })}` : "";
-        return `  - [package_id:${p.id}] ${p.product_name || "Package"} | ${p.status} | ${rem} remaining${exp ? " | " + exp : ""}`;
-      }).join("\n")
-    : "  None";
-
-  // ── Aggregated payment options block ─────────────────────────────────────
-  // This is the single place the agent looks to see "how can this customer
-  // pay?" — combining their personal credits + the tenant's enabled methods.
-  const paymentLines = [];
-  for (const m of activeMemberships) {
-    const bal = m.minutes_remaining != null && m.minutes_remaining > 0 ? `${m.minutes_remaining} min remaining`
-              : m.uses_remaining != null && m.uses_remaining > 0       ? `${m.uses_remaining} uses remaining`
-              : null;
-    if (!bal) continue;
-    paymentLines.push(`  - Membership: ${m.plan_name || "Plan"} (${bal}) — only valid for services whose PAYMENT field lists "membership"`);
-  }
-  for (const p of activePackages) {
-    const rem = p.remaining_quantity != null ? `${p.remaining_quantity}` : "?";
-    paymentLines.push(`  - Prepaid package: ${p.product_name || "Package"} (${rem} remaining)`);
-  }
-  // Append tenant-level methods
-  const tenantPm = formatTenantPaymentMethods(paymentSettings);
-  if (tenantPm.trim()) paymentLines.push(tenantPm);
-
-  const paymentOptionsBlock = paymentLines.length
-    ? paymentLines.join("\n")
-    : "  (No payment methods configured — agent should fall back to asking the customer)";
-
   return `CUSTOMER: ${profile.name || "Customer"} (${profile.email}${profile.phone ? `, ${profile.phone}` : ""})
-- Member since: ${profile.created_at ? new Date(profile.created_at).toLocaleDateString("en-GB", { timeZone: tenantTz }) : "N/A"}
 
-UPCOMING BOOKINGS:
-${upcomingBlock}
-
-ACTIVE MEMBERSHIPS:
-${membershipsBlock}
-
-PREPAID PACKAGES:
-${packagesBlock}
-
-PAYMENT OPTIONS FOR THIS CUSTOMER (always present these as choices before confirming a booking — never default):
-${paymentOptionsBlock}`;
+UPCOMING BOOKINGS (for natural reference only — for any new availability/booking/cancellation, ALWAYS forward to ask_booking_assistant which has the live state):
+${upcomingBlock}`;
 }
 
 module.exports = { buildVoiceSystemPromptOverride };
