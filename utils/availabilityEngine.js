@@ -142,6 +142,12 @@ async function buildAvailabilitySlots({ tenantId, tenantSlug, date, serviceId, s
   const slotInterval   = Number(service.slot_interval_minutes ?? service.slotIntervalMinutes ?? serviceMinutes) || serviceMinutes || 60;
   const durationMin    = serviceMinutes || 60;
   const stepMin        = slotInterval   || durationMin;
+  // VOICE-FIX-1 (Bug 1): Slots must end before close, not just start before close-stepMin.
+  // For services where booking duration > slot interval (e.g. Karaoke 4hr at 60min slots),
+  // using stepMin as the close-time buffer offered last slot at close-60min, but the booking
+  // overflowed by (durationMin - stepMin). closeBufferMin ensures bookings fit fully within
+  // the working/service window. Equal to stepMin for time-slot services where step === duration.
+  const closeBufferMin = Math.max(stepMin, durationMin);
   const maxParallel    = Number(service.max_parallel_bookings) || 1;
   const reqStaff       = !!service.requires_staff;
   const reqResource    = !!service.requires_resource;
@@ -289,7 +295,9 @@ async function buildAvailabilitySlots({ tenantId, tenantSlug, date, serviceId, s
     if (serviceHoursWindows === null) return true;
     const base  = toMinutes(startHHMM);
     const start = normaliseSlotMinuteForWindow(base, openMin, isOvernight);
-    const end   = start + stepMin;
+    // VOICE-FIX-1 (Bug 1): use full booking duration so a slot's BOOKING fits the window,
+    // not just the slot's stepMin width.
+    const end   = start + durationMin;
     return serviceHoursWindows.some((w) => start >= w.start_minute && end <= w.end_minute);
   }
 
@@ -308,7 +316,7 @@ async function buildAvailabilitySlots({ tenantId, tenantSlug, date, serviceId, s
           SELECT gs AS slot_start, gs + make_interval(mins => $5) AS slot_end
             FROM generate_series(
               ($1::timestamp AT TIME ZONE $4),
-              ($2::timestamp AT TIME ZONE $4) - make_interval(mins => $5),
+              ($2::timestamp AT TIME ZONE $4) - make_interval(mins => $7),
               make_interval(mins => $5)
             ) gs
         )
@@ -321,7 +329,10 @@ async function buildAvailabilitySlots({ tenantId, tenantSlug, date, serviceId, s
            AND (tb.resource_id IS NULL OR tb.resource_id = $6)
           GROUP BY slot_start ORDER BY slot_start`;
 
-      const r = await pool.query(q, [startLocal, endLocal, tenantId, tenantTz, stepMin, resourceId ?? null]);
+      // VOICE-FIX-1: $7 is closeBufferMin (= max(stepMin, durationMin)) so slots stop early
+      // enough that booking duration fits within the working window. $5 stays stepMin so the
+      // overlap-check slot_end window remains slot-sized.
+      const r = await pool.query(q, [startLocal, endLocal, tenantId, tenantTz, stepMin, resourceId ?? null, closeBufferMin]);
       for (const row of r.rows) {
         if (!slotFallsWithinServiceHours(row.time)) continue;
         const blackoutHits = Number(row.blackout_hits ?? 0);
@@ -365,8 +376,9 @@ async function buildAvailabilitySlots({ tenantId, tenantSlug, date, serviceId, s
           values.push(`(($${p++})::timestamp, ($${p++})::timestamp)`);
         }
         const tzIdx = 1, tenantIdIdx = p++, stepIdx = p++, basisIdx = p++,
-              resourceIdx = p++, staffIdx = p++, serviceIdIdx = p++;
-        params.push(tenantId, stepMin, availabilityBasis, resourceId ?? null, staffId ?? null, serviceId ?? null);
+              resourceIdx = p++, staffIdx = p++, serviceIdIdx = p++, closeBufIdx = p++;
+        // VOICE-FIX-1: closeBufferMin so 4hr Karaoke at staff-block-end-60min doesn't overflow
+        params.push(tenantId, stepMin, availabilityBasis, resourceId ?? null, staffId ?? null, serviceId ?? null, closeBufferMin);
 
         q = `
           WITH working_blocks(start_local, end_local) AS (VALUES ${values.join(",")}),
@@ -375,7 +387,7 @@ async function buildAvailabilitySlots({ tenantId, tenantSlug, date, serviceId, s
               FROM working_blocks wb
               CROSS JOIN LATERAL generate_series(
                 (wb.start_local AT TIME ZONE $${tzIdx}),
-                (wb.end_local   AT TIME ZONE $${tzIdx}) - make_interval(mins => $${stepIdx}),
+                (wb.end_local   AT TIME ZONE $${tzIdx}) - make_interval(mins => $${closeBufIdx}),
                 make_interval(mins => $${stepIdx})
               ) gs
           )
@@ -409,7 +421,7 @@ async function buildAvailabilitySlots({ tenantId, tenantSlug, date, serviceId, s
             SELECT gs AS slot_start, gs + make_interval(mins => $5) AS slot_end
               FROM generate_series(
                 ($1::timestamp AT TIME ZONE $4),
-                ($2::timestamp AT TIME ZONE $4) - make_interval(mins => $5),
+                ($2::timestamp AT TIME ZONE $4) - make_interval(mins => $10),
                 make_interval(mins => $5)
               ) gs
           )
@@ -436,7 +448,8 @@ async function buildAvailabilitySlots({ tenantId, tenantSlug, date, serviceId, s
              AND tstzrange(tb.starts_at, tb.ends_at, '[)') && tstzrange(slot_start, slot_end, '[)')
              AND (tb.resource_id IS NULL OR tb.resource_id = $7)
             GROUP BY slot_start ORDER BY slot_start`;
-        params = [startLocal, endLocal, tenantId, tenantTz, stepMin, availabilityBasis, resourceId ?? null, staffId ?? null, serviceId ?? null];
+        // VOICE-FIX-1: $10 is closeBufferMin so booking duration fits before close
+        params = [startLocal, endLocal, tenantId, tenantTz, stepMin, availabilityBasis, resourceId ?? null, staffId ?? null, serviceId ?? null, closeBufferMin];
       }
 
       const r = await pool.query(q, params);
@@ -446,7 +459,8 @@ async function buildAvailabilitySlots({ tenantId, tenantSlug, date, serviceId, s
         if (serviceHoursWindows !== null) {
           const base  = toMinutes(row.time);
           const start = normaliseSlotMinuteForWindow(base, openMin, isOvernight);
-          if (!serviceHoursWindows.some((w) => start >= w.start_minute && start + stepMin <= w.end_minute)) continue;
+          // VOICE-FIX-1: durationMin not stepMin — booking, not slot, must fit window
+          if (!serviceHoursWindows.some((w) => start >= w.start_minute && start + durationMin <= w.end_minute)) continue;
         }
 
         const overlapsResource   = Number(row.overlaps_resource    ?? 0);

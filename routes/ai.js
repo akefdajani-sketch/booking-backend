@@ -10,6 +10,79 @@ const requireAppAuth = require("../middleware/requireAppAuth");
 // Mutation routes call bustBusiness / bustCustomer / bustTenant on writes.
 const aiContextCache = require("../utils/aiContextCache");
 
+// ─────────────────────────────────────────────────────────────────────────────
+// VOICE-FIX-1 (Bugs 2 + 3) — slotConfirmationCache
+//
+// Stops the agent from booking slots it never checked (fabrication, Bug 3)
+// and adds a defensive inline conflict re-check at create time (double-
+// booking, Bug 2). Single-instance in-process Map; if/when this backend
+// scales horizontally, swap to Redis. Cache is keyed per (tenant, customer,
+// service, dateISO) so different services/dates don't collide.
+//
+// TTL is 5 minutes — covers a typical voice booking conversation. Future
+// per-tenant AI config panel will expose this as a tenant-configurable
+// setting (alongside BYOK + $5 trial credit + 80%/100% gates).
+// TODO: tenant-configurable per AI config roadmap.
+// ─────────────────────────────────────────────────────────────────────────────
+const SLOT_CACHE_TTL_MS = 5 * 60 * 1000;
+const slotConfirmationCache = (() => {
+  const store = new Map();
+  function key(tenantId, customerId, serviceId, dateISO) {
+    return `${tenantId}:${customerId || 0}:${serviceId}:${dateISO}`;
+  }
+  function set(tenantId, customerId, serviceId, dateISO, slots) {
+    store.set(key(tenantId, customerId, serviceId, dateISO), {
+      slots: (slots || []).map(s => ({ time: s.time, resource_id: s.resource_id ?? null })),
+      cachedAt: Date.now(),
+    });
+  }
+  function get(tenantId, customerId, serviceId, dateISO) {
+    const k = key(tenantId, customerId, serviceId, dateISO);
+    const entry = store.get(k);
+    if (!entry) return null;
+    if (Date.now() - entry.cachedAt > SLOT_CACHE_TTL_MS) {
+      store.delete(k);
+      return null;
+    }
+    return entry;
+  }
+  function bustForBooking(tenantId, serviceId, dateISO) {
+    // Bust ALL customer entries for this (tenant, service, date) — a write affects
+    // every customer's view of that day's availability.
+    const prefix = `${tenantId}:`;
+    const suffix = `:${serviceId}:${dateISO}`;
+    for (const k of store.keys()) {
+      if (k.startsWith(prefix) && k.endsWith(suffix)) store.delete(k);
+    }
+  }
+  return { set, get, bustForBooking };
+})();
+
+// VOICE-FIX-1: Defensive inline conflict check used by create_booking before
+// firing the actual /api/bookings write. Mirrors the overlap predicate used
+// in availabilityEngine.js — same tstzrange && tstzrange pattern. Returns
+// true if the slot has a conflicting booking (and therefore should be rejected).
+async function hasConflictingBooking({ tenantId, resourceId, startISO, durationMin, maxParallel }) {
+  if (!resourceId) return false; // no resource → can't conflict on resource
+  try {
+    const r = await pool.query(
+      `SELECT COUNT(*)::int AS n
+         FROM bookings
+        WHERE tenant_id = $1
+          AND resource_id = $2
+          AND status IN ('pending','confirmed')
+          AND deleted_at IS NULL
+          AND booking_range && tstzrange($3::timestamptz, $3::timestamptz + make_interval(mins => $4), '[)')`,
+      [tenantId, resourceId, startISO, durationMin]
+    );
+    const overlaps = Number(r.rows?.[0]?.n || 0);
+    return overlaps >= (maxParallel || 1);
+  } catch (e) {
+    console.warn("[hasConflictingBooking] check failed, allowing booking:", e.message);
+    return false; // fail-open: don't block on infra error
+  }
+}
+
 const router = express.Router();
 // Detect when user is confirming a previously discussed booking
 function isConfirmationMessage(msg) {
@@ -593,6 +666,13 @@ async function handleAction(action, tenantId, tenantSlug, customerId, customerEm
         if (available.length === 0) {
           return { success: true, slots: [], message: `No available slots on ${action.date}. The business may be closed or fully booked.` };
         }
+        // VOICE-FIX-1 (Bugs 2 + 3): cache the available slots for this customer/service/date
+        // so create_booking can verify the agent's proposed slot was actually offered.
+        const slotsForCache = available.slice(0, 20).map(s => ({
+          time: s.time,
+          resource_id: s.resource_id ?? resourceId ?? null,
+        }));
+        slotConfirmationCache.set(tenantId, customerId, Number(action.service_id), normalizedDate, slotsForCache);
         return { success: true, slots: available.slice(0, 20), resourceId, message: null };
       } catch (e) {
         console.error("[AI check_availability error]", e);
@@ -654,6 +734,56 @@ async function handleAction(action, tenantId, tenantSlug, customerId, customerEm
 
         if (isNaN(start.getTime())) return { success: false, message: "Invalid start time." };
         console.log(`[AI create_booking] parsed start=${start.toISOString()} from raw="${rawTime}" hasOffset=${hasOffset} tz=${tenantTz}`);
+
+        // ─────────────────────────────────────────────────────────────────
+        // VOICE-FIX-1 (Bugs 2 + 3): slot confirmation gate
+        //
+        // 1. Anti-fabrication: if the agent proposes a slot that wasn't in
+        //    the most recent check_availability result, reject with the
+        //    actual available times so the agent recovers cleanly.
+        // 2. Anti-double-booking: re-validate against the DB at create time
+        //    (a confirmed booking may have landed since the cache was filled).
+        //
+        // Both bugs were observed in production via Birdie smoke tests; this
+        // gate makes them deterministic to prevent.
+        // ─────────────────────────────────────────────────────────────────
+        const dateISO = start.toLocaleDateString("en-CA", { timeZone: tenantTz }); // YYYY-MM-DD
+        const timeHHMM = start.toLocaleTimeString("en-GB", { timeZone: tenantTz, hour: "2-digit", minute: "2-digit", hour12: false });
+        const cached = slotConfirmationCache.get(tenantId, customerId, Number(action.service_id), dateISO);
+
+        if (cached) {
+          const inCache = cached.slots.some(s => s.time === timeHHMM);
+          if (!inCache) {
+            const offered = cached.slots.map(s => s.time).join(", ");
+            console.warn(`[AI create_booking] FABRICATION BLOCKED — proposed ${timeHHMM} not in cached slots [${offered}]`);
+            return {
+              success: false,
+              message: `I don't have ${timeHHMM} as an available slot on ${dateISO}. The available times I checked were: ${offered}. Which would you like?`,
+            };
+          }
+        } else {
+          console.log(`[AI create_booking] no cached slots for service=${action.service_id} date=${dateISO} — running inline conflict check only`);
+        }
+
+        // Defensive inline conflict re-check — covers both the no-cache path AND
+        // the case where another booking landed between check_availability and now.
+        const conflict = await hasConflictingBooking({
+          tenantId,
+          resourceId: action.resource_id ? Number(action.resource_id) : null,
+          startISO: start.toISOString(),
+          durationMin: duration,
+          maxParallel: Number(svc.max_parallel_bookings) || 1,
+        });
+        if (conflict) {
+          console.warn(`[AI create_booking] CONFLICT BLOCKED — slot ${timeHHMM} on ${dateISO} resource=${action.resource_id} just got booked`);
+          // Bust the cache so the next check_availability returns fresh state
+          slotConfirmationCache.bustForBooking(tenantId, Number(action.service_id), dateISO);
+          return {
+            success: false,
+            message: `That slot was just taken — let me check what else is open. One moment.`,
+          };
+        }
+        // ── End VOICE-FIX-1 gate ─────────────────────────────────────────
 
         // Determine payment method:
         // 1. membership credits (customerMembershipId)
@@ -717,6 +847,10 @@ async function handleAction(action, tenantId, tenantSlug, customerId, customerEm
         const bookingId = bookingData?.booking?.id || bookingData?.id;
         // tenantTz already fetched above for timezone-safe start time parsing — reuse it here
         const displayTime = start.toLocaleString("en-GB", { timeZone: tenantTz, dateStyle: "full", timeStyle: "short" });
+
+        // VOICE-FIX-1: a booking just landed → bust slot cache for this service+date
+        // so the next check_availability call returns fresh state for any customer.
+        slotConfirmationCache.bustForBooking(tenantId, Number(action.service_id), dateISO);
 
         let payLabel = "Cash at venue";
         if (paymentMethod === "membership") payLabel = "Membership credits ✓";

@@ -209,6 +209,67 @@ function buildCustomerContext({ profile, bookings = [], memberships = [], packag
     .sort((a, b) => new Date(b.start_time) - new Date(a.start_time))
     .slice(0, 10);
 
+  // ─────────────────────────────────────────────────────────────────────
+  // VOICE-FIX-1 (Bug 4) — usable-entitlement filter
+  //
+  // fetchCustomerData returns ALL memberships/packages without filtering
+  // by status/expiry/balance. Filter here so the prompt only sees items
+  // the customer can actually use right now. Anything that fails this
+  // filter still appears in the rendered list (so the customer can see
+  // history) but is excluded from the PROACTIVE PAYMENT OFFERING the
+  // agent must surface.
+  // ─────────────────────────────────────────────────────────────────────
+  function isMembershipUsable(m) {
+    if (m.status && m.status !== "active") return false;
+    if (m.end_at && new Date(m.end_at).getTime() <= now) return false;
+    // If both balance fields are explicitly 0, exhausted. If both are null,
+    // treat as unlimited (e.g. unlimited plans don't track minutes/uses).
+    const minNum = m.minutes_remaining != null ? Number(m.minutes_remaining) : null;
+    const useNum = m.uses_remaining    != null ? Number(m.uses_remaining)    : null;
+    if (minNum === 0 && useNum === 0) return false;
+    if (minNum != null && minNum <= 0 && useNum == null) return false;
+    if (useNum != null && useNum <= 0 && minNum == null) return false;
+    return true;
+  }
+  function isPackageUsable(p) {
+    if (p.status && p.status !== "active") return false;
+    if (p.expires_at && new Date(p.expires_at).getTime() <= now) return false;
+    if (p.remaining_quantity != null && Number(p.remaining_quantity) <= 0) return false;
+    return true;
+  }
+  const usableMemberships = memberships.filter(isMembershipUsable);
+  const usablePackages    = packages.filter(isPackageUsable);
+
+  // ─────────────────────────────────────────────────────────────────────
+  // VOICE-FIX-1 (Bug 4) — light personalization patterns
+  //
+  // Pull a few signals from past bookings so the agent can offer smart
+  // defaults like "Sim 3 like last time?". Pure JS reduce, no DB call.
+  // ─────────────────────────────────────────────────────────────────────
+  const ninetyDaysAgo = now - 90 * 24 * 60 * 60 * 1000;
+  const recentPast = past.filter(b => new Date(b.start_time).getTime() >= ninetyDaysAgo && b.status !== "cancelled");
+  const resourceCounts = new Map();
+  const serviceCounts  = new Map();
+  for (const b of recentPast) {
+    if (b.resource_name) resourceCounts.set(b.resource_name, (resourceCounts.get(b.resource_name) || 0) + 1);
+    if (b.service_name)  serviceCounts.set(b.service_name,  (serviceCounts.get(b.service_name)  || 0) + 1);
+  }
+  let topResource = null, topResourceCount = 0;
+  for (const [name, count] of resourceCounts.entries()) {
+    if (count > topResourceCount) { topResource = name; topResourceCount = count; }
+  }
+  const lastBooking = past[0]; // already sorted desc by start_time
+  const patternsLines = [];
+  if (topResource && topResourceCount >= 3) {
+    patternsLines.push(`  - Most-booked resource (last 90 days): ${topResource} (${topResourceCount} of last ${recentPast.length} sessions)`);
+  }
+  if (lastBooking) {
+    const lastDate = new Date(lastBooking.start_time).toLocaleDateString("en-GB", { dateStyle: "medium" });
+    const lastRes  = lastBooking.resource_name ? ` (${lastBooking.resource_name})` : "";
+    patternsLines.push(`  - Last booked: ${lastBooking.service_name} on ${lastDate}${lastRes}`);
+  }
+  const patternsBlock = patternsLines.length > 0 ? `\n  PATTERNS DETECTED:\n${patternsLines.join("\n")}\n` : "";
+
   const upcomingBlock = upcoming.length > 0
     ? upcoming.map(b => {
         const dt     = new Date(b.start_time).toLocaleString("en-GB", { dateStyle: "medium", timeStyle: "short" });
@@ -264,9 +325,31 @@ function buildCustomerContext({ profile, bookings = [], memberships = [], packag
       }).join("\n")
     : "    None";
 
+  // VOICE-FIX-1 (Bug 4): Build a separate USABLE-NOW block. The agent uses
+  // this list (not the full ACTIVE MEMBERSHIPS / PREPAID PACKAGES blocks
+  // above) to decide what to proactively offer at booking time. Items here
+  // have already passed status, expiry, and balance/quantity filters.
+  const usableLines = [];
+  for (const m of usableMemberships) {
+    const bal = m.minutes_remaining != null ? `${m.minutes_remaining} min` :
+                m.uses_remaining    != null ? `${m.uses_remaining} uses`    : "unlimited";
+    usableLines.push(`    - MEMBERSHIP [membership id:${m.id}] ${m.plan_name || "Plan"} — ${bal} remaining`);
+  }
+  for (const p of usablePackages) {
+    const eligibleIds = Array.isArray(p.eligible_service_ids) ? p.eligible_service_ids.map(String) : [];
+    const eligibility = eligibleIds.length === 0
+      ? "applies to all services"
+      : `ONLY for service_id ${eligibleIds.join("/")}`;
+    const rem = p.remaining_quantity != null ? `${p.remaining_quantity} remaining` : "balance unknown";
+    usableLines.push(`    - PACKAGE [package id:${p.id}] ${p.product_name || "Package"} — ${rem} | ${eligibility}`);
+  }
+  const usableBlock = usableLines.length > 0
+    ? `\n  USABLE NOW (proactively offer these as payment options when service is eligible):\n${usableLines.join("\n")}\n`
+    : "\n  USABLE NOW: None — offer cash / CliQ / card only.\n";
+
   return `CUSTOMER ACCOUNT (${profile.name || "Unknown"} | ${profile.email} | phone: ${profile.phone || "not set"}):
   Member since: ${profile.created_at ? new Date(profile.created_at).toLocaleDateString("en-GB") : "N/A"}
-
+${patternsBlock}
   UPCOMING BOOKINGS:
 ${upcomingBlock}
 
@@ -277,7 +360,8 @@ ${pastBlock}
 ${membershipsBlock}
 
   PREPAID PACKAGES:
-${packagesBlock}`;
+${packagesBlock}
+${usableBlock}`;
 }
 
 // ── Build system prompt ───────────────────────────────────────────────
@@ -400,7 +484,23 @@ RULES:
     3. If the field says "MEMBERSHIP NOT ACCEPTED", do NOT mention membership as a payment option for that booking — even if the customer has a membership with credits remaining.
     4. Never include membership_id in a create_booking ACTION for a service whose PAYMENT field excludes membership.
   Example: customer asks for "Karaoke" and Karaoke's PAYMENT field says "MEMBERSHIP NOT ACCEPTED" → respond with cash/CliQ/card options only, NEVER offer membership credits.
-- MEMBERSHIP USAGE: When the chosen service is membership-eligible AND the customer has an active membership with remaining balance, you MAY proactively mention it as one of the payment choices. Always include all eligible options together so the customer chooses ("Pay with your Pro membership — 240 minutes left — or with cash/CliQ/card?"). Include membership_id in the create_booking ACTION only when the customer explicitly chose membership.
+- PROACTIVE PAYMENT OFFERING (REQUIRED for signed-in customers — VOICE-FIX-1):
+  When proposing a booking, check the "USABLE NOW" section of the customer account.
+  For each entry, decide if it applies to the chosen service:
+    • Memberships apply when the service's PAYMENT field includes "membership".
+    • Packages apply per their "applies to all services" or "ONLY for service_id ..." rule.
+  If ANY usable entitlement applies to the chosen service, you MUST list it FIRST in the
+  payment options, BEFORE cash/CliQ/card. Never let the customer pay cash by default
+  when they have an applicable membership or package they could use instead.
+
+  Format: "Pay with your <plan name> — <balance> remaining — or with cash, CliQ, or card?"
+  If multiple entitlements apply, list memberships first, then packages, then cash methods.
+
+  Items NOT in "USABLE NOW" are expired, exhausted, or cancelled — NEVER offer them
+  even if they appear in the ACTIVE MEMBERSHIPS or PREPAID PACKAGES history blocks above.
+
+  Include membership_id or prepaid_entitlement_id in create_booking ONLY when the
+  customer explicitly chose that entitlement.
 - AVAILABILITY: Always call check_availability before confirming any slot. Pass the specific resource_id if the customer named a resource.
 - PAYMENT METHOD FIELD (REQUIRED in PENDING_BOOKING and ACTION):
   Once the customer chooses how to pay, set payment_method to ONE of these exact strings:
@@ -438,6 +538,15 @@ Replace values with exact numbers from the business context. ALWAYS append the t
   Example: customer has "Lesson Pack [package id:9] | ONLY VALID FOR: Group Lesson [service_id:5]". Customer wants to book Sim Bay 1 [service_id:1]. → DO NOT mention the Lesson Pack as a payment option, even though it has remaining sessions. The Lesson Pack is restricted to Group Lesson only.
 
   Include prepaid_entitlement_id from [package id:X] in the ACTION only when (a) the customer explicitly chose that package, AND (b) the package is eligible for the chosen service.
+- PERSONALIZATION (signed-in customers — VOICE-FIX-1):
+  If the customer's PATTERNS DETECTED block shows a "Most-booked resource (last 90 days)"
+  with 3+ sessions, when the customer makes an OPEN request for that service (e.g. "book me
+  a sim tonight" without naming a resource) you MAY proactively suggest the usual resource
+  as a default. Example: "Want Sim 3 like usual, or somewhere different?"
+
+  Never override an EXPLICIT request — if the customer says "Sim 1 at 8pm", do NOT counter
+  with "Sim 3 like usual?". Personalization is for ambiguous openings only, not for
+  second-guessing stated preferences.
 - CANCELLATION: Always show booking details and ask "Shall I go ahead and cancel?" before acting.
 - Be concise, warm, and professional. Use bullet points for lists.
 - If you don't know something not in the data, say so honestly.
