@@ -102,6 +102,8 @@ const mediaLibraryRoutes = require("./routes/mediaLibrary");
 // theme routers
 const adminThemesRouter = require("./routes/adminThemes");
 const adminTenantsThemeRouter = require("./routes/adminTenantsTheme");
+// VOICE-FIX-6: per-tenant voice prompt admin (generate / read / edit / clear)
+const adminVoicePromptRouter = require("./routes/admin/voicePrompt");
 const publicTenantThemeRouter = require("./routes/publicTenantTheme");
 
 const linksRouter = require("./routes/links");
@@ -262,6 +264,8 @@ app.use("/api/jobs", trialSweepJobRouter); // F: POST /api/jobs/trial-sweep (adm
 app.use("/api/jobs", activationStatusRouter); // L: POST /api/jobs/activation-nudge (cron)
 app.use("/api/owner-dashboard", ownerDashboardRouter); // E: GET /overview (admin-only)
 app.use("/api/admin/tenants", adminTenantsThemeRouter);
+// VOICE-FIX-6: admin endpoints for per-tenant voice agent prompts
+app.use("/api/admin/voice-prompt", adminVoicePromptRouter);
 app.use("/api/public/tenant-theme", publicApiLimiter, publicTenantThemeRouter);
 
 // ─── Misc ─────────────────────────────────────────────────────────────────────

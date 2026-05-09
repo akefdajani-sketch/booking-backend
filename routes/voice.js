@@ -77,17 +77,21 @@ router.post("/:tenantSlug/session", optionalAuth, async (req, res) => {
     // include voice_instructions or branding. Pull those here so the prompt
     // builder can use the per-tenant tone override and payment settings.
     // Both columns are optional — tolerate missing/older schemas.
+    // VOICE-FIX-6: also pull voice_prompt_snapshot (per-tenant generated prompt)
+    // and slug (used for the feature-flag gate in voiceContext).
     try {
       const enrichRes = await require("../db").query(
-        `SELECT voice_instructions, branding
+        `SELECT slug, voice_instructions, branding, voice_prompt_snapshot
          FROM tenants
          WHERE id = $1
          LIMIT 1`,
         [tenant.id]
       );
       if (enrichRes.rows?.[0]) {
-        tenant.voice_instructions = enrichRes.rows[0].voice_instructions || null;
-        tenant.branding           = enrichRes.rows[0].branding || null;
+        tenant.slug                  = enrichRes.rows[0].slug || tenant.slug;
+        tenant.voice_instructions    = enrichRes.rows[0].voice_instructions || null;
+        tenant.branding              = enrichRes.rows[0].branding || null;
+        tenant.voice_prompt_snapshot = enrichRes.rows[0].voice_prompt_snapshot || null;
       }
     } catch (_) { /* older schema without these columns — safe to skip */ }
 
