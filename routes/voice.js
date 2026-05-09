@@ -100,12 +100,29 @@ router.post("/:tenantSlug/session", optionalAuth, async (req, res) => {
       isSignedIn ? fetchCustomerData(tenant.id, email) : Promise.resolve(null),
     ]);
 
+    // VOICE-LANG-1 / VOICE-FIX-4: Per-call language selection.
+    // Adding multiple languages to an EL agent locks STT/TTS to whichever
+    // language is selected at session start (per EL docs — the language is
+    // fixed for the whole call). Without an override, EL defaults to the
+    // agent's "Default" language (English), and STT can't transcribe other
+    // languages. So when the customer picks Arabic in the overlay, we MUST
+    // pass `language: "ar"` in the SDK overrides at startSession.
+    //
+    // VOICE-FIX-4: Resolve lang BEFORE the prompt builder runs — the prompt
+    // needs to know the session language so Claude can lock its responses
+    // to it (instead of mirroring whatever language the customer happens
+    // to speak, which broke when EL's English-locked v2 TTS tried to render
+    // Arabic text). Allowed values are limited to the languages configured
+    // on the EL agent.
+    const requestedLang = String(req.query.lang || "en").toLowerCase();
+    const lang = ["en", "ar"].includes(requestedLang) ? requestedLang : "en";
+
     // Build the per-session prompt override. The agent's BASE prompt (in EL
     // dashboard) should say something like: "You are a booking concierge. Use
     // ask_booking_assistant for any availability/booking/cancellation work."
     // The override prepends business + customer context + voice rules.
     const promptOverride = buildVoiceSystemPromptOverride({
-      tenant, businessContext, customerData, isSignedIn,
+      tenant, businessContext, customerData, isSignedIn, lang,
     });
 
     // Connection type — desktop gets WebRTC (low latency, good audio), mobile
@@ -151,20 +168,6 @@ router.post("/:tenantSlug/session", optionalAuth, async (req, res) => {
     const firstName = customerData?.profile?.name
       ? customerData.profile.name.split(" ")[0]
       : null;
-
-    // VOICE-LANG-1: Per-call language selection.
-    // Adding multiple languages to an EL agent locks STT/TTS to whichever
-    // language is selected at session start (per EL docs — the language is
-    // fixed for the whole call). Without an override, EL defaults to the
-    // agent's "Default" language (English), and STT can't transcribe other
-    // languages. So when the customer picks Arabic in the overlay, we MUST
-    // pass `language: "ar"` in the SDK overrides at startSession.
-    //
-    // Allowed values are limited to the languages actually configured on
-    // the EL agent. Add more here as new languages are enabled in the
-    // dashboard.
-    const requestedLang = String(req.query.lang || "en").toLowerCase();
-    const lang = ["en", "ar"].includes(requestedLang) ? requestedLang : "en";
 
     // Localize the first message to the chosen language. The agent base
     // first-message in the EL dashboard remains English; this override
