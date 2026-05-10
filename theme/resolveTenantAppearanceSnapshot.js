@@ -1,6 +1,9 @@
 const db = require("../db");
 const { schemaToCssVars } = require("./resolveThemeSchema");
 const { buildResolvedContractCssVars } = require("./buildResolvedContractCssVars");
+// Phase 3.2-RETRY-2 (2026-05-10): import contract registry so we can map
+// Phase 3+ hyphenated theme keys to their canonical legacy layout family.
+const { REGISTRY: CONTRACT_REGISTRY } = require("./contractThemeRegistry");
 
 function toObj(v) {
   if (!v) return {};
@@ -16,6 +19,27 @@ function firstNonEmpty(...values) {
 }
 
 function resolveLayoutKey(themeKey, themeRow) {
+  // Phase 3.2-RETRY-2: Phase 3+ themes (e.g. premium-hospitality) inherit a
+  // legacy layout family declared on their contract theme's `.layout` field
+  // (e.g. premium-hospitality.layout === "premium"). When present, this
+  // overrides any platform_themes.layout_key (no row exists for these yet)
+  // and the verbatim-themeKey fallback.
+  //
+  // Why this matters:
+  //   1. The legacy --bf-* token resolution path keys off `layoutKey` to
+  //      decide premium-vs-classic defaults and brand_overrides merging.
+  //      Without this fix, premium-hospitality rebuilds with classic
+  //      defaults and Birdie's brand colors don't flow.
+  //   2. The frontend's pickEffectiveThemeContract compares snapshot
+  //      .layoutKey to payload .layout_key. Phase 3.2-RETRY made the API
+  //      route emit the contract layout (e.g. "premium"); this snapshot
+  //      side now agrees, so source resolves to "snapshot" instead of
+  //      "payload_theme_mismatch_fallback" and the snapshot is actually used.
+  const contractLayout = CONTRACT_REGISTRY?.[themeKey]?.layout;
+  if (typeof contractLayout === "string" && contractLayout.trim()) {
+    return String(contractLayout).trim().toLowerCase();
+  }
+
   const raw = String(themeRow?.layout_key || themeKey || "classic").trim().toLowerCase();
   if (!raw) return "classic";
   if (raw === "default_v1" || raw === "default") return "classic";
