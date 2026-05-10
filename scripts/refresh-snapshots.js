@@ -22,7 +22,7 @@
 
 "use strict";
 
-require("dotenv").config();
+try { require("dotenv").config(); } catch { /* dotenv not installed (Render production) — env injected directly */ }
 
 const db = require("../db");
 const {
