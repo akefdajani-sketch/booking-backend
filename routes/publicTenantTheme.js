@@ -3,6 +3,10 @@ const router = express.Router();
 const db = require("../db");
 const { resolveTenantAppearanceSnapshot, writeTenantAppearanceSnapshot } = require("../theme/resolveTenantAppearanceSnapshot");
 
+// Phase 3.2-RETRY (2026-05-10): import the contract registry so we can
+// derive the built-in allow-list and resolve Phase 3+ theme layout keys.
+const { REGISTRY: CONTRACT_REGISTRY } = require("../theme/contractThemeRegistry");
+
 // Schema-compat: public endpoints must not crash if a newer optional column
 // doesn't exist yet in an environment.
 let __tenantColCache = null;
@@ -155,7 +159,20 @@ router.get("/:slug", async (req, res) => {
 
   // Built-in theme keys that ship with the frontend layouts.
   // These must work even if `platform_themes` rows haven't been seeded yet.
-  const BUILTIN_THEME_KEYS = new Set(["default_v1", "classic", "premium", "premium_v2", "premium_light"]);
+  //
+  // Phase 3.2-RETRY (2026-05-10):
+  //   Previously this was a hardcoded set covering only legacy v1 themes.
+  //   When Phase 3.1 added `premium-hospitality` to the contract registry,
+  //   this allow-list was not extended in lockstep, so tenants on Phase 3+
+  //   themes silently fell through to the `default_v1` final fallback,
+  //   producing incoherent renders (snapshot vars vs. theme.key mismatch).
+  //
+  //   Fix: derive Phase 3+ entries from the contract registry. Adding a
+  //   theme to `theme/contractThemeRegistry.js` now automatically registers
+  //   it as built-in here — no parallel allow-list to keep in sync.
+  const LEGACY_BUILTIN_THEME_KEYS = ["default_v1", "classic", "premium", "premium_v2", "premium_light"];
+  const CONTRACT_REGISTRY_KEYS = Object.keys(CONTRACT_REGISTRY || {});
+  const BUILTIN_THEME_KEYS = new Set([...LEGACY_BUILTIN_THEME_KEYS, ...CONTRACT_REGISTRY_KEYS]);
 
   let theme = null;
 
@@ -165,7 +182,21 @@ router.get("/:slug", async (req, res) => {
       "SELECT key, tokens_json, layout_key FROM platform_themes WHERE key = $1 AND is_published = TRUE LIMIT 1",
       [themeKey]
     );
-    theme = th.rows[0] || { key: themeKey, tokens_json: {}, layout_key: themeKey === "default_v1" ? "classic" : themeKey };
+    if (th.rows[0]) {
+      theme = th.rows[0];
+    } else {
+      // No platform_themes row — synthesize a minimal theme record.
+      // Phase 3.2-RETRY: for contract-registered keys, use the contract
+      // theme's `.layout` field as layout_key. For example,
+      // `premium-hospitality` has `layout: "premium"`, so its layout_key
+      // resolves to "premium" (the layout system's existing premium shell)
+      // — not "premium-hospitality" (which has no matching layout module).
+      const contractTheme = CONTRACT_REGISTRY[themeKey];
+      const fallbackLayoutKey = contractTheme?.layout
+        ? String(contractTheme.layout).trim()
+        : (themeKey === "default_v1" ? "classic" : themeKey);
+      theme = { key: themeKey, tokens_json: {}, layout_key: fallbackLayoutKey };
+    }
   } else {
     // 2) Non-builtin themes MUST exist and be published (SaaS-grade).
     const th = await db.query(
