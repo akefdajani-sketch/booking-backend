@@ -29,10 +29,10 @@ manage themes without code changes.
 | # | Script | Status | Purpose |
 |---|--------|--------|---------|
 | 1 | `01_audit_theme_sync.js` | implemented | Read-only audit. Writes `.audit/01_audit_<ISO>.json` and `.audit/latest.json`. |
-| 2 | `02_apply_theme_sync.js` | not yet implemented | Idempotent UPSERT of audit-cleared rows. Reads `--from-audit=latest.json`. Refreshes affected tenants' snapshots. |
-| 2b | `02b_publish_theme_sync.js` (or `--publish` flag on Script 2) | not yet implemented | Flips `is_published` `FALSE → TRUE` for `classic`/`premium`/`minimal` rows after a second diff verification. |
-| 3 | `03_verify_post_sync.js` | not yet implemented | Re-snapshots all tenants and asserts zero diff for protected tenants. |
-| 4 | `04_rollback.sql` | not yet implemented | `DELETE FROM platform_themes WHERE key IN (…)` for the inserted keys. |
+| 2 | `02_apply_theme_sync.js` | implemented | Idempotent UPSERT of audit-cleared rows. Reads `--from-audit=latest.json`. Refreshes affected tenants' snapshots. Defaults to dry-run; `--apply` writes. |
+| 2b | `02b_publish_theme_sync.js` | implemented | Flips `is_published` `FALSE → TRUE` for previously-inserted unpublished rows after a fresh diff re-run against current DB state. Independent of Script 2. Defaults to dry-run; `--apply` writes. |
+| 3 | `03_verify_post_sync.js` | implemented | Re-snapshots all tenants, compares to live stored snapshots (or to a baseline file), asserts zero diff for protected tenants. Optional `--write-baseline=<file>` mode for capturing pre-apply state. |
+| 4 | `04_rollback.sql` | implemented | `DELETE FROM platform_themes WHERE key IN ('minimal', 'boutique-beauty') AND version = 1`, wrapped in a transaction with pre/post inspection queries. |
 
 ## Workflow
 
