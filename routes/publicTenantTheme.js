@@ -21,7 +21,7 @@ async function hasTenantColumn(col) {
           AND table_name = 'tenants'
           AND column_name = ANY($1::text[])
         `,
-        [["default_phone_country_code", "appearance_snapshot_published_json", "appearance_snapshot_version", "appearance_snapshot_published_at", "cover_image_url", "tax_config"]]
+        [["default_phone_country_code", "appearance_snapshot_published_json", "appearance_snapshot_version", "appearance_snapshot_published_at", "cover_image_url", "tax_config", "shell_key", "layout_key_v2"]]
       );
       __tenantColCache = new Set(r.rows.map((x) => x.column_name));
     } catch {
@@ -133,8 +133,17 @@ router.get("/:slug", async (req, res) => {
     ? "tax_config"
     : "NULL::jsonb AS tax_config";
 
+  // Phase 5.2 — schema-compat selectors for the two new optional tenant columns.
+  // NULL fallback when running against an env that hasn't applied migration 070 yet.
+  const shellKeySel = (await hasTenantColumn("shell_key"))
+    ? "shell_key"
+    : "NULL::text AS shell_key";
+  const layoutKeyV2Sel = (await hasTenantColumn("layout_key_v2"))
+    ? "layout_key_v2"
+    : "NULL::text AS layout_key_v2";
+
   const t = await db.query(
-    `SELECT id, slug, theme_key, brand_overrides_json,
+    `SELECT id, slug, name, theme_key, brand_overrides_json,
             branding,
             branding_published,
             publish_status,
@@ -146,7 +155,9 @@ router.get("/:slug", async (req, res) => {
             banner_home_url, banner_book_url, banner_account_url, banner_reservations_url, banner_memberships_url,
             logo_url, cover_image_url,
             ${taxConfigSel},
-            branding_published_at
+            branding_published_at,
+            ${shellKeySel},
+            ${layoutKeyV2Sel}
      FROM tenants
      WHERE slug = $1`,
     [slug]
@@ -385,6 +396,72 @@ router.get("/:slug", async (req, res) => {
     };
   }
 
+  // ── Phase 5.2: shell + layout resolution ─────────────────────────────────
+  // Both are additive top-level blocks. Existing response shape unchanged.
+  //
+  // Shell derivation when tenant.shell_key IS NULL:
+  //   premium-hospitality / premium / premium_v1 / premium_v2 / premium_light / boutique-beauty → premium
+  //   minimal                                                                                    → minimal
+  //   everything else (classic, default_v1, …)                                                   → classic
+  //
+  // Catalog table missing (42P01) is NOT caught — a missing table means a
+  // deploy was skipped, which deserves a loud 500 rather than a silent null
+  // block. The shellBlock/layoutBlock fallback below defends against a
+  // missing SEED ROW (different failure mode than a missing table).
+  function deriveShellKey(rawThemeKey) {
+    const k = String(rawThemeKey || "").trim().toLowerCase();
+    if (k === "premium-hospitality" || k === "premium" || k === "premium_v1" ||
+        k === "premium_v2" || k === "premium_light" || k === "boutique-beauty") return "premium";
+    if (k === "minimal") return "minimal";
+    return "classic";
+  }
+
+  const effectiveShellKey =
+    (typeof tenant.shell_key === "string" && tenant.shell_key.trim())
+      ? tenant.shell_key.trim()
+      : deriveShellKey(themeKey);
+
+  const effectiveLayoutKeyV2 =
+    (typeof tenant.layout_key_v2 === "string" && tenant.layout_key_v2.trim())
+      ? tenant.layout_key_v2.trim()
+      : "legacy_default";
+
+  const shellQ = await db.query(
+    "SELECT key, name FROM platform_shells WHERE key = $1 AND is_published = TRUE LIMIT 1",
+    [effectiveShellKey]
+  );
+  const shellRow = shellQ.rows[0] || null;
+  if (!shellRow) {
+    console.warn(`[publicTenantTheme] shell '${effectiveShellKey}' not found in platform_shells (tenant: ${slug})`);
+  }
+
+  const layoutQ = await db.query(
+    "SELECT key, name, sections_json, supported_section_types_json FROM platform_layouts WHERE key = $1 AND is_published = TRUE LIMIT 1",
+    [effectiveLayoutKeyV2]
+  );
+  const layoutRow = layoutQ.rows[0] || null;
+  if (!layoutRow) {
+    console.warn(`[publicTenantTheme] layout '${effectiveLayoutKeyV2}' not found in platform_layouts (tenant: ${slug})`);
+  }
+
+  const shellBlock = shellRow
+    ? { key: shellRow.key, name: shellRow.name }
+    : { key: effectiveShellKey, name: null };
+
+  const layoutBlock = layoutRow
+    ? {
+        key: layoutRow.key,
+        name: layoutRow.name,
+        sections_json: layoutRow.sections_json || [],
+        supported_section_types_json: layoutRow.supported_section_types_json || [],
+      }
+    : {
+        key: effectiveLayoutKeyV2,
+        name: null,
+        sections_json: [],
+        supported_section_types_json: [],
+      };
+
   res.json({
     ok: true,
     tenantSlug: tenant.slug,
@@ -396,6 +473,13 @@ router.get("/:slug", async (req, res) => {
     tenant: {
       id: tenant.id,
       slug: tenant.slug,
+      // PATCH 121 (tenant title hydration): expose tenants.name on
+      // the public payload so the Next.js /book/[slug] route's
+      // generateMetadata can render "Book online — Birdie Golf"
+      // instead of "...— birdie-golf". tenants.name is NOT NULL
+      // (migration 001), but we still null-coalesce for defense
+      // in depth.
+      name: tenant.name || null,
       logo_url: tenant.logo_url,
       cover_image_url: tenant.cover_image_url || null,
       // PR 131 — forward tenant tax_config so the public booking UI can
@@ -428,6 +512,8 @@ router.get("/:slug", async (req, res) => {
       layout_key: theme.layout_key || "classic",
       tokens: theme.tokens_json || {},
     },
+    shell: shellBlock,
+    layout: layoutBlock,
   });
 });
 
