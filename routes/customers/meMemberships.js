@@ -184,7 +184,7 @@ router.get(
   async (req, res) => {
     try {
       const tenantId = req.tenantId;
-      const email = req.user?.email;
+      const email = req.googleUser?.email;
       const membershipId = Number(req.params.id);
 
       if (!tenantId) return res.status(400).json({ error: "Missing tenant" });
