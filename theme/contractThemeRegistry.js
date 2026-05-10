@@ -1,12 +1,16 @@
 // theme/contractThemeRegistry.js
 // ============================================================
-// Phase 1.7-B (2026-05-10) — Backend Contract Theme Registry
+// Backend Contract Theme Registry — Phase 3.1 superset (2026-05-10)
 // ============================================================
 //
-// Backend-side mirror of `lib/theme/themes/{classic,premium,minimal}.ts`
-// from the frontend. This is **values-only duplication** — necessary because
-// the snapshot publisher runs in Node and can't import TypeScript modules
-// from the frontend repo.
+// Backend-side mirror of `lib/theme/themes/*.ts` from the frontend.
+// This is **values-only duplication** — necessary because the snapshot
+// publisher runs in Node and can't import TypeScript modules from the
+// frontend repo.
+//
+// Layered patches reflected:
+//   1.7-B — classic + premium + minimal added (Phase 1 baseline)
+//   3.1   — premium-hospitality added (this superset)
 //
 // Drift policy:
 //   When a theme value changes in the frontend (`lib/theme/themes/*.ts`),
@@ -15,11 +19,14 @@
 //   set of fixture tenants and fail on drift.
 //
 // What's captured:
-//   Three themes — `classic`, `premium`, `minimal` — covering 17/25 active
-//   tenants today (premium 7, premium_v1 7 → premium, premium_v2 2 → premium,
-//   classic 1). The remaining 8 (premium_light + 7 drafts) get null from
-//   the contract publisher and the frontend gracefully falls back to legacy
-//   `--bf-*` only.
+//   Four themes — `classic`, `premium`, `minimal`, `premium-hospitality`.
+//   Phase 1.7-B covered the first three (17/25 active tenants).
+//   Phase 3.1 adds premium-hospitality, dormant until Phase 3.2 migrates
+//   Birdie from `premium` to `premium-hospitality`. The remaining 5
+//   THEMES-V2 themes (calm-clinical, marketplace-listings, boutique-beauty,
+//   artisan-kitchen, modern-minimal) ship in Phase 4. premium_light and
+//   draft tenants continue getting null from the contract publisher and
+//   the frontend gracefully falls back to legacy `--bf-*` only.
 //
 // Color tokens are values that the publisher will OVERRIDE with brand-
 // overrides-applied `--bf-*` resolved values (so Birdie's gold accent flows
@@ -281,12 +288,104 @@ const minimalTheme = {
   },
 };
 
+// ── Premium Hospitality theme (Phase 3.1) ──────────────────────────────────
+//
+// Anchor: Birdie Golf (post Phase 3.2 migration).
+// Vertical: golf clubs, hotels, high-end venues.
+// Mood: immersive, refined, confident, photo-led, hospitable.
+//
+// Color tokens here are DEFAULTS — the publisher overrides them with the
+// tenant's brand_overrides_applied --bf-* values (Birdie's gold flows
+// through --bf-brand-primary → --color-accent). The defaults below render
+// for tenants on this theme who don't have brand overrides set.
+//
+// NOTE: this theme inlines `lineHeight` and `letterSpacing` rather than
+// using SHARED_LINE_HEIGHT/SHARED_LETTER_SPACING because the spec values
+// (lineHeight.tight 1.15, letterSpacing.tight -0.01em) diverge from the
+// SHARED constants (1.1, -0.02em). Pre-existing FE/BE drift on classic/
+// premium/minimal is not propagated forward into new themes — for
+// premium-hospitality the FE and BE values match exactly.
+
+const premiumHospitalityTheme = {
+  key: "premium-hospitality",
+  name: "Premium Hospitality",
+  layout: "premium",
+  allowsAccentOverride: false,
+  recommendedFlowPreset: "date-first",
+
+  color: {
+    bg: "#0A0E1A",
+    bgSubtle: "#11172A",
+    surface: "#1A2138",
+    surfaceRaised: "#1A2138",
+    border: "#243049",
+    borderStrong: "#3A4868",
+    text: "#F5F1E8",
+    textMuted: "#A8B0C2",
+    textInverse: "#0A0E1A",
+    accent: "#C9A961",
+    accentHover: "#D4B872",
+    accentText: "#0A0E1A",
+    secondaryAccent: "#C9A961",
+    secondaryAccentHover: "#D4B872",
+    secondaryAccentText: "#0A0E1A",
+    success: "#6B9F71",
+    successText: "#F5F1E8",
+    warning: "#D4A547",
+    warningText: "#0A0E1A",
+    danger: "#C25B5B",
+    dangerText: "#F5F1E8",
+    overlay: "rgba(10, 14, 26, 0.75)",
+    focusRing: "#C9A961",
+  },
+  space: SHARED_SPACE,
+  radius: { none: "0", sm: "4px", md: "8px", lg: "12px", xl: "16px", "2xl": "24px", pill: "9999px" },
+  font: {
+    display: "\"Cormorant Garamond\", \"Lora\", Georgia, serif",
+    body: "Inter, \"DM Sans\", -apple-system, BlinkMacSystemFont, sans-serif",
+    mono: "\"JetBrains Mono\", \"SF Mono\", Consolas, monospace",
+  },
+  fontSize: {
+    xs: "12px", sm: "14px", base: "16px", lg: "18px", xl: "20px",
+    "2xl": "24px", "3xl": "30px", "4xl": "36px", "5xl": "48px", "6xl": "60px",
+  },
+  fontWeight: SHARED_FONT_WEIGHT,
+  // Spec-exact lineHeight (diverges from SHARED — see header note).
+  lineHeight: {
+    tight: "1.15",
+    snug: "1.2",
+    normal: "1.55",
+    relaxed: "1.625",
+    loose: "1.75",
+  },
+  // Spec-exact letterSpacing (diverges from SHARED — see header note).
+  letterSpacing: {
+    tight: "-0.01em",
+    normal: "0",
+    wide: "0.02em",
+  },
+  shadow: {
+    none: "none",
+    sm: "0 1px 2px rgba(0, 0, 0, 0.3)",
+    md: "0 4px 8px rgba(0, 0, 0, 0.35)",
+    lg: "0 8px 24px rgba(0, 0, 0, 0.4)",
+    xl: "0 16px 48px rgba(0, 0, 0, 0.5)",
+  },
+  motion: SHARED_MOTION,  // happens to match spec exactly (150/250/400)
+  z: SHARED_Z,
+  landing: {
+    density: "comfortable", heroVariant: "immersive", cardEmphasis: "medium",
+    sectionChrome: "soft", motionLevel: "subtle", dividerStyle: "gradient", showPattern: false,
+  },
+};
+
 // ── Registry exports ───────────────────────────────────────────────────────
 
 const REGISTRY = {
   classic: classicTheme,
   premium: premiumTheme,
   minimal: minimalTheme,
+  "premium-hospitality": premiumHospitalityTheme,
 };
 
 /**
