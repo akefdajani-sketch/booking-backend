@@ -654,4 +654,15 @@ async function writeTenantAppearanceSnapshot(tenantId) {
   return snapshot;
 }
 
-module.exports = { resolveTenantAppearanceSnapshot, writeTenantAppearanceSnapshot };
+module.exports = {
+  resolveTenantAppearanceSnapshot,
+  writeTenantAppearanceSnapshot,
+  // Phase 5.1 — exported for scripts/themes_v2 audit harness. Additive, no
+  // behavior change. The audit needs to dry-run the same composition the
+  // resolver runs in production, with platformTokens swapped in JS memory.
+  buildResolvedCssVars,
+  resolveLayoutKey,
+  isPremiumFamily,
+  toObj,
+  isFlatCssVarMap,
+};
