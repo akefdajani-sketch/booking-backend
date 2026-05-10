@@ -52,7 +52,7 @@ CREATE TABLE IF NOT EXISTS platform_themes (
 );
 
 COMMENT ON TABLE platform_themes IS
-  'Platform-managed theme catalog. Tenants reference rows via tenants.theme_key. Captured into a CREATE TABLE migration in Phase 5.1.5; previously provisioned out-of-band.';
+  'Platform-managed theme catalog. Tenants reference rows via tenants.theme_key. Captured as a schema-creation migration in Phase 5.1.5; previously provisioned out-of-band.';
 
 -- Phase 5.1.5 orphan cleanup
 DELETE FROM platform_themes WHERE key = 'premuim_light_v2';
