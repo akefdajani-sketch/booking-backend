@@ -15,7 +15,7 @@
 //   Add as a pre-start script or run manually via:
 //   DATABASE_URL=... node scripts/migrate.js
 
-require('dotenv').config({ path: '.env' });
+try { require('dotenv').config({ path: '.env' }); } catch { /* dotenv not installed (Render production) — env injected directly */ }
 
 const path = require('path');
 const fs   = require('fs');

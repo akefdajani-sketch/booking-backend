@@ -1,6 +1,6 @@
 // theme/contractThemeRegistry.js
 // ============================================================
-// Backend Contract Theme Registry — Phase 3.1 superset (2026-05-10)
+// Backend Contract Theme Registry — Phase 3.3 superset (2026-05-10)
 // ============================================================
 //
 // Backend-side mirror of `lib/theme/themes/*.ts` from the frontend.
@@ -10,7 +10,8 @@
 //
 // Layered patches reflected:
 //   1.7-B — classic + premium + minimal added (Phase 1 baseline)
-//   3.1   — premium-hospitality added (this superset)
+//   3.1   — premium-hospitality added
+//   3.3   — boutique-beauty added (this superset)
 //
 // Drift policy:
 //   When a theme value changes in the frontend (`lib/theme/themes/*.ts`),
@@ -19,14 +20,16 @@
 //   set of fixture tenants and fail on drift.
 //
 // What's captured:
-//   Four themes — `classic`, `premium`, `minimal`, `premium-hospitality`.
+//   Five themes — `classic`, `premium`, `minimal`, `premium-hospitality`,
+//   `boutique-beauty`.
 //   Phase 1.7-B covered the first three (17/25 active tenants).
-//   Phase 3.1 adds premium-hospitality, dormant until Phase 3.2 migrates
-//   Birdie from `premium` to `premium-hospitality`. The remaining 5
-//   THEMES-V2 themes (calm-clinical, marketplace-listings, boutique-beauty,
-//   artisan-kitchen, modern-minimal) ship in Phase 4. premium_light and
-//   draft tenants continue getting null from the contract publisher and
-//   the frontend gracefully falls back to legacy `--bf-*` only.
+//   Phase 3.1 added premium-hospitality (Birdie migrated in 3.2).
+//   Phase 3.3 adds boutique-beauty, dormant until Phase 3.4 creates
+//   Studio Nur as the Malaysia GTM demo tenant. The remaining 4 THEMES-V2
+//   themes (calm-clinical, marketplace-listings, artisan-kitchen,
+//   modern-minimal) ship in Phase 4. premium_light and draft tenants
+//   continue getting null from the contract publisher and the frontend
+//   gracefully falls back to legacy `--bf-*` only.
 //
 // Color tokens are values that the publisher will OVERRIDE with brand-
 // overrides-applied `--bf-*` resolved values (so Birdie's gold accent flows
@@ -379,6 +382,99 @@ const premiumHospitalityTheme = {
   },
 };
 
+// ── Boutique Beauty theme (Phase 3.3) ──────────────────────────────────────
+//
+// Anchor: Studio Nur (Malaysia GTM demo, created in Phase 3.4 — dormant
+// until then).
+// Vertical: beauty salons, spas, Muslimah studios, nail/brow/lash, hair,
+// mehndi, esthetics — taste-driven personal services.
+// Mood: polished, warm, modern, considered, versatile (Muslimah-compatible).
+//
+// Color tokens here are DEFAULTS — the publisher overrides them with the
+// tenant's brand_overrides_applied --bf-* values when a tenant uses
+// brand_overrides. Different from premium-hospitality:
+// `allowsAccentOverride: true` — tenants on this theme are encouraged to
+// supply their own accent (per spec §Risks: mauve-burgundy may read as too
+// dark for younger Muslimah demographic).
+//
+// LIGHT THEME — first contract-pipeline light theme. Shadow base is
+// rgba(44, 36, 32, ...) (charcoal-brown text color) NOT rgba(0, 0, 0, ...)
+// to keep card edges warm-toned on the cream surface.
+//
+// NOTE: this theme inlines `lineHeight` rather than using SHARED_LINE_HEIGHT
+// because the spec value (lineHeight.normal 1.6) diverges from SHARED (1.5)
+// for editorial breathing room. `letterSpacing` matches SHARED so we use it.
+
+const boutiqueBeautyTheme = {
+  key: "boutique-beauty",
+  name: "Boutique Beauty",
+  layout: "premium",
+  allowsAccentOverride: true,
+  recommendedFlowPreset: "service-first",
+
+  color: {
+    bg: "#FAF6F1",
+    bgSubtle: "#F2EBE2",
+    surface: "#FFFFFF",
+    surfaceRaised: "#FFFFFF",
+    border: "#E8DDD0",
+    borderStrong: "#C4A99D",
+    text: "#2C2420",
+    textMuted: "#7A6A5F",
+    textInverse: "#FAF6F1",
+    accent: "#7B3F4F",
+    accentHover: "#8E4A5C",
+    accentText: "#FAF6F1",
+    secondaryAccent: "#7B3F4F",
+    secondaryAccentHover: "#8E4A5C",
+    secondaryAccentText: "#FAF6F1",
+    success: "#7A8A5A",
+    successText: "#FAF6F1",
+    warning: "#C9954C",
+    warningText: "#2C2420",
+    danger: "#A04A4A",
+    dangerText: "#FAF6F1",
+    overlay: "rgba(44, 36, 32, 0.55)",
+    focusRing: "#7B3F4F",
+  },
+  space: SHARED_SPACE,
+  radius: { none: "0", sm: "4px", md: "8px", lg: "12px", xl: "16px", "2xl": "24px", pill: "9999px" },
+  font: {
+    display: "\"Playfair Display\", \"Cormorant Garamond\", Georgia, serif",
+    body: "Inter, \"DM Sans\", -apple-system, BlinkMacSystemFont, sans-serif",
+    mono: "\"JetBrains Mono\", \"SF Mono\", Consolas, monospace",
+  },
+  fontSize: {
+    xs: "12px", sm: "14px", base: "16px", lg: "18px", xl: "20px",
+    "2xl": "24px", "3xl": "30px", "4xl": "36px", "5xl": "48px", "6xl": "60px",
+  },
+  fontWeight: SHARED_FONT_WEIGHT,
+  // Spec-exact lineHeight: normal=1.6 (vs SHARED 1.5) — boutique editorial.
+  lineHeight: {
+    tight: "1.1",
+    snug: "1.2",
+    normal: "1.6",
+    relaxed: "1.625",
+    loose: "1.75",
+  },
+  // letterSpacing matches SHARED exactly (tight: -0.02em, normal: 0, wide: 0.02em).
+  letterSpacing: SHARED_LETTER_SPACING,
+  // LIGHT-theme shadows — charcoal-brown rgba base, NOT rgba(0,0,0).
+  shadow: {
+    none: "none",
+    sm: "0 1px 2px rgba(44, 36, 32, 0.05)",
+    md: "0 4px 12px rgba(44, 36, 32, 0.08)",
+    lg: "0 10px 30px rgba(44, 36, 32, 0.10)",
+    xl: "0 24px 70px rgba(44, 36, 32, 0.18)",
+  },
+  motion: SHARED_MOTION,
+  z: SHARED_Z,
+  landing: {
+    density: "comfortable", heroVariant: "split", cardEmphasis: "medium",
+    sectionChrome: "soft", motionLevel: "subtle", dividerStyle: "gradient", showPattern: false,
+  },
+};
+
 // ── Registry exports ───────────────────────────────────────────────────────
 
 const REGISTRY = {
@@ -386,6 +482,7 @@ const REGISTRY = {
   premium: premiumTheme,
   minimal: minimalTheme,
   "premium-hospitality": premiumHospitalityTheme,
+  "boutique-beauty": boutiqueBeautyTheme,
 };
 
 /**
