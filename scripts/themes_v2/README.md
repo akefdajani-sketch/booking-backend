@@ -124,3 +124,33 @@ Backlog items captured during Phase 5.1:
    since it's not in the allow-list — meaning the row predates 067 and
    has been orphaned). **DELETE the orphaned row as part of 5.1.5** —
    single migration captures schema AND removes orphan.
+
+   _Status as of Phase 5.2: BOTH addressed in `migrations/069_themes_v2_platform_themes_capture.sql` (CREATE TABLE IF NOT EXISTS + DELETE WHERE key='premuim_light_v2'). 5.1.5 is closed._
+
+## Known schema drift (NOT Phase 5.2)
+
+Phase 5.2's apply step surfaced two migration files whose ALTER TABLE
+statements have never landed on production despite being committed to the
+repo. Their `schema_migrations` entries were deliberately omitted, so
+`npm run migrate:dry` will keep flagging them until each gets a triage
+session of its own.
+
+- **Migration 052 (`052_tenant_notification_toggles.sql`)** — adds 8
+  per-event SMS + WhatsApp toggle columns to `tenants` (`sms_confirmations_enabled`,
+  `sms_reminder_24h_enabled`, …, `wa_cancellations_enabled`). File present,
+  schema not applied, `schema_migrations` entry deliberately omitted.
+  `utils/notificationGates.js` references these columns; behaviour on
+  prod is currently unknown — could be silent failure, defensive
+  fallback, or unexercised code path. Triage required in its own session.
+
+- **Migration 055 (`055_customer_booking_emails.sql`)** — adds 4 per-event
+  email toggle columns to `tenants` (`email_confirmations_enabled`,
+  `email_reminder_24h_enabled`, …, `email_cancellations_enabled`) plus
+  2 reminder dedup stamps to `bookings` (`email_reminder_sent_24h`,
+  `email_reminder_sent_1h`). Same status as 052: file present, schema
+  not applied, `schema_migrations` entry deliberately omitted. Same
+  triage owner.
+
+Both are **NOT** Phase 5.2 problems — they predate Phase 5 entirely. The
+deliberate omission keeps them visible in the migrate runner so they
+don't stay invisible until production breaks.
