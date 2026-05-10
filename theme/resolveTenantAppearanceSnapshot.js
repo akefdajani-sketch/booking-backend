@@ -1,5 +1,6 @@
 const db = require("../db");
 const { schemaToCssVars } = require("./resolveThemeSchema");
+const { buildResolvedContractCssVars } = require("./buildResolvedContractCssVars");
 
 function toObj(v) {
   if (!v) return {};
@@ -548,6 +549,16 @@ async function resolveTenantAppearanceSnapshot(tenantId) {
     preservePremiumGlass: String(themeKey).toLowerCase() === "premium_v2",
   });
 
+  // Phase 1.7-B (2026-05-10): emit canonical contract CSS vars alongside
+  // legacy --bf-* for Phase 1+ primitives. Brand_overrides flow through
+  // automatically because resolvedCssVars is already brand-overrides-applied.
+  // Returns null for theme keys not in the contract registry; frontend falls
+  // back to registry defaults in that case.
+  const resolvedContractCssVars = buildResolvedContractCssVars({
+    themeKey,
+    resolvedCssVars,
+  });
+
   const brandingAssets = toObj(branding.assets);
   const brandingBanners = toObj(brandingAssets.banners);
   const assets = {
@@ -583,6 +594,7 @@ async function resolveTenantAppearanceSnapshot(tenantId) {
     brandOverrides,
     themeStudioTokens,
     resolvedCssVars,
+    resolvedContractCssVars,
     landing: {
       showPattern: premiumFamily,
       patternStyle: premiumFamily ? "premium-grid-subtle" : "none",
