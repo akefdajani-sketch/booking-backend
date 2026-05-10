@@ -143,7 +143,7 @@ router.get("/:slug", async (req, res) => {
     : "NULL::text AS layout_key_v2";
 
   const t = await db.query(
-    `SELECT id, slug, theme_key, brand_overrides_json,
+    `SELECT id, slug, name, theme_key, brand_overrides_json,
             branding,
             branding_published,
             publish_status,
@@ -473,6 +473,13 @@ router.get("/:slug", async (req, res) => {
     tenant: {
       id: tenant.id,
       slug: tenant.slug,
+      // PATCH 121 (tenant title hydration): expose tenants.name on
+      // the public payload so the Next.js /book/[slug] route's
+      // generateMetadata can render "Book online — Birdie Golf"
+      // instead of "...— birdie-golf". tenants.name is NOT NULL
+      // (migration 001), but we still null-coalesce for defense
+      // in depth.
+      name: tenant.name || null,
       logo_url: tenant.logo_url,
       cover_image_url: tenant.cover_image_url || null,
       // PR 131 — forward tenant tax_config so the public booking UI can
