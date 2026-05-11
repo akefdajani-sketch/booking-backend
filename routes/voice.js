@@ -47,6 +47,7 @@ const fetchBusinessContext  = aiRoutes.fetchBusinessContext;
 const fetchCustomerData     = aiRoutes.fetchCustomerData;
 const handleAction          = aiRoutes.handleAction;
 const isConfirmationMessage = aiRoutes.isConfirmationMessage;
+const hasRecentPendingBooking = aiRoutes.hasRecentPendingBooking;
 const optionalAuth          = aiRoutes.optionalAuth;
 
 const VOICE_MAX_SESSION_SECONDS = 30 * 60; // 30-min hard cap per call
@@ -269,7 +270,7 @@ router.post("/:tenantSlug/booking-assistant", optionalAuth, async (req, res) => 
     // detector for safety.
     const confirmationMode = (typeof isConfirming === "boolean")
       ? isConfirming
-      : isConfirmationMessage(query);
+      : (isConfirmationMessage(query) && hasRecentPendingBooking(history));
 
     const { reply, action } = await runSupportAgent({
       tenantContext: { ...tenant, ...businessContext },
