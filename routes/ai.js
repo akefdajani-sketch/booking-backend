@@ -105,6 +105,32 @@ function isConfirmationMessage(msg) {
   return patterns.some(p => clean === p || clean.startsWith(p + " ") || clean === "yes confirm it");
 }
 
+// Gate for isConfirmationMessage: only treat a "yes/ok/sure"-style reply as a
+// booking confirmation when the prior assistant turn actually looked like a
+// proposal awaiting yes/no. Without this, openers like "ok book sim 3 tonight"
+// flip confirmationMode on turn 1 and the model is told to skip PENDING_BOOKING.
+//
+// English-only for now. Arabic-side gating is a follow-up: this helper falls
+// open (returns false) for Arabic proposal turns, so the fallback path will
+// under-trigger rather than over-trigger for Arabic — which is the safer
+// failure mode (no false confirmations; at worst the model asks again).
+function hasRecentPendingBooking(history) {
+  if (!Array.isArray(history) || history.length === 0) return false;
+  let lastAssistant = null;
+  for (let i = history.length - 1; i >= 0; i--) {
+    const m = history[i];
+    if (m && m.role === "assistant" && typeof m.content === "string") {
+      lastAssistant = m.content;
+      break;
+    }
+  }
+  if (!lastAssistant) return false;
+  const trimmed = lastAssistant.trim();
+  const endsWithQuestion = /\?\s*$/.test(trimmed);
+  const hasConfirmWord = /\b(confirm|shall i|book it|proceed|go ahead)\b/i.test(lastAssistant);
+  return endsWithQuestion && hasConfirmWord;
+}
+
 
 // ── Optional auth — sets req.googleUser/req.auth when token present, never blocks ──
 function optionalAuth(req, res, next) {
@@ -1113,7 +1139,7 @@ router.post("/:tenantSlug/chat", optionalAuth, async (req, res) => {
       return res.json({ reply: directReply, action: directResult });
     }
 
-    const isConfirmation = isConfirmationMessage(message);
+    const isConfirmation = isConfirmationMessage(message) && hasRecentPendingBooking(history);
     const { reply, action } = await runSupportAgent({
       tenantContext: { ...tenant, ...businessContext },
       customerData,
@@ -1337,4 +1363,5 @@ module.exports.fetchBusinessContext   = fetchBusinessContext;
 module.exports.fetchCustomerData      = fetchCustomerData;
 module.exports.handleAction           = handleAction;
 module.exports.isConfirmationMessage  = isConfirmationMessage;
+module.exports.hasRecentPendingBooking = hasRecentPendingBooking;
 module.exports.optionalAuth           = optionalAuth;
