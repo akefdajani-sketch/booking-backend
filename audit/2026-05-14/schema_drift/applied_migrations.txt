@@ -1,0 +1,94 @@
+schema_migrations — full contents, prod DB, captured 2026-05-14
+Query: SELECT id, filename, applied_at FROM schema_migrations ORDER BY filename ASC;
+Row count: 67
+
+id    filename                                              applied_at
+----  ----------------------------------------------------  ------------------------
+1     001_core_tables.sql                                   2026-04-23T15:34:04.895Z
+2     002_rbac_links_memberships.sql                        2026-04-23T15:34:04.895Z
+3     003_saas_billing_booking_columns.sql                  2026-04-23T15:34:04.895Z
+4     004_stripe_customer_id.sql                            2026-04-23T15:34:04.895Z
+5     005_soft_delete.sql                                   2026-04-23T15:34:04.895Z
+6     006_patch_invoice_columns.sql                         2026-04-23T15:34:04.895Z
+7     007_bookings_soft_delete.sql                          2026-04-23T15:34:04.895Z
+8     008_service_hours.sql                                 2026-04-23T15:34:04.895Z
+9     009_service_hours_overnight.sql                       2026-04-23T15:34:04.895Z
+10    010_service_min_slots.sql                             2026-04-23T15:34:04.895Z
+11    011_add_tenant_appearance_snapshot.sql                2026-04-23T15:34:04.895Z
+12    012_drop_booking_range_exclude.sql                    2026-04-23T15:34:04.895Z
+13    013_seed_premium_v2.sql                               2026-04-23T15:34:04.895Z
+14    014_service_categories.sql                            2026-04-23T15:34:04.895Z
+15    015_media_library.sql                                 2026-04-23T15:34:04.895Z
+16    016_service_closed_days.sql                           2026-04-23T15:34:04.895Z
+17    017_network_payments.sql                              2026-04-23T15:34:04.895Z
+18    018_tenant_payment_credentials.sql                    2026-04-23T15:34:04.895Z
+19    019_payment_methods.sql                               2026-04-23T15:34:04.895Z
+20    020_staff_profile_fields.sql                          2026-04-23T15:34:04.895Z
+21    021_rate_rules_membership_package.sql                 2026-04-23T15:34:04.895Z
+22    022_rate_rules_any_flags.sql                          2026-04-23T15:34:04.895Z
+23    023_property_rental_and_gallery.sql                   2026-04-23T15:34:04.895Z
+24    024_nightly_rental_suite.sql                          2026-04-23T15:34:04.895Z
+25    025_publish_history.sql                               2026-04-23T15:34:04.895Z
+26    026_booking_code_system.sql                           2026-04-23T15:34:04.895Z
+27    027_rental_unit_management.sql                        2026-04-23T15:34:04.895Z
+28    028_rental_payment_links.sql                          2026-04-23T15:34:04.895Z
+29    029_tenant_whatsapp_credentials.sql                   2026-04-23T15:34:04.895Z
+30    030_payment_link_reminders.sql                        2026-04-23T15:34:04.895Z
+31    031_tax_service_charge.sql                            2026-04-23T15:34:04.895Z
+32    032_maintenance_tickets.sql                           2026-04-23T15:34:04.895Z
+33    033_lease_renewal_contracts.sql                       2026-04-23T15:34:04.895Z
+34    034_customer_avatar.sql                               2026-04-23T15:34:04.895Z
+35    035_tenant_domains_verification.sql                   2026-04-23T15:34:04.895Z
+36    036_tenant_twilio_credentials.sql                     2026-04-23T15:34:04.895Z
+37    037_dashboard_performance_indexes.sql                 2026-04-23T15:34:04.895Z
+38    038_demo_tenant_flag.sql                              2026-04-23T15:34:04.895Z
+39    039_saas_plans_stripe_and_display.sql                 2026-04-23T15:34:04.895Z
+40    040_seed_saas_plans_and_features.sql                  2026-04-23T15:34:04.895Z
+41    041_grandfather_tenant_subscriptions.sql              2026-04-23T15:34:04.895Z
+42    042_booking_reminder_columns.sql                      2026-04-23T15:34:04.895Z
+43    043_whatsapp_reminder_columns.sql                     2026-04-23T15:34:04.895Z
+44    044_payment_schedule_templates.sql                    2026-04-23T15:36:33.633Z
+45    045_contracts.sql                                     2026-04-23T15:36:33.633Z
+46    046_contract_invoices.sql                             2026-04-23T15:36:33.633Z
+47    047_bookings_contract_link.sql                        2026-04-23T15:36:33.633Z
+48    048_seed_platform_payment_templates.sql               2026-04-23T15:36:33.633Z
+49    049_tenants_contract_columns.sql                      2026-04-23T15:36:33.633Z
+99    050_contract_invoice_reminders_and_renewal.sql        2026-04-26T00:15:12.711Z
+100   051_classes_g1.sql                                    2026-04-26T00:15:17.822Z
+101   053_trial_warning_timestamp.sql                       2026-05-10T20:50:53.681Z
+102   054_email_log.sql                                     2026-05-10T20:50:53.681Z
+103   056_contract_schedule_fix.sql                         2026-05-10T20:50:53.681Z
+104   057_contract_invoice_payment_links.sql                2026-05-10T20:50:53.681Z
+105   058_contract_invoice_reminder_windows.sql             2026-05-10T20:50:53.681Z
+106   059_tenant_voice_instructions.sql                     2026-05-10T20:50:53.681Z
+107   061_services_is_long_term.sql                         2026-05-10T20:50:53.681Z
+108   062_bookings_payment_method_check.sql                 2026-05-10T20:50:53.681Z
+109   063_backfill_payment_method.sql                       2026-05-10T20:50:53.681Z
+110   064_payment_status.sql                                2026-05-10T20:50:53.681Z
+111   065_schema_cleanup.sql                                2026-05-10T20:50:53.681Z
+112   066_tenants_voice_prompt_snapshot.sql                 2026-05-10T20:50:53.681Z
+113   067_themes_v2_tenant_theme_key_constraint.sql         2026-05-10T20:50:53.681Z
+114   068_themes_v2_booking_flow_preset.sql                 2026-05-10T20:50:53.681Z
+115   069_themes_v2_platform_themes_capture.sql             2026-05-10T20:50:53.681Z
+116   070_themes_v2_shells_layouts.sql                      2026-05-10T20:50:53.681Z
+
+NOT in schema_migrations (file exists in repo):
+  052_tenant_notification_toggles.sql
+  055_customer_booking_emails.sql
+
+In schema_migrations but file missing from repo:
+  (none)
+
+Notes on the id column:
+  - ids 1-49 are contiguous (initial bulk load 2026-04-23).
+  - id jumps 49 -> 99 for migration 050. The SERIAL sequence burned ~49
+    values between the 2026-04-23 and 2026-04-26 batches — consistent with
+    a failed/aborted migration run or manual sequence manipulation. It does
+    NOT indicate missing migration records: `filename` is the UNIQUE key and
+    every numbered file 001-070 (except the 052/055 skips and the 060 gap)
+    is present exactly once.
+  - applied_at timeline:
+      001-043  2026-04-23 15:34   (initial schema)
+      044-049  2026-04-23 15:36   (contracts batch)
+      050-051  2026-04-26 00:15
+      053-070  2026-05-10 20:50   (16-migration catch-up batch)
