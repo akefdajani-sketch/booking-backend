@@ -20,9 +20,8 @@ const {
   buildTenantMediaKey,
   uploadBufferToR2,
 } = require('../utils/r2');
-
-// TODO: replace with your real auth middleware.
-// const { requireTenantEditor } = require('../middleware/auth');
+const requireAdminOrTenantRole = require('../middleware/requireAdminOrTenantRole');
+const { setTenantIdFromParam } = require('../utils/adminTenantsThemeHelpers');
 
 const upload = multer({ storage: multer.memoryStorage() });
 
@@ -38,7 +37,7 @@ function parseEntityId(value) {
   return Number.isFinite(n) ? n : null;
 }
 
-router.post('/:tenantId/assets', upload.single('file'), async (req, res, next) => {
+router.post('/:tenantId/assets', setTenantIdFromParam, requireAdminOrTenantRole('staff'), upload.single('file'), async (req, res, next) => {
   try {
     const tenantId = parseTenantId(req);
     const file = req.file;
@@ -85,7 +84,7 @@ router.post('/:tenantId/assets', upload.single('file'), async (req, res, next) =
   }
 });
 
-router.get('/:tenantId/assets', async (req, res, next) => {
+router.get('/:tenantId/assets', setTenantIdFromParam, requireAdminOrTenantRole('staff'), async (req, res, next) => {
   try {
     const tenantId = parseTenantId(req);
     const limit = req.query.limit ? Number(req.query.limit) : 24;
@@ -106,7 +105,7 @@ router.get('/:tenantId/assets', async (req, res, next) => {
   }
 });
 
-router.patch('/:tenantId/assets/:assetId', async (req, res, next) => {
+router.patch('/:tenantId/assets/:assetId', setTenantIdFromParam, requireAdminOrTenantRole('staff'), async (req, res, next) => {
   try {
     const tenantId = parseTenantId(req);
     const assetId = Number(req.params.assetId);
@@ -125,7 +124,7 @@ router.patch('/:tenantId/assets/:assetId', async (req, res, next) => {
   }
 });
 
-router.delete('/:tenantId/assets/:assetId', async (req, res, next) => {
+router.delete('/:tenantId/assets/:assetId', setTenantIdFromParam, requireAdminOrTenantRole('staff'), async (req, res, next) => {
   try {
     const tenantId = parseTenantId(req);
     const assetId = Number(req.params.assetId);
@@ -136,7 +135,7 @@ router.delete('/:tenantId/assets/:assetId', async (req, res, next) => {
   }
 });
 
-router.put('/:tenantId/assign', async (req, res, next) => {
+router.put('/:tenantId/assign', setTenantIdFromParam, requireAdminOrTenantRole('staff'), async (req, res, next) => {
   try {
     const tenantId = parseTenantId(req);
     const mediaAssetId = Number(req.body.mediaAssetId);
@@ -171,7 +170,7 @@ router.put('/:tenantId/assign', async (req, res, next) => {
   }
 });
 
-router.delete('/:tenantId/assign', async (req, res, next) => {
+router.delete('/:tenantId/assign', setTenantIdFromParam, requireAdminOrTenantRole('staff'), async (req, res, next) => {
   try {
     const tenantId = parseTenantId(req);
     const entityType = req.body.entityType || req.query.entityType;
@@ -184,7 +183,7 @@ router.delete('/:tenantId/assign', async (req, res, next) => {
   }
 });
 
-router.get('/:tenantId/assignments', async (req, res, next) => {
+router.get('/:tenantId/assignments', setTenantIdFromParam, requireAdminOrTenantRole('staff'), async (req, res, next) => {
   try {
     const tenantId = parseTenantId(req);
     const items = await listMediaAssignments(db, {
