@@ -1,5 +1,7 @@
 # CLAUDE.md — booking-backend (BookFlow API)
 
+**Before any non-trivial code change, read docs/development/sustainable-file-size.md.**
+
 This is the BookFlow API. Multi-tenant booking & ops SaaS for time-based businesses (golf, gyms, salons, clinics). **`SYSTEM.md` is law — if code conflicts with it, the code is wrong.** Always read it on first session.
 
 ## Stack
