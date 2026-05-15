@@ -2,20 +2,29 @@
 
 // __tests__/bookings_create.test.js
 //
-// PR 0.1 — Test 1: happy-path timeslot booking create.
+// Integration tests for routes/bookings/create.js (1680L).
+//   Test 1  (PR 0.1) — happy-path timeslot create.
+//   Test 2  (PR 0.2) — membership auto-consume + ledger debit.
+//   Test 4  (PR 0.2) — idempotency replay (INSERT-then-catch-23505).
 //
-// This is the foundation of the Phase 1 refactor test net for
-// routes/bookings/create.js (1680L). It exercises the full request →
-// 201 pipeline for a paid timeslot service with no membership, no
-// prepaid, and no required confirmation.
-//
-// Harness forks (documented in the PR description):
+// Harness forks (documented in PR 0.1):
 //   Fork A — DB layer:      (i) full mock of ../db (transaction-aware).
 //   Fork B — Auth:          (i) mock ../middleware/requireAppAuth.
 //   Fork C — Notifications: (i) mock notification utils + gates to no-op.
 //
 // requireTenant is also stubbed directly (sets req.tenantId / req.tenantSlug).
 // It stubs cleanly with no DB read, so stop-condition #4 does not apply.
+//
+// PR 0.2 harness extensions (additive — Test 1 unchanged):
+//   - installDbMocks() now holds two closure-state counters
+//     (insertBookingsCalls, insertLedgerCalls) so the 2nd attempt at
+//     INSERT INTO bookings / membership_ledger throws 23505. Test 1
+//     only fires each once and is unaffected.
+//   - New client.query routes for the auto-consume FOR UPDATE select,
+//     the idempotency-replay SELECT, the membership_ledger INSERT, and
+//     the UPDATE customer_memberships balance recompute.
+//   - getServiceAllowMembership defaults to { allowed: true } so the
+//     eligibility guard short-circuits for Test 2 and Test 4.
 
 const express = require('express');
 const request = require('supertest');
@@ -28,6 +37,18 @@ const SERVICE_ID  = 50;
 const CUSTOMER_ID = 100;
 const SERVICE_PRICE = 25;
 const NEW_BOOKING_ID = 9001;
+
+// PR 0.2 — membership / idempotency fixtures.
+const MEMBERSHIP_ID = 200;
+const MEMBERSHIP_INITIAL_MINUTES = 600;
+const MEMBERSHIP_ROW = {
+  id: MEMBERSHIP_ID,
+  customer_id: CUSTOMER_ID,
+  minutes_remaining: MEMBERSHIP_INITIAL_MINUTES,
+  uses_remaining: 0,
+};
+const FIRST_LEDGER_ID = 8001;
+const IDEM_KEY = 'idem-test-key-1';
 
 const CUSTOMER_ROW = {
   id: CUSTOMER_ID,
@@ -183,6 +204,13 @@ const flushImmediates = () => new Promise((resolve) => setImmediate(resolve));
 // ─── DB mock routing ──────────────────────────────────────────────────────────
 
 function installDbMocks() {
+  // Closure-state counters — reset on every beforeEach via re-invocation.
+  // 1st INSERT succeeds, 2nd+ throws 23505 (Postgres unique-violation shape).
+  // Tests with one request hit the 1st-call branch only; Test 4's second
+  // request lands on the 23505 branch and drives the replay path.
+  let insertBookingsCalls = 0;
+  let insertLedgerCalls = 0;
+
   // Pool reads (db.query) — routed by SQL substring (whitespace-normalized,
   // since create.js builds multi-line template-literal SQL).
   db.query.mockImplementation(async (sql) => {
@@ -208,7 +236,50 @@ function installDbMocks() {
   db.__client.query.mockImplementation(async (sql) => {
     const s = String(sql).replace(/\s+/g, ' ').trim();
     if (s === 'BEGIN' || s === 'COMMIT' || s === 'ROLLBACK') return {};
-    if (s.includes('INSERT INTO bookings')) return { rows: [{ id: NEW_BOOKING_ID }] };
+
+    // INSERT INTO bookings — 1st succeeds, 2nd+ throws 23505 (idempotency replay).
+    if (s.includes('INSERT INTO bookings')) {
+      insertBookingsCalls++;
+      if (insertBookingsCalls === 1) return { rows: [{ id: NEW_BOOKING_ID }] };
+      const err = new Error(
+        'duplicate key value violates unique constraint "bookings_tenant_id_idempotency_key_key"',
+      );
+      err.code = '23505';
+      throw err;
+    }
+
+    // Replay-path lookup: the catch block selects the existing booking by idem key.
+    if (s.includes('SELECT id FROM bookings') && s.includes('idempotency_key')) {
+      return { rows: [{ id: NEW_BOOKING_ID }] };
+    }
+
+    // Auto-consume membership selection (FOR UPDATE) — create.js L450-469.
+    if (s.includes('FROM customer_memberships') && s.includes('FOR UPDATE')) {
+      return { rows: [{ ...MEMBERSHIP_ROW }] };
+    }
+
+    // Membership ledger debit — 1st succeeds, 2nd+ throws 23505 (swallowed by L1162-1165).
+    if (s.includes('INSERT INTO membership_ledger')) {
+      insertLedgerCalls++;
+      if (insertLedgerCalls === 1) return { rows: [{ id: FIRST_LEDGER_ID }] };
+      const err = new Error('duplicate key in membership_ledger');
+      err.code = '23505';
+      throw err;
+    }
+
+    // Balance recompute + expiry-check UPDATEs both match this branch.
+    // Balance UPDATE contains GREATEST(...) and reads its return; expiry does not.
+    if (s.includes('UPDATE customer_memberships')) {
+      return {
+        rowCount: 1,
+        rows: [{
+          id: MEMBERSHIP_ID,
+          minutes_remaining: MEMBERSHIP_INITIAL_MINUTES - 60,
+          uses_remaining: 0,
+        }],
+      };
+    }
+
     if (s.includes('UPDATE tenants')) {
       return { rows: [{ booking_seq: 79, booking_code_prefix: 'TST', slug: TENANT_SLUG }] };
     }
@@ -221,6 +292,8 @@ function installDbMocks() {
   helpers.checkBlackoutOverlap.mockResolvedValue(null);
   helpers.loadMembershipCheckoutPolicy.mockResolvedValue({});
   helpers.bumpTenantBookingChange.mockResolvedValue(undefined);
+  // PR 0.2 — membership-eligible by default. Test 1 never reaches this guard.
+  helpers.getServiceAllowMembership.mockResolvedValue({ allowed: true });
 
   checkConflicts.mockResolvedValue({ conflict: false });
   loadJoinedBookingById.mockResolvedValue({ ...JOINED_BOOKING });
@@ -302,4 +375,145 @@ test('happy path: paid timeslot booking → 201, single INSERT, COMMIT, no ledge
   expect(clientCalls.some((s) => s.includes('membership_ledger'))).toBe(false);
   expect(clientCalls.some((s) => s.includes('prepaid_redemptions'))).toBe(false);
   expect(clientCalls.some((s) => s.includes('prepaid_transactions'))).toBe(false);
+});
+
+// ─── Test 2 — membership auto-consume create ──────────────────────────────────
+
+test('membership auto-consume: paid timeslot → 201, payment_method=membership, charge_amount=0, ledger debit', async () => {
+  const app = buildApp();
+  const startTime = new Date(Date.now() + 86400000).toISOString();
+
+  const res = await request(app)
+    .post('/api/bookings')
+    .send({
+      tenantSlug: TENANT_SLUG,
+      serviceId: SERVICE_ID,
+      startTime,
+      durationMinutes: 60,
+      autoConsumeMembership: true,
+    });
+
+  await flushImmediates();
+
+  // ── HTTP contract ──
+  expect(res.status).toBe(201);
+  expect(res.body.replay).toBe(false);
+
+  const clientCalls = db.__client.query.mock.calls.map((c) => String(c[0]));
+
+  // ── INSERT INTO bookings — once, with membership shape ──
+  const insertCall = db.__client.query.mock.calls.find((c) =>
+    String(c[0]).includes('INSERT INTO bookings'),
+  );
+  expect(insertCall).toBeDefined();
+  expect(clientCalls.filter((s) => s.includes('INSERT INTO bookings'))).toHaveLength(1);
+
+  // Same column order as Test 1 (see comment above).
+  const params = insertCall[1];
+  expect(params[1]).toBe(SERVICE_ID);
+  expect(params[6]).toBe(CUSTOMER_ID);
+  expect(params[10]).toBe('confirmed');
+  expect(params[12]).toBe(MEMBERSHIP_ID);   // customer_membership_id resolved by auto-consume
+  expect(params[14]).toBe('membership');    // payment_method (derived server-side)
+  expect(params[15]).toBe('completed');     // payment_status
+  expect(params[16]).toBe(SERVICE_PRICE);   // price_amount — still the list price
+  expect(params[17]).toBe(0);               // charge_amount — covered by membership
+
+  // ── Membership ledger — INSERT once, with the expected delta ──
+  // create.js L1144-1160 param order:
+  //   [0] tenant_id [1] customer_membership_id [2] booking_id
+  //   [3] minutes_delta [4] uses_delta [5] note
+  const ledgerInsert = db.__client.query.mock.calls.find((c) =>
+    String(c[0]).includes('INSERT INTO membership_ledger'),
+  );
+  expect(ledgerInsert).toBeDefined();
+  expect(clientCalls.filter((s) => s.includes('INSERT INTO membership_ledger'))).toHaveLength(1);
+  expect(ledgerInsert[1][0]).toBe(TENANT_ID);
+  expect(ledgerInsert[1][1]).toBe(MEMBERSHIP_ID);
+  expect(ledgerInsert[1][2]).toBe(NEW_BOOKING_ID);
+  expect(ledgerInsert[1][3]).toBe(-60);     // minutes_delta = -duration
+  expect(ledgerInsert[1][4]).toBeNull();    // uses_delta = 0 → passed as null via `usesDelta || null`
+
+  // ── Balance recompute UPDATE — once. (Expiry UPDATE may also match
+  //    "UPDATE customer_memberships" — disambiguate on GREATEST.) ──
+  const balanceUpdates = clientCalls.filter(
+    (s) => s.includes('UPDATE customer_memberships') && s.includes('GREATEST'),
+  );
+  expect(balanceUpdates).toHaveLength(1);
+
+  // ── Transaction lifecycle ──
+  expect(clientCalls).toContain('BEGIN');
+  expect(clientCalls).toContain('COMMIT');
+  expect(clientCalls).not.toContain('ROLLBACK');
+
+  // ── No prepaid writes ──
+  expect(clientCalls.some((s) => s.includes('prepaid_redemptions'))).toBe(false);
+  expect(clientCalls.some((s) => s.includes('prepaid_transactions'))).toBe(false);
+});
+
+// ─── Test 4 — idempotency replay ──────────────────────────────────────────────
+//
+// Two POSTs with the same idempotency key against the membership path. The
+// second INSERT INTO bookings throws 23505; the catch at L1021-1033 SELECTs
+// the existing booking and returns it with replay:true (status 200). The
+// membership_ledger INSERT also fires twice but the second is swallowed
+// (L1162-1165), so the balance UPDATE only fires once across both requests —
+// proving "no double debit." Structure: option (a) per the brief — two
+// requests in one test so the cross-request mock call history is the
+// assertion surface.
+
+test('idempotency replay: same key on 2nd POST returns existing booking (200, replay:true), no double-debit', async () => {
+  const app = buildApp();
+  helpers.getIdempotencyKey.mockReturnValue(IDEM_KEY);
+
+  const startTime = new Date(Date.now() + 86400000).toISOString();
+  const body = {
+    tenantSlug: TENANT_SLUG,
+    serviceId: SERVICE_ID,
+    startTime,
+    durationMinutes: 60,
+    autoConsumeMembership: true,
+  };
+
+  const res1 = await request(app).post('/api/bookings').send(body);
+  await flushImmediates();
+  const res2 = await request(app).post('/api/bookings').send(body);
+  await flushImmediates();
+
+  // ── HTTP contract ──
+  expect(res1.status).toBe(201);
+  expect(res1.body.replay).toBe(false);
+  expect(res1.body.booking.id).toBe(NEW_BOOKING_ID);
+
+  expect(res2.status).toBe(200);            // replay status (create.js L1646)
+  expect(res2.body.replay).toBe(true);
+  expect(res2.body.booking.id).toBe(NEW_BOOKING_ID);
+
+  const clientCalls = db.__client.query.mock.calls.map((c) => String(c[0]));
+
+  // ── INSERT INTO bookings attempted twice; the 2nd throws 23505 inside
+  //    the handler and falls into the replay path (no extra booking row). ──
+  expect(clientCalls.filter((s) => s.includes('INSERT INTO bookings'))).toHaveLength(2);
+
+  // ── Replay-path lookup fires exactly once, on the 2nd request only. ──
+  expect(
+    clientCalls.filter((s) => s.includes('SELECT id FROM bookings') && s.includes('idempotency_key')),
+  ).toHaveLength(1);
+
+  // ── Ledger: INSERT attempted twice, balance UPDATE only on the 1st
+  //    request (the 2nd ledger INSERT throws 23505 → ledgerInserted stays
+  //    false → balance UPDATE is skipped). This is the "no double-debit"
+  //    invariant. ──
+  expect(
+    clientCalls.filter((s) => s.includes('INSERT INTO membership_ledger')),
+  ).toHaveLength(2);
+  expect(
+    clientCalls.filter((s) => s.includes('UPDATE customer_memberships') && s.includes('GREATEST')),
+  ).toHaveLength(1);
+
+  // ── Transaction lifecycle — both requests committed, never rolled back. ──
+  expect(clientCalls.filter((s) => s === 'BEGIN')).toHaveLength(2);
+  expect(clientCalls.filter((s) => s === 'COMMIT')).toHaveLength(2);
+  expect(clientCalls.filter((s) => s === 'ROLLBACK')).toHaveLength(0);
+  expect(db.__client.release).toHaveBeenCalledTimes(2);
 });
