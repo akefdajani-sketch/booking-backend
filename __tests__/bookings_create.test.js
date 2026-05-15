@@ -6,6 +6,7 @@
 //   Test 1  (PR 0.1) — happy-path timeslot create.
 //   Test 2  (PR 0.2) — membership auto-consume + ledger debit.
 //   Test 4  (PR 0.2) — idempotency replay (INSERT-then-catch-23505).
+//   Test 3  (PR 0.3) — nightly mode: price_per_night × nights, Gate A bypass.
 //
 // Harness forks (documented in PR 0.1):
 //   Fork A — DB layer:      (i) full mock of ../db (transaction-aware).
@@ -25,6 +26,26 @@
 //     the UPDATE customer_memberships balance recompute.
 //   - getServiceAllowMembership defaults to { allowed: true } so the
 //     eligibility guard short-circuits for Test 2 and Test 4.
+//
+// PR 0.3 harness extensions (additive — Tests 1, 2, 4 unchanged):
+//   - The 'price_amount','price','price_per_night' column probe now
+//     reports both price_amount AND price_per_night as present, so the
+//     service SELECT includes price_per_night. SERVICE_ROW carries
+//     price_per_night: null by default; timeslot tests still resolve
+//     servicePriceAmount via the price_amount path.
+//   - The 'booking_mode' bookings-column probe now reports all 7
+//     nightly+addons columns. The `if (isNightlyBooking && hasNightlyCols)`
+//     gates inside the INSERT build are unreachable for timeslot tests,
+//     so the param contract for Tests 1, 2, 4 stays at 16 baseVals
+//     before the money/rate/tax cols.
+//   - taxEngine.computeTaxForBooking is now a dynamic mock returning
+//     subtotal=total=chargedAmount. Test 1's chargedAmount is 25 so the
+//     `tax.total_amount === SERVICE_PRICE` assertion still holds.
+//   - A module-level `state.serviceRow` is reset in installDbMocks and
+//     read by the `FROM services WHERE id=` route. Test 3 swaps in the
+//     nightly variant before its request.
+//   - installDbMocks re-applies the default getBookingPolicy so Test 3's
+//     `{enforceWorkingHours: true}` override never leaks across tests.
 
 const express = require('express');
 const request = require('supertest');
@@ -63,8 +84,27 @@ const SERVICE_ROW = {
   duration_minutes: 60,
   max_parallel_bookings: 1,
   price_amount: SERVICE_PRICE,
+  price_per_night: null,           // PR 0.3 — nightly column always projected
   requires_confirmation: false,
 };
+
+// PR 0.3 — nightly fixtures.
+const SERVICE_NIGHTLY_PRICE = 100;
+const NIGHTS_COUNT = 3;
+const EXPECTED_NIGHTLY_PRICE = SERVICE_NIGHTLY_PRICE * NIGHTS_COUNT;  // 300
+const SERVICE_ROW_NIGHTLY = {
+  id: SERVICE_ID,
+  tenant_id: TENANT_ID,
+  duration_minutes: 60,             // unused for nightly pricing, but the column is in the SELECT
+  max_parallel_bookings: 1,
+  price_amount: null,
+  price_per_night: SERVICE_NIGHTLY_PRICE,
+  requires_confirmation: false,
+};
+
+// Module-level mutable state. Reset in installDbMocks; tests can override
+// before sending the request. (Closure-bound by the mock implementations.)
+const state = { serviceRow: SERVICE_ROW };
 
 // loadJoinedBookingById is mocked; this is the row the handler echoes back.
 const JOINED_BOOKING = {
@@ -145,14 +185,17 @@ jest.mock('../utils/ratesEngine', () => ({
     applied_rate_snapshot: null,
   }),
 }));
+// PR 0.3 — dynamic tax mock so Test 3 (charge=300) and Test 1 (charge=25)
+// both see consistent subtotal/total values. Tests 2 and 4 hit charge=0 →
+// create.js skips the tax block entirely; this mock is never invoked there.
 jest.mock('../utils/taxEngine', () => ({
-  computeTaxForBooking: jest.fn().mockResolvedValue({
-    subtotal: 25,
+  computeTaxForBooking: jest.fn().mockImplementation(async ({ chargedAmount }) => ({
+    subtotal: chargedAmount,
     vat_amount: 0,
     service_charge_amount: 0,
-    total: 25,
+    total: chargedAmount,
     snapshot: null,
-  }),
+  })),
 }));
 jest.mock('../utils/bookingPolicy', () => ({
   getBookingPolicy: jest.fn().mockResolvedValue({
@@ -184,6 +227,7 @@ jest.mock('../utils/logger', () => ({
 
 const db = require('../db');
 const helpers = require('../utils/bookingRouteHelpers');
+const bookingPolicy = require('../utils/bookingPolicy');
 const { checkConflicts, loadJoinedBookingById } = require('../utils/bookings');
 
 // Mount ONLY create.js onto a fresh router (not the full routes/bookings.js,
@@ -204,6 +248,14 @@ const flushImmediates = () => new Promise((resolve) => setImmediate(resolve));
 // ─── DB mock routing ──────────────────────────────────────────────────────────
 
 function installDbMocks() {
+  // PR 0.3 — reset module-level state for service row and the policy default
+  // so per-test overrides don't leak.
+  state.serviceRow = SERVICE_ROW;
+  bookingPolicy.getBookingPolicy.mockResolvedValue({
+    enforceWorkingHours: false,
+    requireCharge: false,
+  });
+
   // Closure-state counters — reset on every beforeEach via re-invocation.
   // 1st INSERT succeeds, 2nd+ throws 23505 (Postgres unique-violation shape).
   // Tests with one request hit the 1st-call branch only; Test 4's second
@@ -218,15 +270,36 @@ function installDbMocks() {
     if (s.includes('SELECT branding FROM tenants')) return { rows: [{ branding: {} }] };
     if (s.includes('FROM customers WHERE tenant_id')) return { rows: [CUSTOMER_ROW] };
     if (s.includes("column_name='requires_confirmation'")) return { rowCount: 1, rows: [{}] };
+    // PR 0.3: advertise both price_amount AND price_per_night so the services
+    // SELECT projects price_per_night. Timeslot tests still read the price
+    // from price_amount; nightly tests (Test 3) read price_per_night.
     if (s.includes("'price_amount','price','price_per_night'")) {
-      return { rows: [{ column_name: 'price_amount' }] };
+      return { rows: [
+        { column_name: 'price_amount' },
+        { column_name: 'price_per_night' },
+      ] };
     }
     if (s.includes("column_name='currency_code'")) return { rowCount: 1, rows: [{}] };
     if (s.includes('SELECT currency_code FROM tenants')) return { rows: [{ currency_code: 'JOD' }] };
-    if (s.includes('FROM services WHERE id=')) return { rows: [SERVICE_ROW] };
+    // PR 0.3: read the per-test active service row from module state.
+    if (s.includes('FROM services WHERE id=')) return { rows: [state.serviceRow] };
     if (s.includes("column_name='payment_status'")) return { rows: [{}] };
     if (s.includes("'subtotal_amount'")) return { rows: [{}, {}, {}, {}, {}] };
-    if (s.includes("'booking_mode'")) return { rows: [] };
+    // PR 0.3: advertise all 7 nightly+addons columns on bookings. The
+    // `if (isNightlyBooking && hasNightlyCols)` gates inside the INSERT
+    // build only fire when isNightlyBooking is true, so Tests 1, 2, 4
+    // (timeslot) see no INSERT param change.
+    if (s.includes("'booking_mode'")) {
+      return { rows: [
+        { column_name: 'booking_mode' },
+        { column_name: 'checkin_date' },
+        { column_name: 'checkout_date' },
+        { column_name: 'nights_count' },
+        { column_name: 'addons_json' },
+        { column_name: 'guests_count' },
+        { column_name: 'addons_total' },
+      ] };
+    }
     if (s.includes('FROM customer_memberships')) return { rows: [] };
     if (s.includes('FROM customer_prepaid_entitlements')) return { rows: [] };
     return { rows: [], rowCount: 0 };
@@ -516,4 +589,120 @@ test('idempotency replay: same key on 2nd POST returns existing booking (200, re
   expect(clientCalls.filter((s) => s === 'COMMIT')).toHaveLength(2);
   expect(clientCalls.filter((s) => s === 'ROLLBACK')).toHaveLength(0);
   expect(db.__client.release).toHaveBeenCalledTimes(2);
+});
+
+// ─── Test 3 — nightly mode ────────────────────────────────────────────────────
+//
+// Asserts three behaviors that PR 1 (dispatchNotifications extraction) and
+// later persist.js work must preserve:
+//
+//   1. Pricing — price_per_night × nights_count flows through to both
+//      price_amount and charge_amount on the INSERT.
+//   2. INSERT shape — booking_mode='nightly' lands in the column added by
+//      the `if (isNightlyBooking && hasNightlyCols)` branch (create.js
+//      L904-906), with checkin_date / checkout_date / nights_count.
+//   3. Gate A bypass — even with the tenant's policy reporting
+//      enforceWorkingHours: true, validateWithinWorkingHours is NEVER
+//      called for a nightly booking. This is the L355 short-circuit
+//      `!isAdminBypass && !isNightlyBooking && bookingPolicy.enforceWorkingHours`.
+
+test('nightly mode: price_per_night × nights → 201, booking_mode=nightly, Gate A bypassed', async () => {
+  // Swap in the nightly service row + enable working-hours enforcement so
+  // the bypass assertion is meaningful (timeslot tests rely on the policy
+  // default with enforceWorkingHours: false).
+  state.serviceRow = SERVICE_ROW_NIGHTLY;
+  bookingPolicy.getBookingPolicy.mockResolvedValue({
+    enforceWorkingHours: true,
+    requireCharge: false,
+  });
+
+  const app = buildApp();
+
+  // Use dates a few days out so we clear the nightly past-check
+  // (`pastThreshold` = today midnight LOCAL, create.js L184-186).
+  const ymd = (d) => d.toISOString().slice(0, 10);
+  const checkin  = ymd(new Date(Date.now() + 2 * 86400000));
+  const checkout = ymd(new Date(Date.now() + (2 + NIGHTS_COUNT) * 86400000));
+
+  // NOTE: production nightly clients must send `startTime` explicitly
+  // alongside checkin_date. The L170-172 "derive startTime from checkin_date"
+  // path in create.js is dead code — the L96 `if (!startTime)` guard fires
+  // first and 400s before the nightly derivation runs. Phase 1 finding;
+  // flagged in the PR body. This test mirrors what working clients actually do.
+  const startTime = new Date(`${checkin}T00:00:00Z`).toISOString();
+
+  const res = await request(app)
+    .post('/api/bookings')
+    .send({
+      tenantSlug:   TENANT_SLUG,
+      serviceId:    SERVICE_ID,
+      startTime,
+      booking_mode: 'nightly',
+      checkin_date: checkin,
+      checkout_date: checkout,
+      nights_count: NIGHTS_COUNT,
+      paymentMethod: 'cash',
+    });
+
+  await flushImmediates();
+
+  // ── HTTP contract ──
+  expect(res.status).toBe(201);
+  expect(res.body.replay).toBe(false);
+
+  const clientCalls = db.__client.query.mock.calls.map((c) => String(c[0]));
+
+  // ── INSERT INTO bookings — once, with nightly shape ──
+  const insertCall = db.__client.query.mock.calls.find((c) =>
+    String(c[0]).includes('INSERT INTO bookings'),
+  );
+  expect(insertCall).toBeDefined();
+  expect(clientCalls.filter((s) => s.includes('INSERT INTO bookings'))).toHaveLength(1);
+
+  // Column order for the nightly + full-tax branch (create.js L901-958):
+  //  [0]  tenant_id           [1]  service_id          [2]  staff_id
+  //  [3]  resource_id         [4]  start_time          [5]  duration_minutes
+  //  [6]  customer_id         [7]  customer_name       [8]  customer_phone
+  //  [9]  customer_email      [10] status              [11] idempotency_key
+  //  [12] customer_membership_id  [13] session_id      [14] payment_method
+  //  [15] payment_status      [16] booking_mode        [17] checkin_date
+  //  [18] checkout_date       [19] nights_count        [20] addons_json
+  //  [21] guests_count        [22] addons_total        [23] price_amount
+  //  [24] charge_amount       [25] currency_code       [26] applied_rate_rule_id
+  //  [27] applied_rate_snapshot   [28] subtotal_amount [29] vat_amount
+  //  [30] service_charge_amount   [31] total_amount    [32] tax_snapshot
+  const params = insertCall[1];
+  expect(params[1]).toBe(SERVICE_ID);
+  expect(params[6]).toBe(CUSTOMER_ID);
+  expect(params[10]).toBe('confirmed');
+  expect(params[12]).toBeNull();                        // no membership
+  expect(params[14]).toBe('cash');                      // payment_method
+  expect(params[15]).toBe('completed');                 // payment_status
+  expect(params[16]).toBe('nightly');                   // booking_mode (the nightly marker)
+  expect(params[17]).toBe(checkin);                     // checkin_date string passes through
+  expect(params[18]).toBe(checkout);                    // checkout_date string passes through
+  expect(params[19]).toBe(NIGHTS_COUNT);                // nights_count
+  expect(params[20]).toBeNull();                        // addons_json — none sent
+  expect(params[21]).toBe(1);                           // guests_count default
+  expect(params[22]).toBe(0);                           // addons_total default
+  expect(params[23]).toBe(EXPECTED_NIGHTLY_PRICE);      // price_amount = 100 × 3 = 300
+  expect(params[24]).toBe(EXPECTED_NIGHTLY_PRICE);      // charge_amount === price_amount (no discount)
+
+  // ── Tax — dynamic mock returns subtotal=total=chargedAmount=300 ──
+  expect(res.body.tax.total_amount).toBe(EXPECTED_NIGHTLY_PRICE);
+
+  // ── Gate A nightly bypass — validateWithinWorkingHours never called
+  //    even though the policy reports enforceWorkingHours: true. ──
+  expect(bookingPolicy.validateWithinWorkingHours).not.toHaveBeenCalled();
+
+  // ── Transaction lifecycle ──
+  expect(clientCalls).toContain('BEGIN');
+  expect(clientCalls).toContain('COMMIT');
+  expect(clientCalls).not.toContain('ROLLBACK');
+  expect(db.__client.release).toHaveBeenCalledTimes(1);
+
+  // ── No ledger / prepaid writes ──
+  expect(clientCalls.some((s) => s.includes('membership_ledger'))).toBe(false);
+  expect(clientCalls.some((s) => s.includes('prepaid_redemptions'))).toBe(false);
+  expect(clientCalls.some((s) => s.includes('prepaid_transactions'))).toBe(false);
 });
