@@ -9,15 +9,15 @@ const { requireTenant } = require("../../middleware/requireTenant");
 const requireAdminOrTenantRole = require("../../middleware/requireAdminOrTenantRole");
 const { ensureBookingMoneyColumns } = require("../../utils/ensureBookingMoneyColumns");
 const { parseBookingListParams, buildBookingListWhere } = require("../../utils/bookingQueryBuilder");
-const { findOrCreateSession, incrementSessionCount, decrementSessionCount, loadJoinedBookingById, checkConflicts } = require("../../utils/bookings");
+const { findOrCreateSession, incrementSessionCount, decrementSessionCount, loadJoinedBookingById } = require("../../utils/bookings");
 const { computeRateForBookingLike } = require("../../utils/ratesEngine");
 const { computeTaxForBooking } = require("../../utils/taxEngine");
-// PR 149: server-side booking policy gates (working hours + require-charge)
-const { getBookingPolicy, validateWithinWorkingHours, validateRequireCharge } = require("../../utils/bookingPolicy");
+// PR 149: server-side booking policy gates (require-charge)
+const { validateRequireCharge } = require("../../utils/bookingPolicy");
 const { ensureBookingRateColumns } = require("../../utils/ensureBookingRateColumns");
 const { ensurePaymentMethodColumn } = require("../../utils/ensurePaymentMethodColumn");
 const {
-  shouldUseCustomerHistory, checkBlackoutOverlap, servicesHasColumn, getServiceAllowMembership,
+  shouldUseCustomerHistory, servicesHasColumn, getServiceAllowMembership,
   getIdempotencyKey, mustHaveTenantSlug, canTransitionStatus, bumpTenantBookingChange,
   prepaidTablesExist, resolvePrepaidSelection, computePrepaidRedemptionSelection,
   loadMembershipCheckoutPolicy, roundUpMinutes, buildMembershipResolution,
@@ -32,6 +32,8 @@ const dispatchNotifications = require("./dispatchNotifications");
 // PR 2 (Phase 1 refactor): pre-BEGIN input validation + customer resolution.
 const validate = require("./validate");
 const resolveCustomer = require("./resolveCustomer");
+// PR 3 (Phase 1 refactor): pre-BEGIN service load + availability checks.
+const { loadService, checkAvailability } = require("./resolveAvailability");
 
 
 module.exports = function mount(router) {
@@ -126,90 +128,25 @@ router.post("/", requireAppAuth, requireTenant, async (req, res) => {
     if (!startResult.ok) return res.status(startResult.status).json(startResult.body);
     const { resolvedStartTime, start, isNightlyBooking } = startResult;
 
-    let resolvedServiceId = serviceId ? Number(serviceId) : null;
-    let duration = durationMinutes ? Number(durationMinutes) : null;
-    let requiresConfirmation = false;
-    let serviceDurationMinutes = null;
-    let servicePriceAmount = null;
-    let serviceMaxParallel = 1;
-    let tenantCurrencyCode = null;
-
-    if (resolvedServiceId) {
-      // Service-level confirmation mode:
-      // - requires_confirmation = true  -> bookings start as 'pending'
-      // - requires_confirmation = false -> bookings start as 'confirmed'
-      // Backwards compatibility: if the column doesn't exist yet, default to 'pending' (existing behavior).
-      const hasReqConfRes = await db.query(
-        `SELECT 1 FROM information_schema.columns
-         WHERE table_schema='public' AND table_name='services' AND column_name='requires_confirmation'
-         LIMIT 1`
-      );
-      const hasReqConf = hasReqConfRes.rowCount > 0;
-
-      // Price columns are not consistent across older deployments.
-      const priceCols = await db.query(
-        `SELECT column_name
-         FROM information_schema.columns
-         WHERE table_schema='public'
-           AND table_name='services'
-           AND column_name IN ('price_amount','price','price_per_night')`
-      );
-      const hasPriceAmount   = priceCols.rows.some((r) => r.column_name === 'price_amount');
-      const hasPriceLegacy   = priceCols.rows.some((r) => r.column_name === 'price');
-      const hasPricePerNight = priceCols.rows.some((r) => r.column_name === 'price_per_night');
-      const priceExpr = hasPriceAmount && hasPriceLegacy
-        ? "COALESCE(price_amount, price) AS price_amount"
-        : hasPriceAmount
-          ? "price_amount AS price_amount"
-          : hasPriceLegacy
-            ? "price AS price_amount"
-            : "NULL::numeric AS price_amount";
-
-      // Tenant currency_code is used for dashboard display.
-      const tenantCols = await db.query(
-        `SELECT 1
-         FROM information_schema.columns
-         WHERE table_schema='public'
-           AND table_name='tenants'
-           AND column_name='currency_code'
-         LIMIT 1`
-      );
-      if (tenantCols.rowCount > 0) {
-        const tc = await db.query(`SELECT currency_code FROM tenants WHERE id=$1 LIMIT 1`, [resolvedTenantId]);
-        tenantCurrencyCode = tc.rows?.[0]?.currency_code || null;
-      }
-
-      const sRes = await db.query(
-        `SELECT id, tenant_id, duration_minutes, max_parallel_bookings, ${priceExpr}${hasPricePerNight ? ", price_per_night" : ""}${hasReqConf ? ", COALESCE(requires_confirmation,false) AS requires_confirmation" : ""}
-         FROM services WHERE id=$1 AND tenant_id=$2 LIMIT 1`,
-        [resolvedServiceId, resolvedTenantId]
-      );
-      if (!sRes.rows.length)
-        return res.status(400).json({ error: "Unknown serviceId for tenant." });
-
-      if (hasReqConf) {
-        requiresConfirmation = !!sRes.rows[0].requires_confirmation;
-      }
-
-      serviceDurationMinutes = Number(sRes.rows[0].duration_minutes || 0) || null;
-      // For nightly bookings prefer price_per_night (the per-night rate column)
-      // over price_amount, which may store a legacy flat/session price.
-      // This matches the rental availability engine which also prefers price_per_night.
-      const rawPricePerNight = hasPricePerNight ? sRes.rows[0].price_per_night : null;
-      const rawPriceAmount   = sRes.rows[0].price_amount;
-      servicePriceAmount = isNightlyBooking && rawPricePerNight != null
-        ? Number(rawPricePerNight)
-        : (rawPriceAmount != null ? Number(rawPriceAmount) : null);
-
-      if (!duration) {
-        duration = Number(sRes.rows[0].duration_minutes || 60) || 60;
-      }
-
-      requiresConfirmation = hasReqConf ? !!sRes.rows[0].requires_confirmation : true;
-      serviceMaxParallel = Number(sRes.rows[0].max_parallel_bookings) || 1;
-    } else {
-      duration = duration || 60;
-    }
+    // PR 3 (Phase 1 refactor): service load + column probes extracted to
+    // resolveAvailability.loadService. Same SQL, same defaults, same
+    // "Unknown serviceId for tenant" error shape.
+    const svcResult = await loadService({
+      tenantId: resolvedTenantId,
+      serviceId,
+      isNightlyBooking,
+      durationMinutes,
+    });
+    if (!svcResult.ok) return res.status(svcResult.status).json(svcResult.body);
+    const {
+      resolvedServiceId,
+      duration,
+      requiresConfirmation,
+      serviceDurationMinutes,
+      servicePriceAmount,
+      serviceMaxParallel,
+      tenantCurrencyCode,
+    } = svcResult;
 
     const bookingStatus = requiresConfirmation ? "pending" : "confirmed";
 
@@ -224,87 +161,24 @@ router.post("/", requireAppAuth, requireTenant, async (req, res) => {
     if (!staffResult.ok) return res.status(staffResult.status).json(staffResult.body);
     const { staff_id, resource_id } = staffResult;
 
-    // ✅ Enforce blackout windows (closures) before running conflict checks.
-    // This ensures that even if no bookings exist, closed windows remain unbookable.
-    const end = new Date(start.getTime() + Number(duration) * 60 * 1000);
-    const blackout = await checkBlackoutOverlap({
+    // PR 3 (Phase 1 refactor): blackout + conflict + Gate A working-hours
+    // extracted to resolveAvailability.checkAvailability. Call order
+    // preserved (runs after validate.validateStaffAndResource so
+    // staff_id/resource_id are available; Gate A's nightly + admin
+    // bypass logic is verbatim).
+    const availResult = await checkAvailability({
       tenantId: resolvedTenantId,
-      startTime: start.toISOString(),
-      endTime: end.toISOString(),
-      resourceId: resource_id,
-      staffId: staff_id,
+      start,
+      duration,
+      staff_id,
+      resource_id,
       serviceId: resolvedServiceId,
+      serviceMaxParallel,
+      isNightlyBooking,
+      isAdminBypass,
     });
-    if (blackout) {
-      return res.status(409).json({
-        error: "This time window is blocked.",
-        blackout,
-      });
-    }
-
-    const conflicts = await checkConflicts({
-      tenantId: resolvedTenantId,
-      staffId: staff_id,
-      resourceId: resource_id,
-      startTime: start.toISOString(),
-      durationMinutes: duration,
-      serviceId: resolvedServiceId,
-      maxParallel: serviceMaxParallel,
-    });
-
-    if (conflicts.conflict) {
-      return res.status(409).json({
-        error: "Booking conflicts with an existing booking.",
-        conflicts,
-      });
-    }
-
-    // ─── PR 149: Gate A — working-hours validation ─────────────────────────
-    // Resolve tenant timezone + policy, then re-check startTime against
-    // tenant_hours for the LOCAL day-of-week in the tenant's zone. The
-    // availability endpoint enforces this at slot-generation time, but
-    // nothing was re-validating it on create — so a client could POST any
-    // startTime and the server happily accepted it (see bug with BRD-TS-
-    // 260420-0069, booked from Malaysia for 06:00 Asia/Amman while Birdie
-    // opens at 10:00). Admin/owner bypass is exempt.
-    //
-    // NIGHTLY/RENTAL EXEMPTION (April 2026):
-    // Nightly bookings span 24h+ windows (check-in today, check-out tomorrow
-    // or later) and are not bound by the same desk-open business hours that
-    // apply to time-slot services. A hotel room is "usable" around the clock
-    // once handed over; whether the front-desk is staffed at 3 AM is a
-    // separate operational question that should NOT block a reservation.
-    // Skipping Gate A here preserves the Birdie bug-fix intent (time-slot
-    // tenants still get working-hours enforcement on create) while letting
-    // nightly tenants (aqababooking, etc.) accept bookings as designed.
-    const bookingPolicy = await getBookingPolicy(resolvedTenantId);
-
-    if (!isAdminBypass && !isNightlyBooking && bookingPolicy.enforceWorkingHours) {
-      let tenantTzForPolicy = 'UTC';
-      try {
-        const tzRow = await db.query(
-          `SELECT timezone FROM tenants WHERE id = $1 LIMIT 1`,
-          [resolvedTenantId]
-        );
-        tenantTzForPolicy = tzRow.rows?.[0]?.timezone || 'UTC';
-      } catch { /* fall through with UTC */ }
-
-      const hoursCheck = await validateWithinWorkingHours({
-        tenantId:        resolvedTenantId,
-        tenantTz:        tenantTzForPolicy,
-        startTime:       start.toISOString(),
-        durationMinutes: duration,
-      });
-
-      if (!hoursCheck.ok) {
-        return res.status(422).json({
-          error:   hoursCheck.message,
-          code:    hoursCheck.code,
-          details: hoursCheck.details,
-        });
-      }
-    }
-    // ─── End Gate A ────────────────────────────────────────────────────────
+    if (!availResult.ok) return res.status(availResult.status).json(availResult.body);
+    const { bookingPolicy } = availResult;
 
     const client = await db.connect();
     try {
