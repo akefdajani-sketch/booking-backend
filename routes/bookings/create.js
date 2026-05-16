@@ -29,6 +29,9 @@ const {
 const aiContextCache = require("../../utils/aiContextCache");
 // PR 1 (Phase 1 refactor): post-COMMIT WA/SMS/email dispatch + AI cache bust.
 const dispatchNotifications = require("./dispatchNotifications");
+// PR 2 (Phase 1 refactor): pre-BEGIN input validation + customer resolution.
+const validate = require("./validate");
+const resolveCustomer = require("./resolveCustomer");
 
 
 module.exports = function mount(router) {
@@ -38,125 +41,72 @@ router.post("/", requireAppAuth, requireTenant, async (req, res) => {
     // (No-op if already applied.)
     await ensureBookingMoneyColumns();
 
+    // PR 2 (Phase 1 refactor): pre-BEGIN input parsing + auth + raw startTime
+    // presence check extracted to validate.parseInputs. The startTime
+    // presence check stays here-first (before resolveCustomer) so a
+    // missing-startTime request never creates a customer row.
+    const parsed = validate.parseInputs(req);
+    if (!parsed.ok) return res.status(parsed.status).json(parsed.body);
     const {
-      tenantSlug,
       serviceId,
       startTime,
       durationMinutes,
-      // customerName/phone/email may be sent by older UIs, but the platform now
-      // trusts Google auth + customer profile as the source of truth.
       customerName,
       customerPhone,
-      customerEmail,
       staffId,
       resourceId,
-      customerId,
       customerMembershipId,
       autoConsumeMembership,
       requireMembership,
       prepaidEntitlementId,
       autoConsumePrepaid,
       requirePrepaid,
-      paymentMethod: requestedPaymentMethod, // PAY-2: cash | card | cliq from client
-      networkPaymentOrderId, // PAY-1: MPGS order ID when booking follows card payment
-      // RENTAL-1: nightly booking fields
-      booking_mode: incomingBookingMode,
+      requestedPaymentMethod,
+      networkPaymentOrderId,
+      incomingBookingMode,
       checkin_date,
       checkout_date,
       nights_count,
-      // NIGHTLY SUITE: add-ons and guests
-      addons_json: incomingAddonsJson,
-      guests_count: incomingGuestsCount,
-    } = req.body || {};
-
-    const slug = (req.tenantSlug || tenantSlug || "").toString().trim();
-    const resolvedTenantId = Number(req.tenantId || 0);
-    if (!slug) return res.status(400).json({ error: "Missing tenantSlug." });
-    if (!Number.isFinite(resolvedTenantId) || resolvedTenantId <= 0) {
-      return res.status(400).json({ error: "Invalid tenant." });
-    }
+      incomingAddonsJson,
+      incomingGuestsCount,
+      slug,
+      resolvedTenantId,
+      isAdminBypass,
+      googleEmail,
+      googleName,
+      requestedCustomerEmail,
+    } = parsed;
 
     const idemKey = getIdempotencyKey(req);
 
-    const isAdminBypass = !!req.adminBypass;
-
-    const googleEmail = (req.auth?.email || req.googleUser?.email || "").toString().trim().toLowerCase();
-    const googleName = (req.auth?.name || req.googleUser?.name || req.googleUser?.given_name || "").toString().trim();
-
-    // Public booking requires the *customer* Google identity.
-    // Owner/tenant dashboards may create bookings on behalf of customers via ADMIN_API_KEY proxy.
-    if (!isAdminBypass && !googleEmail) return res.status(401).json({ error: "Unauthorized" });
-
-    const requestedCustomerEmail = (isAdminBypass ? String(customerEmail || "") : String(googleEmail || ""))
-      .trim()
-      .toLowerCase();
-
-    if (isAdminBypass && !requestedCustomerEmail) {
-      return res.status(400).json({ error: "customerEmail is required for staff/admin bookings." });
-    }
-
-    if (!startTime) {
-      return res.status(400).json({ error: "Missing required fields (startTime)." });
-    }
-
-    // Tenant policy: require customer phone unless explicitly disabled.
-    // (Schema-free Phase C: read from tenants.branding JSONB when available.)
-    let requirePhone = true;
-    try {
-      const tpol = await db.query(`SELECT branding FROM tenants WHERE id=$1 LIMIT 1`, [resolvedTenantId]);
-      const branding = tpol.rows?.[0]?.branding || {};
-      const v = branding?.require_phone ?? branding?.requirePhone ?? branding?.phone_required ?? branding?.phoneRequired;
-      if (typeof v === "boolean") requirePhone = v;
-      if (typeof v === "string" && v.trim() !== "") {
-        requirePhone = ["1", "true", "yes", "y"].includes(v.trim().toLowerCase());
-      }
-    } catch (_) {
-      // keep default
-    }
+    // PR 2 (Phase 1 refactor): require-phone tenant policy lookup + customer
+    // resolution (SELECT-or-INSERT) extracted. Policy is loaded BEFORE
+    // resolveCustomer (matches pre-extraction call order); enforcement of
+    // require-phone still happens below, after the customer record is in
+    // hand so finalCustomerPhone reflects the stored value when present.
+    const requirePhone = await validate.loadRequirePhonePolicy(resolvedTenantId);
 
     // Resolve or create customer for this tenant.
     // - Public booking: customer identity comes from Google.
     // - Staff/admin booking (owner proxy): customer identity comes from request payload.
     // IMPORTANT: we NEVER trust customerId from the client for authenticated flows.
-    let finalCustomerId = null;
-
-    let finalCustomerName = (
-      isAdminBypass
-        ? String(customerName || "").trim()
-        : (googleName || "").trim()
-    ) || "Customer";
-
-    let finalCustomerPhone = String(customerPhone || "").trim() || null;
-    let finalCustomerEmail = requestedCustomerEmail;
-
-    const existingCust = await db.query(
-      `SELECT id, name, phone, email
-       FROM customers
-       WHERE tenant_id=$1 AND LOWER(email)=LOWER($2)
-       LIMIT 1`,
-      [resolvedTenantId, finalCustomerEmail]
-    );
-
-    if (existingCust.rows.length) {
-      const row = existingCust.rows[0];
-      finalCustomerId = row.id;
-      finalCustomerName = String(row.name || finalCustomerName).trim() || finalCustomerName;
-      // Prefer stored phone; only update if client supplied a phone.
-      finalCustomerPhone = String(row.phone || "").trim() || finalCustomerPhone;
-    } else {
-      // Create a minimal customer record.
-      const ins = await db.query(
-        `INSERT INTO customers (tenant_id, name, phone, email, created_at)
-         VALUES ($1,$2,$3,$4,NOW())
-         RETURNING id`,
-        [resolvedTenantId, finalCustomerName, finalCustomerPhone, finalCustomerEmail]
-      );
-      finalCustomerId = ins.rows?.[0]?.id || null;
-    }
-
-    if (!finalCustomerId) {
-      return res.status(500).json({ error: "Failed to resolve customer." });
-    }
+    const initialCustomerName = isAdminBypass
+      ? String(customerName || "").trim()
+      : (googleName || "").trim();
+    const customerResult = await resolveCustomer({
+      tenantId: resolvedTenantId,
+      email: requestedCustomerEmail,
+      name: initialCustomerName,
+      phone: customerPhone,
+      isAdminBypass,
+    });
+    if (!customerResult.ok) return res.status(customerResult.status).json(customerResult.body);
+    const {
+      id: finalCustomerId,
+      name: finalCustomerName,
+      phone: finalCustomerPhone,
+      email: finalCustomerEmail,
+    } = customerResult.customer;
 
     if (requirePhone && !String(finalCustomerPhone || "").trim()) {
       return res.status(409).json({
@@ -166,29 +116,15 @@ router.post("/", requireAppAuth, requireTenant, async (req, res) => {
       });
     }
 
-    // RENTAL-1: For nightly bookings, derive startTime from checkin_date if not provided
-    const isNightlyBooking = incomingBookingMode === 'nightly';
-    let resolvedStartTime = startTime;
-    if (isNightlyBooking && !startTime && checkin_date) {
-      resolvedStartTime = new Date(`${checkin_date}T00:00:00Z`).toISOString();
-    }
-    if (!resolvedStartTime) {
-      return res.status(400).json({ error: "Missing required fields (startTime)." });
-    }
-
-    const start = new Date(resolvedStartTime);
-    if (Number.isNaN(start.getTime())) {
-      return res.status(400).json({ error: "Invalid startTime." });
-    }
-
-    const now = new Date();
-    // Nightly: allow same-day check-in (compare against today midnight)
-    const pastThreshold = isNightlyBooking
-      ? (() => { const d = new Date(now); d.setHours(0,0,0,0); return d.getTime(); })()
-      : now.getTime() - 60 * 1000;
-    if (start.getTime() < pastThreshold) {
-      return res.status(400).json({ error: "Cannot create a booking in the past." });
-    }
+    // PR 2 (Phase 1 refactor): nightly-mode startTime derivation +
+    // invalid-date + past-check extracted to validate.deriveStartTime.
+    const startResult = validate.deriveStartTime({
+      startTime,
+      checkin_date,
+      incomingBookingMode,
+    });
+    if (!startResult.ok) return res.status(startResult.status).json(startResult.body);
+    const { resolvedStartTime, start, isNightlyBooking } = startResult;
 
     let resolvedServiceId = serviceId ? Number(serviceId) : null;
     let duration = durationMinutes ? Number(durationMinutes) : null;
@@ -277,27 +213,16 @@ router.post("/", requireAppAuth, requireTenant, async (req, res) => {
 
     const bookingStatus = requiresConfirmation ? "pending" : "confirmed";
 
-    const staff_id = staffId ? Number(staffId) : null;
-    const resource_id = resourceId ? Number(resourceId) : null;
-
-    if (staff_id) {
-      const st = await db.query(
-        `SELECT id FROM staff WHERE id=$1 AND tenant_id=$2 LIMIT 1`,
-        [staff_id, resolvedTenantId]
-      );
-      if (!st.rows.length)
-        return res.status(400).json({ error: "staffId not valid for tenant." });
-    }
-    if (resource_id) {
-      const rr = await db.query(
-        `SELECT id FROM resources WHERE id=$1 AND tenant_id=$2 LIMIT 1`,
-        [resource_id, resolvedTenantId]
-      );
-      if (!rr.rows.length)
-        return res
-          .status(400)
-          .json({ error: "resourceId not valid for tenant." });
-    }
+    // PR 2 (Phase 1 refactor): staff/resource parse + per-tenant existence
+    // checks extracted to validate.validateStaffAndResource. Call order
+    // preserved (runs after service load) so error-surface order is identical.
+    const staffResult = await validate.validateStaffAndResource({
+      staffId,
+      resourceId,
+      tenantId: resolvedTenantId,
+    });
+    if (!staffResult.ok) return res.status(staffResult.status).json(staffResult.body);
+    const { staff_id, resource_id } = staffResult;
 
     // ✅ Enforce blackout windows (closures) before running conflict checks.
     // This ensures that even if no bookings exist, closed windows remain unbookable.
