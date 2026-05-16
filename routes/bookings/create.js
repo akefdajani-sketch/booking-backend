@@ -39,14 +39,12 @@ const applyEntitlementWrites = require("./applyEntitlementWrites");
 module.exports = function mount(router) {
 router.post("/", requireAppAuth, requireTenant, async (req, res) => {
   try {
-    // Ensure revenue/price columns exist in older DBs.
-    // (No-op if already applied.)
+    // No-op if already applied — ensures revenue/price columns on older DBs.
     await ensureBookingMoneyColumns();
 
-    // PR 2 (Phase 1 refactor): pre-BEGIN input parsing + auth + raw startTime
-    // presence check extracted to validate.parseInputs. The startTime
-    // presence check stays here-first (before resolveCustomer) so a
-    // missing-startTime request never creates a customer row.
+    // ─── Phase 1: input parsing + customer resolution ────────────────────────
+    // PR 2: parseInputs runs first so a missing-startTime request never
+    // creates a customer row.
     const parsed = validate.parseInputs(req);
     if (!parsed.ok) return res.status(parsed.status).json(parsed.body);
     const {
@@ -81,17 +79,12 @@ router.post("/", requireAppAuth, requireTenant, async (req, res) => {
 
     const idemKey = getIdempotencyKey(req);
 
-    // PR 2 (Phase 1 refactor): require-phone tenant policy lookup + customer
-    // resolution (SELECT-or-INSERT) extracted. Policy is loaded BEFORE
-    // resolveCustomer (matches pre-extraction call order); enforcement of
-    // require-phone still happens below, after the customer record is in
-    // hand so finalCustomerPhone reflects the stored value when present.
+    // Policy load runs before resolveCustomer; enforcement below uses the
+    // stored finalCustomerPhone.
     const requirePhone = await validate.loadRequirePhonePolicy(resolvedTenantId);
 
-    // Resolve or create customer for this tenant.
-    // - Public booking: customer identity comes from Google.
-    // - Staff/admin booking (owner proxy): customer identity comes from request payload.
-    // IMPORTANT: we NEVER trust customerId from the client for authenticated flows.
+    // Public booking: identity from Google. Admin proxy: from request payload.
+    // We NEVER trust customerId from the client for authenticated flows.
     const initialCustomerName = isAdminBypass
       ? String(customerName || "").trim()
       : (googleName || "").trim();
@@ -118,8 +111,7 @@ router.post("/", requireAppAuth, requireTenant, async (req, res) => {
       });
     }
 
-    // PR 2 (Phase 1 refactor): nightly-mode startTime derivation +
-    // invalid-date + past-check extracted to validate.deriveStartTime.
+    // PR 2: nightly-mode startTime derivation + invalid-date + past-check.
     const startResult = validate.deriveStartTime({
       startTime,
       checkin_date,
@@ -128,9 +120,8 @@ router.post("/", requireAppAuth, requireTenant, async (req, res) => {
     if (!startResult.ok) return res.status(startResult.status).json(startResult.body);
     const { resolvedStartTime, start, isNightlyBooking } = startResult;
 
-    // PR 3 (Phase 1 refactor): service load + column probes extracted to
-    // resolveAvailability.loadService. Same SQL, same defaults, same
-    // "Unknown serviceId for tenant" error shape.
+    // ─── Phase 2: service load + staff/resource + availability ───────────────
+    // PR 3: service load + column probes.
     const svcResult = await loadService({
       tenantId: resolvedTenantId,
       serviceId,
@@ -148,11 +139,7 @@ router.post("/", requireAppAuth, requireTenant, async (req, res) => {
       tenantCurrencyCode,
     } = svcResult;
 
-    const bookingStatus = requiresConfirmation ? "pending" : "confirmed";
-
-    // PR 2 (Phase 1 refactor): staff/resource parse + per-tenant existence
-    // checks extracted to validate.validateStaffAndResource. Call order
-    // preserved (runs after service load) so error-surface order is identical.
+    // PR 2: staff/resource parse + per-tenant existence checks.
     const staffResult = await validate.validateStaffAndResource({
       staffId,
       resourceId,
@@ -161,11 +148,8 @@ router.post("/", requireAppAuth, requireTenant, async (req, res) => {
     if (!staffResult.ok) return res.status(staffResult.status).json(staffResult.body);
     const { staff_id, resource_id } = staffResult;
 
-    // PR 3 (Phase 1 refactor): blackout + conflict + Gate A working-hours
-    // extracted to resolveAvailability.checkAvailability. Call order
-    // preserved (runs after validate.validateStaffAndResource so
-    // staff_id/resource_id are available; Gate A's nightly + admin
-    // bypass logic is verbatim).
+    // PR 3: blackout + conflict + Gate A working-hours. Runs after
+    // validateStaffAndResource so staff_id / resource_id are available.
     const availResult = await checkAvailability({
       tenantId: resolvedTenantId,
       start,
@@ -180,25 +164,18 @@ router.post("/", requireAppAuth, requireTenant, async (req, res) => {
     if (!availResult.ok) return res.status(availResult.status).json(availResult.body);
     const { bookingPolicy } = availResult;
 
+    // ─── Phase 3: BEGIN transaction ───────────────────────────────────────────
     const client = await db.connect();
     try {
       await client.query("BEGIN");
 
-      // Customer is already resolved (authenticated) before the transaction.
-      // Keep local aliases for downstream logic / inserts.
+      // Trimmed customer aliases for downstream INSERT.
       const cleanName = String(finalCustomerName || "Customer").trim();
       const cleanPhone = finalCustomerPhone ? String(finalCustomerPhone).trim() : null;
       const cleanEmail = finalCustomerEmail ? String(finalCustomerEmail).trim() : null;
 
-
-      // PR 5 (Phase 1 refactor): post-BEGIN membership consumption + prepaid
-      // resolution extracted to routes/bookings/resolveEntitlement.js. Two
-      // functions; each takes the transaction client and owns its own
-      // ROLLBACK on failure (14 ROLLBACKs in the inventory; mapping in the
-      // PR 5 description). Back-edges (debitMinutes, debitUses,
-      // membershipBefore, membershipPolicy) flow back to this orchestrator
-      // for the post-INSERT ledger-write block below; PR 6 will absorb that
-      // block, at which point the back-edges become module-internal.
+      // ─── Phase 4: membership + prepaid resolution ───────────────────────────
+      // PR 5: each module owns its own ROLLBACK on entitlement failure.
       const memResult = await resolveMembership(client, {
         tenantId: resolvedTenantId,
         serviceId,
@@ -230,13 +207,11 @@ router.post("/", requireAppAuth, requireTenant, async (req, res) => {
       if (!prepaidResult.ok) return res.status(prepaidResult.status).json(prepaidResult.body);
       const { prepaidApplied } = prepaidResult;
 
-      // Insert booking (idempotent)
       const initialStatus = requiresConfirmation ? "pending" : "confirmed";
 
-      // PR 4 (Phase 1 refactor): pricing pipeline (price + rate engine + charge
-      // + Gate B + tax) extracted to computePricing. Pool-only module; this
-      // orchestrator owns the ROLLBACK on Gate B failure to match the
-      // post-BEGIN failure convention used elsewhere in this transaction.
+      // ─── Phase 5: pricing ─────────────────────────────────────────────────────
+      // PR 4: pool-only pricing pipeline. Orchestrator owns the ROLLBACK on
+      // Gate B failure (matches the post-BEGIN failure convention).
       const pricingResult = await computePricing({
         tenantId: resolvedTenantId,
         serviceId: resolvedServiceId,
@@ -268,18 +243,10 @@ router.post("/", requireAppAuth, requireTenant, async (req, res) => {
         taxData,
       } = pricingResult;
 
-      // PR 6 (Phase 1 refactor): post-pricing, in-transaction persistence
-      // extracted to two modules:
-      //   - persist.js              → payment derivation + column probes +
-      //                                session find/create + booking INSERT
-      //                                + booking code generation
-      //   - applyEntitlementWrites.js → membership ledger debit + balance
-      //                                  UPDATE + prepaid redemption writes
-      // Each module owns its own ROLLBACK on failure. The 4 PR 5 back-edges
-      // (debitMinutes, debitUses, membershipBefore, membershipPolicy) are
-      // now module-internal — passed through the orchestrator into the
-      // entitlement writes ctx, but no orchestrator code post-COMMIT reads
-      // them.
+      // ─── Phase 6: persist + entitlement writes ───────────────────────────────
+      // PR 6: persist.js (booking row + booking_code + sessions) and
+      // applyEntitlementWrites.js (ledger + prepaid). Each owns its own
+      // ROLLBACK. The 4 PR-5 back-edges are pass-through into entitlement ctx.
       const persistResult = await persistBooking(client, {
         tenantId: resolvedTenantId,
         resolvedServiceId,
@@ -331,13 +298,13 @@ router.post("/", requireAppAuth, requireTenant, async (req, res) => {
         created
       );
       if (!entitlementResult.ok) return res.status(entitlementResult.status).json(entitlementResult.body);
-      // prepaidApplied was mutated in place by applyEntitlementWrites
-      // (redemptionId + remainingQuantity from RETURNING). entitlementResult
-      // returns the same reference for boundary visibility.
+      // applyEntitlementWrites mutates prepaidApplied in place (redemptionId +
+      // remainingQuantity from RETURNING); returned for boundary visibility.
 
+      // ─── Phase 7: COMMIT + post-commit side effects ──────────────────────────
       await client.query("COMMIT");
 
-      // 🔥 This is the critical bump used by heartbeat + UI refresh
+      // 🔥 Heartbeat + UI refresh bump.
       await bumpTenantBookingChange(resolvedTenantId);
 
       const joined = await loadJoinedBookingById(bookingId, resolvedTenantId);
@@ -352,9 +319,8 @@ router.post("/", requireAppAuth, requireTenant, async (req, res) => {
         joined.prepaid_quantity_remaining = prepaidApplied.remainingQuantity ?? null;
       }
 
-      // PR 1 (Phase 1 refactor): post-COMMIT WA/SMS/email dispatch + AI cache
-      // bust extracted to routes/bookings/dispatchNotifications.js. All four
-      // side-effects continue to fire after the HTTP response below.
+      // PR 1: post-COMMIT WA/SMS/email dispatch + AI cache bust. Fire-and-
+      // forget — side effects continue after the HTTP response below.
       dispatchNotifications({
         tenantId: resolvedTenantId,
         tenantSlug: slug,
@@ -365,6 +331,7 @@ router.post("/", requireAppAuth, requireTenant, async (req, res) => {
         reqTenantId: req.tenantId,
       });
 
+      // ─── Phase 8: response ────────────────────────────────────────────────────
       return res.status(created ? 201 : 200).json({
         booking: joined,
         replay: !created,
