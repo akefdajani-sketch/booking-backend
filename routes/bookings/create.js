@@ -3,22 +3,11 @@
 // Mounted by routes/bookings.js
 
 const db = require("../../db");
-const { pool } = require("../../db");
 const requireAppAuth = require("../../middleware/requireAppAuth");
 const { requireTenant } = require("../../middleware/requireTenant");
-const requireAdminOrTenantRole = require("../../middleware/requireAdminOrTenantRole");
 const { ensureBookingMoneyColumns } = require("../../utils/ensureBookingMoneyColumns");
-const { parseBookingListParams, buildBookingListWhere } = require("../../utils/bookingQueryBuilder");
-const { decrementSessionCount, loadJoinedBookingById } = require("../../utils/bookings");
-const {
-  shouldUseCustomerHistory, servicesHasColumn,
-  getIdempotencyKey, mustHaveTenantSlug, canTransitionStatus, bumpTenantBookingChange,
-  roundUpMinutes,
-} = require("../../utils/bookingRouteHelpers");
-// VOICE-PERF-1: Bust the customer's AI context cache after a booking lands
-// so subsequent voice/chat turns see updated balance + the new booking in
-// recent history.
-const aiContextCache = require("../../utils/aiContextCache");
+const { loadJoinedBookingById } = require("../../utils/bookings");
+const { getIdempotencyKey, bumpTenantBookingChange } = require("../../utils/bookingRouteHelpers");
 // PR 1 (Phase 1 refactor): post-COMMIT WA/SMS/email dispatch + AI cache bust.
 const dispatchNotifications = require("./dispatchNotifications");
 // PR 2 (Phase 1 refactor): pre-BEGIN input validation + customer resolution.

@@ -166,24 +166,9 @@ async function loadRequirePhonePolicy(tenantId) {
 // Derives resolvedStartTime (nightly mode may derive from checkin_date),
 // validates the date is well-formed, and rejects past times.
 // Returns { resolvedStartTime, start, isNightlyBooking } on success.
-//
-// Note: the `if (!resolvedStartTime)` branch below is dead code when called
-// after parseInputs (which already rejects on falsy startTime). Preserved
-// verbatim for byte-identical behavior — see Phase 1 cleanup findings.
 function deriveStartTime({ startTime, checkin_date, incomingBookingMode }) {
-  // RENTAL-1: For nightly bookings, derive startTime from checkin_date if not provided
   const isNightlyBooking = incomingBookingMode === 'nightly';
   let resolvedStartTime = startTime;
-  if (isNightlyBooking && !startTime && checkin_date) {
-    resolvedStartTime = new Date(`${checkin_date}T00:00:00Z`).toISOString();
-  }
-  if (!resolvedStartTime) {
-    return {
-      ok: false,
-      status: 400,
-      body: { error: 'Missing required fields (startTime).' },
-    };
-  }
 
   const start = new Date(resolvedStartTime);
   if (Number.isNaN(start.getTime())) {
