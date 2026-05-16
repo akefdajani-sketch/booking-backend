@@ -13,11 +13,9 @@ const { findOrCreateSession, incrementSessionCount, decrementSessionCount, loadJ
 const { ensureBookingRateColumns } = require("../../utils/ensureBookingRateColumns");
 const { ensurePaymentMethodColumn } = require("../../utils/ensurePaymentMethodColumn");
 const {
-  shouldUseCustomerHistory, servicesHasColumn, getServiceAllowMembership,
+  shouldUseCustomerHistory, servicesHasColumn,
   getIdempotencyKey, mustHaveTenantSlug, canTransitionStatus, bumpTenantBookingChange,
-  prepaidTablesExist, resolvePrepaidSelection, computePrepaidRedemptionSelection,
-  loadMembershipCheckoutPolicy, roundUpMinutes, buildMembershipResolution,
-  buildMembershipInsufficientPayload,
+  roundUpMinutes, buildMembershipResolution,
 } = require("../../utils/bookingRouteHelpers");
 // VOICE-PERF-1: Bust the customer's AI context cache after a booking lands
 // so subsequent voice/chat turns see updated balance + the new booking in
@@ -32,6 +30,8 @@ const resolveCustomer = require("./resolveCustomer");
 const { loadService, checkAvailability } = require("./resolveAvailability");
 // PR 4 (Phase 1 refactor): post-BEGIN pricing pipeline (rate + charge + Gate B + tax).
 const computePricing = require("./computePricing");
+// PR 5 (Phase 1 refactor): post-BEGIN membership consumption + prepaid resolution.
+const { resolveMembership, resolvePrepaid } = require("./resolveEntitlement");
 
 
 module.exports = function mount(router) {
@@ -189,222 +189,44 @@ router.post("/", requireAppAuth, requireTenant, async (req, res) => {
       const cleanEmail = finalCustomerEmail ? String(finalCustomerEmail).trim() : null;
 
 
-      // Optional: apply customer membership (atomic debit in the same transaction)
-      let finalCustomerMembershipId = null;
-      let debitMinutes = 0;
-      let debitUses = 0;
-      let prepaidApplied = null;
+      // PR 5 (Phase 1 refactor): post-BEGIN membership consumption + prepaid
+      // resolution extracted to routes/bookings/resolveEntitlement.js. Two
+      // functions; each takes the transaction client and owns its own
+      // ROLLBACK on failure (14 ROLLBACKs in the inventory; mapping in the
+      // PR 5 description). Back-edges (debitMinutes, debitUses,
+      // membershipBefore, membershipPolicy) flow back to this orchestrator
+      // for the post-INSERT ledger-write block below; PR 6 will absorb that
+      // block, at which point the back-edges become module-internal.
+      const memResult = await resolveMembership(client, {
+        tenantId: resolvedTenantId,
+        serviceId,
+        finalCustomerId,
+        customerMembershipId,
+        autoConsumeMembership,
+        requireMembership,
+        duration,
+      });
+      if (!memResult.ok) return res.status(memResult.status).json(memResult.body);
+      const {
+        finalCustomerMembershipId,
+        debitMinutes,
+        debitUses,
+        membershipBefore,
+        membershipPolicy,
+      } = memResult;
 
-      // Snapshot of selected membership balance BEFORE debit (for resolution UI)
-      let membershipBefore = null;
-
-      // Tenant membership checkout policy (defaults safe)
-      const membershipPolicy = await loadMembershipCheckoutPolicy(client, resolvedTenantId);
-
-      // Optional: auto-consume an eligible membership entitlement (platform-safe, no schema change)
-      // If requireMembership=true, we will HARD FAIL when no eligible entitlement exists.
-      let wantAutoMembership =
-        (autoConsumeMembership === true || String(autoConsumeMembership).toLowerCase() === "true");
-      let wantRequireMembership =
-        (requireMembership === true || String(requireMembership).toLowerCase() === "true");
-
-      // Service-level eligibility guard:
-      // We only allow membership debits for services explicitly marked allow_membership=true.
-      // This prevents accidental credit use for non-membership products (e.g., lessons, karaoke).
-      const membershipRequested =
-        wantAutoMembership || wantRequireMembership || (customerMembershipId != null && String(customerMembershipId).trim() !== "");
-
-      if (membershipRequested) {
-        if (!serviceId) {
-          await client.query("ROLLBACK");
-          return res.status(400).json({ error: "Membership credits require a service selection." });
-        }
-
-        const svcRule = await getServiceAllowMembership(client, resolvedTenantId, serviceId);
-        if (!svcRule.allowed) {
-          // Hard-fail when the caller explicitly requested membership use.
-          if (wantRequireMembership || (customerMembershipId != null && String(customerMembershipId).trim() !== "")) {
-            await client.query("ROLLBACK");
-            return res.status(409).json({
-              error: "This service is not eligible for membership credits. Ask the business to enable membership for this service in Setup → Memberships.",
-            });
-          }
-
-          // Soft mode: ignore auto consumption for non-eligible services.
-          wantAutoMembership = false;
-          wantRequireMembership = false;
-        }
-      }
-
-      if (!finalCustomerMembershipId && (wantAutoMembership || wantRequireMembership) && !customerMembershipId) {
-        if (!finalCustomerId) {
-          await client.query("ROLLBACK");
-          return res.status(400).json({ error: "Membership consumption requires a signed-in customer." });
-        }
-
-        // Pick ONE eligible active membership deterministically.
-        // Eligibility: active + not expired + (has any remaining balance: minutes_remaining > 0 OR uses_remaining > 0)
-        // NOTE: We intentionally allow selecting an insufficient membership so the UX can offer Smart Top-Up.
-        // Ordering: soonest expiry first (NULLS LAST), then highest remaining balance, then id.
-        const eligible = await client.query(
-          `
-          SELECT id, customer_id, minutes_remaining, uses_remaining
-          FROM customer_memberships
-          WHERE tenant_id = $1
-            AND customer_id = $2
-            AND COALESCE(status, 'active') = 'active'
-            AND (end_at IS NULL OR end_at > NOW())
-            AND (COALESCE(minutes_remaining,0) > 0 OR COALESCE(uses_remaining,0) > 0)
-          ORDER BY
-            end_at NULLS LAST,
-            end_at ASC,
-            COALESCE(minutes_remaining,0) DESC,
-            COALESCE(uses_remaining,0) DESC,
-            id ASC
-          LIMIT 1
-          FOR UPDATE
-          `,
-          [resolvedTenantId, finalCustomerId]
-        );
-
-        if (!eligible.rows.length) {
-          if (wantRequireMembership) {
-            await client.query("ROLLBACK");
-            const payload = buildMembershipInsufficientPayload({ policy: membershipPolicy, durationMinutes: Number(duration), membershipBefore: null, membershipId: null });
-            payload.message = "No eligible membership entitlement found.";
-            return res.status(409).json(payload);
-          }
-          // soft mode: proceed without membership
-        } else {
-          const cm = eligible.rows[0];
-          const minsRemaining = Number(cm.minutes_remaining || 0);
-          const usesRemaining = Number(cm.uses_remaining || 0);
-
-          // Debit policy mirrors the explicit membership path:
-          // capture balances for resolution
-          membershipBefore = { minutes_remaining: minsRemaining, uses_remaining: usesRemaining, id: cm.id };
-
-          if (minsRemaining >= Number(duration)) {
-            debitMinutes = -Number(duration);
-            debitUses = 0;
-          } else if (usesRemaining >= 1) {
-            debitMinutes = 0;
-            debitUses = -1;
-          } else if (wantRequireMembership) {
-            await client.query("ROLLBACK");
-            return res.status(409).json(buildMembershipInsufficientPayload({ policy: membershipPolicy, durationMinutes: Number(duration), membershipBefore, membershipId: cm.id }));
-          }
-
-          finalCustomerMembershipId = cm.id;
-        }
-      }
-
-
-
-      if (customerMembershipId != null && String(customerMembershipId).trim() !== "") {
-        const cmid = Number(customerMembershipId);
-        if (!Number.isFinite(cmid) || cmid <= 0) {
-          await client.query("ROLLBACK");
-          return res.status(400).json({ error: "Invalid customerMembershipId." });
-        }
-
-        // Lock the membership row to prevent concurrent double-spend.
-        const cmRes = await client.query(
-          `
-          SELECT id, customer_id, status, end_at, minutes_remaining, uses_remaining
-          FROM customer_memberships
-          WHERE id=$1 AND tenant_id=$2
-          FOR UPDATE
-          `,
-          [cmid, resolvedTenantId]
-        );
-
-        if (!cmRes.rows.length) {
-          await client.query("ROLLBACK");
-          return res.status(400).json({ error: "Unknown customerMembershipId for tenant." });
-        }
-
-        const cm = cmRes.rows[0];
-
-        // If booking is linked to a customer, enforce membership belongs to same customer.
-        if (finalCustomerId && Number(cm.customer_id) !== Number(finalCustomerId)) {
-          await client.query("ROLLBACK");
-          return res.status(400).json({ error: "Membership does not belong to this customer." });
-        }
-
-        if (String(cm.status) !== "active" || (cm.end_at && new Date(cm.end_at).getTime() <= Date.now())) {
-          await client.query("ROLLBACK");
-          return res.status(400).json({ error: "Membership is not active or is expired." });
-        }
-
-        const minsRemaining = Number(cm.minutes_remaining || 0);
-        const usesRemaining = Number(cm.uses_remaining || 0);
-
-        membershipBefore = { minutes_remaining: minsRemaining, uses_remaining: usesRemaining, id: cm.id };
-
-        // Default debit policy:
-        // - If membership has enough minutes, debit booking duration minutes.
-        // - Otherwise, if it has uses, debit 1 use.
-        // (You can make this service-specific later.)
-        if (minsRemaining >= Number(duration)) {
-          debitMinutes = -Number(duration);
-          debitUses = 0;
-        } else if (usesRemaining >= 1) {
-          debitMinutes = 0;
-          debitUses = -1;
-        } else {
-          await client.query("ROLLBACK");
-          return res.status(409).json(buildMembershipInsufficientPayload({ policy: membershipPolicy, durationMinutes: Number(duration), membershipBefore, membershipId: cm.id }));
-        }
-
-        finalCustomerMembershipId = cm.id;
-      }
-
-      const prepaidRequested =
-        autoConsumePrepaid === true || String(autoConsumePrepaid).toLowerCase() === "true" ||
-        requirePrepaid === true || String(requirePrepaid).toLowerCase() === "true" ||
-        (prepaidEntitlementId != null && String(prepaidEntitlementId).trim() !== "");
-
-      if (prepaidRequested) {
-        if (!finalCustomerId) {
-          await client.query("ROLLBACK");
-          return res.status(400).json({ error: "Prepaid redemption requires a signed-in customer." });
-        }
-        const prepaidReady = await prepaidTablesExist(client);
-        if (!prepaidReady) {
-          await client.query("ROLLBACK");
-          return res.status(503).json({ error: "Prepaid accounting schema is not installed." });
-        }
-
-        const selectedEntitlement = await resolvePrepaidSelection(client, {
-          tenantId: resolvedTenantId,
-          customerId: finalCustomerId,
-          entitlementId: prepaidEntitlementId ? Number(prepaidEntitlementId) : null,
-          serviceId: resolvedServiceId,
-        });
-
-        if (!selectedEntitlement) {
-          if (requirePrepaid === true || String(requirePrepaid).toLowerCase() === "true") {
-            await client.query("ROLLBACK");
-            return res.status(409).json({ error: "No eligible prepaid balance found for this booking." });
-          }
-        } else {
-          const prepaidSelection = computePrepaidRedemptionSelection(selectedEntitlement, Number(duration), Number(serviceDurationMinutes || duration || 0));
-          const remaining = Number(selectedEntitlement.remaining_quantity || 0);
-          if (remaining < prepaidSelection.redeemedQuantity) {
-            await client.query("ROLLBACK");
-            return res.status(409).json({ error: "Insufficient prepaid balance for this booking." });
-          }
-          prepaidApplied = {
-            entitlementId: Number(selectedEntitlement.id),
-            prepaidProductId: Number(selectedEntitlement.prepaid_product_id),
-            prepaidProductName: selectedEntitlement.prepaid_product_name || null,
-            redeemedQuantity: prepaidSelection.redeemedQuantity,
-            redemptionMode: prepaidSelection.redemptionMode,
-            notes: `Applied to booking`,
-          };
-        }
-      }
+      const prepaidResult = await resolvePrepaid(client, {
+        tenantId: resolvedTenantId,
+        resolvedServiceId,
+        finalCustomerId,
+        duration,
+        serviceDurationMinutes,
+        prepaidEntitlementId,
+        autoConsumePrepaid,
+        requirePrepaid,
+      });
+      if (!prepaidResult.ok) return res.status(prepaidResult.status).json(prepaidResult.body);
+      const { prepaidApplied } = prepaidResult;
 
       // Insert booking (idempotent)
       const initialStatus = requiresConfirmation ? "pending" : "confirmed";

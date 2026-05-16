@@ -104,7 +104,20 @@ const SERVICE_ROW_NIGHTLY = {
 
 // Module-level mutable state. Reset in installDbMocks; tests can override
 // before sending the request. (Closure-bound by the mock implementations.)
-const state = { serviceRow: SERVICE_ROW };
+//
+// PR 5 extensions:
+//   - membershipForUpdateRows: per-test override for the auto-consume
+//     FOR UPDATE customer_memberships select. null = default
+//     (returns [MEMBERSHIP_ROW]); array = use that as rows.
+//   - balanceUpdateRowCount: per-test override for the GREATEST-bearing
+//     balance recompute UPDATE customer_memberships rowCount. 1 = default
+//     (success); 0 = simulate concurrent drain → triggers ROLLBACK at
+//     create.js L887.
+const state = {
+  serviceRow: SERVICE_ROW,
+  membershipForUpdateRows: null,
+  balanceUpdateRowCount: 1,
+};
 
 // loadJoinedBookingById is mocked; this is the row the handler echoes back.
 const JOINED_BOOKING = {
@@ -251,6 +264,9 @@ function installDbMocks() {
   // PR 0.3 — reset module-level state for service row and the policy default
   // so per-test overrides don't leak.
   state.serviceRow = SERVICE_ROW;
+  // PR 5 — reset entitlement-failure overrides so Tests 1-4 see defaults.
+  state.membershipForUpdateRows = null;
+  state.balanceUpdateRowCount = 1;
   bookingPolicy.getBookingPolicy.mockResolvedValue({
     enforceWorkingHours: false,
     requireCharge: false,
@@ -327,7 +343,12 @@ function installDbMocks() {
     }
 
     // Auto-consume membership selection (FOR UPDATE) — create.js L450-469.
+    // PR 5: respect per-test override (state.membershipForUpdateRows) so
+    // entitlement-failure cases can return insufficient-balance rows.
     if (s.includes('FROM customer_memberships') && s.includes('FOR UPDATE')) {
+      if (state.membershipForUpdateRows !== null) {
+        return { rows: state.membershipForUpdateRows };
+      }
       return { rows: [{ ...MEMBERSHIP_ROW }] };
     }
 
@@ -340,9 +361,13 @@ function installDbMocks() {
       throw err;
     }
 
-    // Balance recompute + expiry-check UPDATEs both match this branch.
-    // Balance UPDATE contains GREATEST(...) and reads its return; expiry does not.
-    if (s.includes('UPDATE customer_memberships')) {
+    // Balance recompute UPDATE — contains GREATEST(...) and reads its return.
+    // PR 5: respect per-test override (state.balanceUpdateRowCount) so Test 5
+    // case 3 can simulate the post-INSERT concurrent-drain race.
+    if (s.includes('UPDATE customer_memberships') && s.includes('GREATEST')) {
+      if (state.balanceUpdateRowCount === 0) {
+        return { rowCount: 0, rows: [] };
+      }
       return {
         rowCount: 1,
         rows: [{
@@ -351,6 +376,11 @@ function installDbMocks() {
           uses_remaining: 0,
         }],
       };
+    }
+
+    // Expiry-check UPDATE — no GREATEST; create.js does not read its return.
+    if (s.includes('UPDATE customer_memberships')) {
+      return { rowCount: 0, rows: [] };
     }
 
     if (s.includes('UPDATE tenants')) {
@@ -705,4 +735,164 @@ test('nightly mode: price_per_night × nights → 201, booking_mode=nightly, Gat
   expect(clientCalls.some((s) => s.includes('membership_ledger'))).toBe(false);
   expect(clientCalls.some((s) => s.includes('prepaid_redemptions'))).toBe(false);
   expect(clientCalls.some((s) => s.includes('prepaid_transactions'))).toBe(false);
+});
+
+// ─── Test 5 — entitlement failure paths (PR 5) ────────────────────────────────
+//
+// First test that exercises ROLLBACK paths in the entitlement block. Three
+// cases:
+//
+//   1. Insufficient membership balance (auto-consume + require-mode)
+//      → resolveMembership ROLLBACK #5, 409, no booking INSERT, no ledger.
+//      Auto-consume FOR UPDATE returns a row that passes the
+//      (minutes_remaining > 0 OR uses_remaining > 0) eligibility filter
+//      but lacks balance for the booking. minutes=30 < duration=60 AND
+//      uses=0 < 1 → falls through both debit-policy branches → since
+//      requireMembership=true, ROLLBACK.
+//
+//   2. Service not eligible (require-mode)
+//      → resolveMembership ROLLBACK #2, 409, no booking INSERT, no ledger.
+//      getServiceAllowMembership returns { allowed: false } and the caller
+//      set requireMembership=true → hard fail.
+//
+//   3. Race on debit (post-INSERT balance UPDATE returns rowCount=0)
+//      → orchestrator ROLLBACK at create.js L887, 409. The booking INSERT
+//      and membership_ledger INSERT both succeeded, then the balance
+//      recompute UPDATE returned 0 rows — simulating a concurrent decrement
+//      that drained the balance between the FOR UPDATE select and the
+//      recompute. This case exercises the BACK-EDGE integrity (PR 5): the
+//      resolution closure at L893-913 reads membershipBefore +
+//      membershipPolicy via buildMembershipResolution. If either back-edge
+//      is broken after extraction (e.g. resolveMembership forgets to
+//      return one of them), the closure either throws (caught at L911,
+//      falls back to the second buildMembershipResolution call without
+//      membershipId) or produces a different shape. Asserting the
+//      returned resolution shape proves both back-edges are intact.
+
+describe('entitlement failure paths', () => {
+  test('insufficient membership balance: auto-consume + require → ROLLBACK + 409, no INSERT', async () => {
+    // Override the FOR UPDATE select to return a row that passes the
+    // eligibility filter but lacks the balance for a 60-min booking.
+    state.membershipForUpdateRows = [{
+      id: MEMBERSHIP_ID,
+      customer_id: CUSTOMER_ID,
+      minutes_remaining: 30,
+      uses_remaining: 0,
+    }];
+
+    // buildMembershipInsufficientPayload is auto-mocked → returns undefined.
+    // Pin a recognizable shape so the assertion has something to target.
+    helpers.buildMembershipInsufficientPayload.mockReturnValueOnce({
+      message: 'insufficient',
+      resolution: null,
+      membershipId: MEMBERSHIP_ID,
+    });
+
+    const app = buildApp();
+    const startTime = new Date(Date.now() + 86400000).toISOString();
+
+    const res = await request(app)
+      .post('/api/bookings')
+      .send({
+        tenantSlug: TENANT_SLUG,
+        serviceId: SERVICE_ID,
+        startTime,
+        durationMinutes: 60,
+        autoConsumeMembership: true,
+        requireMembership: true,
+      });
+
+    await flushImmediates();
+
+    expect(res.status).toBe(409);
+    expect(res.body.message).toBe('insufficient');
+    expect(res.body.membershipId).toBe(MEMBERSHIP_ID);
+
+    const clientCalls = db.__client.query.mock.calls.map((c) => String(c[0]));
+    expect(clientCalls.filter((s) => s === 'ROLLBACK')).toHaveLength(1);
+    expect(clientCalls.filter((s) => s === 'COMMIT')).toHaveLength(0);
+    expect(clientCalls.some((s) => s.includes('INSERT INTO bookings'))).toBe(false);
+    expect(clientCalls.some((s) => s.includes('INSERT INTO membership_ledger'))).toBe(false);
+  });
+
+  test('service not eligible: require-mode → ROLLBACK + 409, no INSERT', async () => {
+    helpers.getServiceAllowMembership.mockResolvedValueOnce({ allowed: false });
+
+    const app = buildApp();
+    const startTime = new Date(Date.now() + 86400000).toISOString();
+
+    const res = await request(app)
+      .post('/api/bookings')
+      .send({
+        tenantSlug: TENANT_SLUG,
+        serviceId: SERVICE_ID,
+        startTime,
+        durationMinutes: 60,
+        requireMembership: true,
+      });
+
+    await flushImmediates();
+
+    expect(res.status).toBe(409);
+    expect(res.body.error).toMatch(/not eligible for membership credits/);
+
+    const clientCalls = db.__client.query.mock.calls.map((c) => String(c[0]));
+    expect(clientCalls.filter((s) => s === 'ROLLBACK')).toHaveLength(1);
+    expect(clientCalls.filter((s) => s === 'COMMIT')).toHaveLength(0);
+    expect(clientCalls.some((s) => s.includes('INSERT INTO bookings'))).toBe(false);
+    expect(clientCalls.some((s) => s.includes('INSERT INTO membership_ledger'))).toBe(false);
+  });
+
+  test('race on debit: balance UPDATE returns rowCount=0 → ROLLBACK + 409, back-edge integrity', async () => {
+    // The booking succeeds through INSERT and membership_ledger INSERT, but
+    // the balance recompute UPDATE (with GREATEST) returns rowCount=0,
+    // simulating a concurrent decrement that already drained the balance
+    // between the FOR UPDATE select and the recompute. Orchestrator path:
+    // create.js L887.
+    state.balanceUpdateRowCount = 0;
+
+    // buildMembershipResolution is auto-mocked → returns undefined. Pin a
+    // recognizable shape so the resolution closure (create.js L893-913)
+    // produces an assertable body.resolution. The closure mutates
+    // r.membershipId = before.id, where before = membershipBefore (the
+    // back-edge returned by resolveMembership). MEMBERSHIP_ROW.id === 200,
+    // so a correct back-edge produces resolution.membershipId === 200.
+    helpers.buildMembershipResolution.mockReturnValueOnce({
+      suggestion: 'topup',
+      membershipId: null,
+    });
+
+    const app = buildApp();
+    const startTime = new Date(Date.now() + 86400000).toISOString();
+
+    const res = await request(app)
+      .post('/api/bookings')
+      .send({
+        tenantSlug: TENANT_SLUG,
+        serviceId: SERVICE_ID,
+        startTime,
+        durationMinutes: 60,
+        autoConsumeMembership: true,
+      });
+
+    await flushImmediates();
+
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe('membership_insufficient_balance');
+    expect(res.body.message).toMatch(/enough remaining balance/);
+
+    // Back-edge integrity: r.membershipId was set from membershipBefore.id
+    // (200). If membershipBefore failed to flow back from resolveMembership,
+    // before would be {} and r.membershipId would be null — different shape.
+    expect(res.body.resolution).toEqual({
+      suggestion: 'topup',
+      membershipId: MEMBERSHIP_ID,
+    });
+
+    const clientCalls = db.__client.query.mock.calls.map((c) => String(c[0]));
+    expect(clientCalls.filter((s) => s === 'ROLLBACK')).toHaveLength(1);
+    expect(clientCalls.filter((s) => s === 'COMMIT')).toHaveLength(0);
+    expect(clientCalls.some((s) => s.includes('INSERT INTO bookings'))).toBe(true);
+    expect(clientCalls.some((s) => s.includes('INSERT INTO membership_ledger'))).toBe(true);
+  });
 });
