@@ -346,7 +346,8 @@ async function insertBookingRow(client, ctx, payment, cols, resolvedSessionId) {
 // PREFIX from tenants.booking_code_prefix (fallback: slug). TYPE=TS|NT.
 // SEQ4 = per-tenant counter (atomic UPDATE tenants RETURNING booking_seq).
 // Non-fatal fallback (legacy format) if any step throws.
-async function generateBookingCode(client, ctx, bookingId) {
+async function generateBookingCode(client, ctx, bookingId, created) {
+  if (!created) return; // Cleanup PR B: skip seq increment on idempotency replay (finding #8)
   const { tenantId, isNightlyBooking, checkin_date, start, resolvedStartTime, resolvedServiceId, cleanName } = ctx;
 
   let bookingCode;
@@ -405,7 +406,7 @@ async function persistBooking(client, ctx) {
   if (!insertResult.ok) return insertResult;
   const { bookingId, created } = insertResult;
 
-  await generateBookingCode(client, ctx, bookingId);
+  await generateBookingCode(client, ctx, bookingId, created);
 
   return { ok: true, bookingId, created };
 }
