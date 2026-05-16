@@ -55,7 +55,8 @@ const slotConfirmationCache = (() => {
       if (k.startsWith(prefix) && k.endsWith(suffix)) store.delete(k);
     }
   }
-  return { set, get, bustForBooking };
+  function _resetForTests() { store.clear(); }
+  return { set, get, bustForBooking, _resetForTests };
 })();
 
 // VOICE-FIX-1: Defensive inline conflict check used by create_booking before
@@ -1365,3 +1366,6 @@ module.exports.handleAction           = handleAction;
 module.exports.isConfirmationMessage  = isConfirmationMessage;
 module.exports.hasRecentPendingBooking = hasRecentPendingBooking;
 module.exports.optionalAuth           = optionalAuth;
+// Phase 2.0 test net: __tests__/ai_voice_chat.test.js seeds and resets the
+// in-process slot cache through this handle. Not used by production code.
+module.exports._slotConfirmationCacheForTests = slotConfirmationCache;
