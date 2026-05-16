@@ -209,10 +209,11 @@ async function writeMembershipSideEffects(client, ctx, bookingId) {
 // decrement remaining_quantity (with 'consumed' status flip when zero),
 // and INSERT a prepaid_transactions row. Mutates ctx.prepaidApplied with
 // the redemptionId + remainingQuantity from RETURNING.
-async function writePrepaidSideEffects(client, ctx, bookingId) {
+async function writePrepaidSideEffects(client, ctx, bookingId, created) {
   const { tenantId, finalCustomerId, prepaidApplied } = ctx;
 
   if (!prepaidApplied) return;
+  if (!created) return; // Cleanup PR B: skip on idempotency replay (findings #9, #10, #11)
 
   const redemptionRes = await client.query(
     `
@@ -288,12 +289,11 @@ async function writePrepaidSideEffects(client, ctx, bookingId) {
 }
 
 // ─── applyEntitlementWrites (public entry point) ──────────────────────────
-// eslint-disable-next-line no-unused-vars
 async function applyEntitlementWrites(client, ctx, bookingId, created) {
   const memResult = await writeMembershipSideEffects(client, ctx, bookingId);
   if (!memResult.ok) return memResult;
 
-  await writePrepaidSideEffects(client, ctx, bookingId);
+  await writePrepaidSideEffects(client, ctx, bookingId, created);
 
   return { ok: true, prepaidApplied: ctx.prepaidApplied || null };
 }

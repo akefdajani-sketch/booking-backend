@@ -383,6 +383,21 @@ function installDbMocks() {
       return { rowCount: 0, rows: [] };
     }
 
+    // Cleanup PR B — prepaid replay fixes. Routes for the 3 prepaid writes
+    // gated by the new `if (!created) return;` in writePrepaidSideEffects.
+    // Inert for Tests 1-5 (which don't enter the prepaid path); only fire
+    // when a request body sets autoConsumePrepaid / prepaidEntitlementId
+    // AND the prepaid helpers return a non-null entitlement.
+    if (s.includes('INSERT INTO prepaid_redemptions')) {
+      return { rows: [{ id: 999 }] };
+    }
+    if (s.includes('UPDATE customer_prepaid_entitlements')) {
+      return { rowCount: 1, rows: [{ remaining_quantity: 5 }] };
+    }
+    if (s.includes('INSERT INTO prepaid_transactions')) {
+      return { rowCount: 1 };
+    }
+
     if (s.includes('UPDATE tenants')) {
       return { rows: [{ booking_seq: 79, booking_code_prefix: 'TST', slug: TENANT_SLUG }] };
     }
@@ -894,5 +909,168 @@ describe('entitlement failure paths', () => {
     expect(clientCalls.filter((s) => s === 'COMMIT')).toHaveLength(0);
     expect(clientCalls.some((s) => s.includes('INSERT INTO bookings'))).toBe(true);
     expect(clientCalls.some((s) => s.includes('INSERT INTO membership_ledger'))).toBe(true);
+  });
+});
+
+// ─── Test 6 — prepaid replay invariants (Cleanup PR B) ────────────────────────
+//
+// Three cases that verify the fix for Phase 1 cleanup findings #8, #9, #10, #11:
+//
+//   1. Fresh INSERT writes all 3 prepaid records + advances booking_seq.
+//      (Sanity check that the prepaid path works at all — none of Tests 1-5
+//      exercise this surface.)
+//
+//   2. Idempotency replay SKIPS all 3 prepaid records.
+//      Findings #9, #10, #11 — pre-fix, the 2nd POST double-wrote
+//      prepaid_redemptions, decremented remaining_quantity twice, and
+//      wrote a duplicate prepaid_transactions row. The fix gates
+//      writePrepaidSideEffects on `created`.
+//
+//   3. Idempotency replay SKIPS the booking_seq increment.
+//      Finding #8 — pre-fix, tenants.booking_seq advanced on every replay
+//      attempt, causing cosmetic gaps in numbering. The fix gates
+//      generateBookingCode on `created`.
+//
+// Cases 2 + 3 are the regression net. Without them, a future PR could
+// revert the `if (!created) return;` gates and no test would catch it.
+
+const PREPAID_ENTITLEMENT_ID = 500;
+const PREPAID_PRODUCT_ID = 600;
+const PREPAID_REDEMPTION_ID = 999;
+
+function pinPrepaidHelpers() {
+  helpers.prepaidTablesExist.mockResolvedValue(true);
+  helpers.resolvePrepaidSelection.mockResolvedValue({
+    id: PREPAID_ENTITLEMENT_ID,
+    prepaid_product_id: PREPAID_PRODUCT_ID,
+    prepaid_product_name: 'Test Package',
+    remaining_quantity: 10,
+  });
+  helpers.computePrepaidRedemptionSelection.mockReturnValue({
+    redeemedQuantity: 1,
+    redemptionMode: 'session',
+  });
+}
+
+describe('prepaid replay invariants', () => {
+  test('fresh INSERT with prepaid: writes prepaid_redemptions + entitlement decrement + prepaid_transactions + booking_seq advance', async () => {
+    pinPrepaidHelpers();
+    const app = buildApp();
+    const startTime = new Date(Date.now() + 86400000).toISOString();
+
+    const res = await request(app)
+      .post('/api/bookings')
+      .send({
+        tenantSlug: TENANT_SLUG,
+        serviceId: SERVICE_ID,
+        startTime,
+        durationMinutes: 60,
+        autoConsumePrepaid: true,
+      });
+
+    await flushImmediates();
+
+    expect(res.status).toBe(201);
+    expect(res.body.replay).toBe(false);
+
+    const clientCalls = db.__client.query.mock.calls.map((c) => String(c[0]));
+
+    // ── INSERT INTO bookings — exactly once on fresh ──
+    expect(clientCalls.filter((s) => s.includes('INSERT INTO bookings'))).toHaveLength(1);
+
+    // ── All 3 prepaid writes fire on fresh ──
+    expect(clientCalls.filter((s) => s.includes('INSERT INTO prepaid_redemptions'))).toHaveLength(1);
+    expect(clientCalls.filter((s) => s.includes('UPDATE customer_prepaid_entitlements'))).toHaveLength(1);
+    expect(clientCalls.filter((s) => s.includes('INSERT INTO prepaid_transactions'))).toHaveLength(1);
+
+    // ── booking_seq advances on fresh ──
+    expect(
+      clientCalls.filter((s) => s.includes('UPDATE tenants') && s.includes('booking_seq')),
+    ).toHaveLength(1);
+
+    // ── Transaction lifecycle ──
+    expect(clientCalls).toContain('BEGIN');
+    expect(clientCalls).toContain('COMMIT');
+    expect(clientCalls).not.toContain('ROLLBACK');
+  });
+
+  test('idempotency replay with prepaid: 2nd POST skips all 3 prepaid writes (findings #9, #10, #11)', async () => {
+    pinPrepaidHelpers();
+    helpers.getIdempotencyKey.mockReturnValue(IDEM_KEY);
+
+    const app = buildApp();
+    const startTime = new Date(Date.now() + 86400000).toISOString();
+    const body = {
+      tenantSlug: TENANT_SLUG,
+      serviceId: SERVICE_ID,
+      startTime,
+      durationMinutes: 60,
+      autoConsumePrepaid: true,
+    };
+
+    const res1 = await request(app).post('/api/bookings').send(body);
+    await flushImmediates();
+    const res2 = await request(app).post('/api/bookings').send(body);
+    await flushImmediates();
+
+    expect(res1.status).toBe(201);
+    expect(res1.body.replay).toBe(false);
+    expect(res2.status).toBe(200);
+    expect(res2.body.replay).toBe(true);
+
+    const clientCalls = db.__client.query.mock.calls.map((c) => String(c[0]));
+
+    // ── 2 booking INSERT attempts (1st succeeds, 2nd throws 23505 → replay) ──
+    expect(clientCalls.filter((s) => s.includes('INSERT INTO bookings'))).toHaveLength(2);
+
+    // ── CRITICAL: prepaid writes fire EXACTLY ONCE across both requests.
+    //    Pre-fix this was 2 each (production data corruption on replay). ──
+    expect(clientCalls.filter((s) => s.includes('INSERT INTO prepaid_redemptions'))).toHaveLength(1);
+    expect(clientCalls.filter((s) => s.includes('UPDATE customer_prepaid_entitlements'))).toHaveLength(1);
+    expect(clientCalls.filter((s) => s.includes('INSERT INTO prepaid_transactions'))).toHaveLength(1);
+
+    // ── Transaction lifecycle: both requests committed, never rolled back. ──
+    expect(clientCalls.filter((s) => s === 'BEGIN')).toHaveLength(2);
+    expect(clientCalls.filter((s) => s === 'COMMIT')).toHaveLength(2);
+    expect(clientCalls.filter((s) => s === 'ROLLBACK')).toHaveLength(0);
+  });
+
+  test('idempotency replay: 2nd POST skips booking_seq increment (finding #8)', async () => {
+    pinPrepaidHelpers();
+    helpers.getIdempotencyKey.mockReturnValue(IDEM_KEY);
+
+    const app = buildApp();
+    const startTime = new Date(Date.now() + 86400000).toISOString();
+    const body = {
+      tenantSlug: TENANT_SLUG,
+      serviceId: SERVICE_ID,
+      startTime,
+      durationMinutes: 60,
+      autoConsumePrepaid: true,
+    };
+
+    const res1 = await request(app).post('/api/bookings').send(body);
+    await flushImmediates();
+    const res2 = await request(app).post('/api/bookings').send(body);
+    await flushImmediates();
+
+    expect(res1.status).toBe(201);
+    expect(res2.status).toBe(200);
+    expect(res2.body.replay).toBe(true);
+
+    const clientCalls = db.__client.query.mock.calls.map((c) => String(c[0]));
+
+    // ── CRITICAL: booking_seq UPDATE fires EXACTLY ONCE across both requests.
+    //    Pre-fix this was 2 (cosmetic seq gap on every replay). ──
+    expect(
+      clientCalls.filter((s) => s.includes('UPDATE tenants') && s.includes('booking_seq')),
+    ).toHaveLength(1);
+
+    // ── booking_code UPDATE also skipped on replay (gated by the same
+    //    early return; the COALESCE means it's idempotent by SQL anyway,
+    //    but skipping saves a roundtrip). ──
+    expect(
+      clientCalls.filter((s) => s.includes('UPDATE bookings') && s.includes('booking_code')),
+    ).toHaveLength(1);
   });
 });
