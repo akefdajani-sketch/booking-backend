@@ -662,7 +662,74 @@ Replace values with exact numbers from the business context. ALWAYS append the t
 }
 
 // ── Main agent ────────────────────────────────────────────────────────
-async function runSupportAgent({ tenantContext, customerData, isSignedIn, history, message, confirmationMode = false }) {
+async function runSupportAgent({
+  tenantContext, customerData, isSignedIn, history, message,
+  confirmationMode = false,
+  // Phase 2.3 — optional params, default-safe (legacy callers ignore them).
+  language = 'en',
+  consumerType = 'chat',
+  handleAction = null,             // dependency-injected by route to avoid circular dep
+  handleActionContext = null,      // { tenantId, tenantSlug, customerId, email, authToken }
+}) {
+  // ─────────────────────────────────────────────────────────────────────
+  // Phase 2.3 — Two-query orchestrator path behind
+  //   tenants.features.voice_two_query === true
+  //
+  // Defensive triple-AND guard: flag ON + handleAction injected + context
+  // present. If a route forgets to inject handleAction, the orchestrator
+  // FALLS BACK to the legacy path (rather than crashing) — so legacy
+  // behavior is preserved end-to-end even with a misconfigured callsite.
+  //
+  // Returns shape: { reply, action, pendingBooking, slots, orchestrated:true }
+  // The route detects `orchestrated:true` and short-circuits its own
+  // legacy handleAction + follow-up-runSupportAgent code path.
+  // ─────────────────────────────────────────────────────────────────────
+  const useTwoQuery =
+    tenantContext?.features?.voice_two_query === true
+    && typeof handleAction === 'function'
+    && handleActionContext != null;
+
+  if (useTwoQuery) {
+    // Lazy require — keeps top-of-module clean, only loads when flag is ON.
+    const { runBookingBrain } = require('./bookingBrain');
+    const { speakReply } = require('./voicePersona');
+
+    const brain = await runBookingBrain({
+      tenantContext, customerData, isSignedIn, history, message, confirmationMode,
+    });
+
+    let actionResult = null;
+    if (brain.action) {
+      const c = handleActionContext;
+      try {
+        actionResult = await handleAction(
+          brain.action, c.tenantId, c.tenantSlug,
+          c.customerId, c.email, c.authToken,
+        );
+      } catch (err) {
+        console.error('[claudeService:twoQuery] handleAction threw:', err?.message || err);
+        actionResult = { success: false, message: 'Action execution failed — please try again.' };
+      }
+    }
+
+    const { reply, pendingBooking } = await speakReply({
+      tenantContext, brainOutput: brain, actionResult, language, consumerType,
+    });
+
+    return {
+      reply,
+      action: actionResult,
+      pendingBooking,
+      slots: actionResult?.slots ?? null,
+      orchestrated: true,
+    };
+  }
+
+  // ─────────────────────────────────────────────────────────────────────
+  // Legacy single-query path (UNCHANGED from pre-2.3 — byte-identical
+  // behavior when flag is off / handleAction not injected).
+  // ─────────────────────────────────────────────────────────────────────
+
   // Compute tz offset here (same logic as buildSystemPrompt) — tzOffsetStr only
   // exists in that function's scope and cannot be referenced here directly.
   const _tz = tenantContext.timezone || "Asia/Amman";

@@ -272,14 +272,45 @@ router.post("/:tenantSlug/booking-assistant", optionalAuth, async (req, res) => 
       ? isConfirming
       : (isConfirmationMessage(query) && hasRecentPendingBooking(history));
 
-    const { reply, action } = await runSupportAgent({
+    // Phase 2.3 — read session language from query (frontend voice client may
+    // pass ?lang=ar). Defaults to 'en'. Only used by persona when the
+    // two-query orchestrator path is active.
+    const requestedLang = String(req.query.lang || "en").toLowerCase();
+    const language = ["en", "ar"].includes(requestedLang) ? requestedLang : "en";
+
+    // Phase 2.3 — inject handleAction + context for orchestrator path.
+    const handleActionContext = {
+      tenantId: tenant.id,
+      tenantSlug: tenant.slug,
+      customerId: customerData?.profile?.id || null,
+      email,
+      authToken,
+    };
+
+    const supportResult = await runSupportAgent({
       tenantContext: { ...tenant, ...businessContext },
       customerData,
       isSignedIn,
       history,
       message: query,
       confirmationMode,
+      language,
+      consumerType: 'voice',
+      handleAction,
+      handleActionContext,
     });
+
+    // Phase 2.3 — orchestrator did everything; short-circuit legacy follow-up.
+    if (supportResult.orchestrated) {
+      return res.json({
+        reply: supportResult.reply,
+        action: supportResult.action,
+        pendingBooking: supportResult.pendingBooking,
+        slots: supportResult.slots,
+      });
+    }
+
+    const { reply, action } = supportResult;
 
     // ── Execute action if Claude requested one ───────────────────────────
     let actionResult = null;

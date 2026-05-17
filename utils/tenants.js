@@ -41,7 +41,7 @@ async function getTenantBySlug(slug) {
 
   const result = await db.query(
     `
-    SELECT id, slug, name, kind, timezone, logo_url, cover_image_url, created_at
+    SELECT id, slug, name, kind, timezone, logo_url, cover_image_url, created_at, features
     FROM tenants
     WHERE slug = $1
     LIMIT 1

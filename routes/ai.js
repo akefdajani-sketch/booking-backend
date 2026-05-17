@@ -1141,14 +1141,44 @@ router.post("/:tenantSlug/chat", optionalAuth, async (req, res) => {
     }
 
     const isConfirmation = isConfirmationMessage(message) && hasRecentPendingBooking(history);
-    const { reply, action } = await runSupportAgent({
+
+    // Phase 2.3 — inject handleAction + context so runSupportAgent can run
+    // the two-query orchestrator (brain → handleAction → persona) when the
+    // tenants.features.voice_two_query flag is on. When flag is off the
+    // injected params are ignored and the legacy single-query path runs.
+    const handleActionContext = {
+      tenantId: tenant.id,
+      tenantSlug: tenant.slug,
+      customerId: customerData?.profile?.id || null,
+      email,
+      authToken,
+    };
+
+    const supportResult = await runSupportAgent({
       tenantContext: { ...tenant, ...businessContext },
       customerData,
       isSignedIn,
       history,
       message,
       confirmationMode: isConfirmation,
+      language: 'en',
+      consumerType: 'chat',
+      handleAction,
+      handleActionContext,
     });
+
+    // Phase 2.3 — orchestrator did brain + handleAction + persona internally.
+    // Short-circuit: skip the legacy follow-up loop.
+    if (supportResult.orchestrated) {
+      return res.json({
+        reply: supportResult.reply,
+        action: supportResult.action,
+        pendingBooking: supportResult.pendingBooking,
+        slots: supportResult.slots,
+      });
+    }
+
+    const { reply, action } = supportResult;
 
     // Execute action if Claude requested one
     let actionResult = null;
