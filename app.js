@@ -119,6 +119,9 @@ const billingRouter = require("./routes/billing");
 
 // AI: Claude-powered support agent + landing copy generator
 const aiRouter = require("./routes/ai");
+// Flexrz Assistant (owner-side AI analytics agent) — server-side proxy so
+// the frontend doesn't call api.anthropic.com directly (CSP + API key safety).
+const ownerAssistantRouter = require("./routes/owner/assistant");
 
 const app = express();
 
@@ -271,6 +274,8 @@ app.use("/api/tenant-domains", tenantDomainsRouter);
 
 // AI: Claude-powered routes
 app.use("/api/ai", aiRouter);
+// Flexrz Assistant (owner-side AI): POST /api/owner/assistant/:tenantSlug/chat
+app.use("/api/owner/assistant", ownerAssistantRouter);
 // VOICE-2: ElevenLabs Conversational AI integration. /session, /booking-assistant
 // (the agent's tool-bridge), /session/end, /session/event.
 app.use("/api/voice", require("./routes/voice"));
