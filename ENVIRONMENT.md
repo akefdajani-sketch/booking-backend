@@ -72,8 +72,6 @@
 - `DATABASE_SSL` — force SSL on/off (`true`/`false`). Defaults to `true` in production.
 
 ### Optional (Debug)
-- `ENABLE_DEBUG_ROUTES`
-  - Set to `true` to enable `/api/debug/*` routes (non-production only)
 - `ALLOW_VERCEL_PREVIEWS`
   - Set to `true` to allow `*.vercel.app` CORS origins in production
 

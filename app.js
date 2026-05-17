@@ -108,7 +108,6 @@ const publicTenantThemeRouter = require("./routes/publicTenantTheme");
 
 const linksRouter = require("./routes/links");
 const tenantDomainsRouter = require("./routes/tenantDomains");
-const debugGoogleAuthRouter = require("./routes/debugGoogleAuth");
 
 // PR-1: health router (replaces inline /health + old /health/db route)
 const healthRouter = require("./routes/health");
@@ -122,8 +121,6 @@ const billingRouter = require("./routes/billing");
 const aiRouter = require("./routes/ai");
 
 const app = express();
-const ENABLE_DEBUG_ROUTES =
-  String(process.env.ENABLE_DEBUG_ROUTES || "").toLowerCase() === "true";
 
 // ─── Trust proxy (Render sits behind a load balancer) ────────────────────────
 app.set("trust proxy", 1);
@@ -277,10 +274,6 @@ app.use("/api/ai", aiRouter);
 // VOICE-2: ElevenLabs Conversational AI integration. /session, /booking-assistant
 // (the agent's tool-bridge), /session/end, /session/event.
 app.use("/api/voice", require("./routes/voice"));
-
-if (ENABLE_DEBUG_ROUTES && process.env.NODE_ENV !== "production") {
-  app.use("/api/debug", debugGoogleAuthRouter);
-}
 
 // ─── 404 catch-all for /api/* ─────────────────────────────────────────────────
 app.use("/api", (req, res) => res.status(404).json({ error: "Not found" }));
