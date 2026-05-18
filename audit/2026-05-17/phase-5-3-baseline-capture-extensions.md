@@ -57,8 +57,8 @@ default. Acceptable trade.
 script probes `information_schema.columns` before the main loop. If
 the column is missing, the script aborts with exit code 1 and a
 message pointing at `audit/2026-05-14/schema_drift/REPORT.md`. This
-prevents the bug-shaped failure mode of "captured 25 tenants but
-silently missed the 8 on custom domains."
+prevents the bug-shaped failure mode of "captured 7 tenants but
+silently missed tenants on custom domains."
 
 ## Canonical prod-capture invocation
 
@@ -77,7 +77,7 @@ Notes:
   (script 07) and possibly committed; routing them to `snapshots/` is
   the convention.
 - Add `--slug-filter=birdie-golf` for the smoke test before running
-  the full 25-tenant capture.
+  the full 7-tenant capture.
 - Pass `--rate-limit-ms=2000` to slow it down if production logs show
   rate-limiter pushback at the default 1000ms.
 
@@ -85,7 +85,7 @@ Notes:
 
 Before the full prod capture, verify the resolver and schema guard
 work end-to-end with one tenant. Use a SEPARATE output directory so
-the smoke run never clobbers the eventual 25-tenant baseline that the
+the smoke run never clobbers the eventual 7-tenant baseline that the
 diff harness will read:
 
 ```bash
@@ -106,7 +106,7 @@ Expected:
 
 If `usedCustomDomain` is `false` for Birdie, the custom-domain join
 didn't return a primary row — investigate `tenant_domains` rows for
-`tenant_id=3` before scaling to 25.
+`tenant_id=3` before scaling to 7.
 
 ## INDEX.json additions
 
@@ -125,7 +125,7 @@ keep working:
   "rateLimitMs": 1000,              // NEW
   "userAgent": "...",               // NEW
   "slugFilter": null,
-  "tenantCount": 25,
+  "tenantCount": 7,
   "captured": [
     {
       "slug": "...",

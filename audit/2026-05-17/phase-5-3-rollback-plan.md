@@ -68,13 +68,13 @@ If any criterion fails, roll back that phase's tenants and do not advance.
 
 | Phase | Action | Tenants | Verification |
 |------:|---|---|---|
-| **A** | Deploy code + migration 072. Flag defaults FALSE everywhere. | 25 — no behavior change | Migration applies cleanly; `SELECT use_section_renderer, COUNT(*) FROM tenants GROUP BY 1` returns 25 / FALSE. |
+| **A** | Deploy code + migration 072. Flag defaults FALSE everywhere. | 7 — no behavior change | Migration applies cleanly; `SELECT use_section_renderer, COUNT(*) FROM tenants GROUP BY 1` returns 7 / FALSE. |
 | **B** | Flip **Birdie** only (id 3 — most layered patches; premium theme; first canary). | 1 protected | Run 07 against pre-flip baseline (must = exit 0); 24h soak. |
 | **C** | Flip 2–3 low-traffic **standard** tenants. | 2–3 standard | 07 + 24h soak. |
-| **C½** | Flip **Al-Razi (21)** and **aqababooking (33)** individually, with a 24h soak each. The other two protected tenants are gated separately — cheap insurance against silent regressions on the highest-cost tenants. | 2 protected (sequentially, not parallel) | 07 + 24h soak per tenant. |
-| **D** | Bulk flip remaining ~20 standard tenants. | ~20 standard | 07 against full 25-tenant set; 24h soak. |
+| **C½** | Flip **Al-Razi (21)** and **karamhomes (33)** individually, with a 24h soak each. The other two protected tenants are gated separately — cheap insurance against silent regressions on the highest-cost tenants. | 2 protected (sequentially, not parallel) | 07 + 24h soak per tenant. |
+| **D** | Bulk flip remaining 1-2 standard tenants. | 1-2 standard | 07 against full 7-tenant set; 24h soak. |
 
-The three protected tenants (Birdie/Al-Razi/aqababooking) all get
+The three protected tenants (Birdie/Al-Razi/karamhomes) all get
 individual gating (Phases B + C½) before any bulk flip happens.
 
 ## §3 — Rollback triggers
@@ -267,7 +267,7 @@ Phase 5.3; flagged for follow-up.
 
 ## §6 — Cross-references
 
-- `phase-5-3-tenant-inventory.md` — the 25 tenants this plan covers.
+- `phase-5-3-tenant-inventory.md` — the 7 tenants this plan covers.
 - `phase-5-3-section-inventory.md` — what the refactor changes and
   where blockers live.
 - `phase-5-3-patch-tracker.md` — preserved behavior contract (source
