@@ -1,21 +1,23 @@
 # Phase 5.3 — Tenant Inventory (Scoping)
 
-> **Status:** SQL written; **results PENDING** — owner to run against prod
-> and paste results back into this doc.
-> Snapshot intent date: **2026-05-17**.
+> **Status:** SQL captured against prod on **2026-05-18**. Results
+> pasted below. Schema-drift caveats updated against actual prod
+> schema (see "Schema-drift caveats" section).
+> Snapshot intent date: **2026-05-17** (kept for audit-folder
+> alignment; actual capture: 2026-05-18).
 > Re-run before the implementation session lands (tenant set drifts).
 
 ## Purpose
 
 The Phase 5.3 SectionRenderer refactor must produce **zero visual diff**
-across 25 production tenants. To verify that, the diff harness (script 05
+across 7 published tenants. To verify that, the diff harness (script 05
 extension, see `phase-5-3-baseline-capture-extensions.md`) needs to know,
 per tenant:
 
 - which URL to fetch (slug-routed on flexrz.com vs custom-domain)
 - what theme / shell / layout the backend reports for that tenant
 - whether it's one of the three protected tenants (Birdie 3, Al-Razi 21,
-  aqababooking 33)
+  karamhomes 33)
 
 This doc captures that table once and is the source of truth for the
 harness invocation. The query is read-only; idempotent; safe to re-run.
@@ -65,13 +67,22 @@ ORDER BY
   t.id;
 ```
 
-If `tenants.is_deleted` does not exist on this schema, drop that line —
-no tombstone column has shipped as of migration 071.
+**Schema-drift caveats (confirmed against prod 2026-05-18):**
 
-If `tenant_domains` doesn't have an `is_primary` column on this schema,
-fall back to `td.id = MIN(td.id) GROUP BY tenant_id` or pick the
-lowest-id domain row. (Schema audit pending; coordinate with the
-schema_drift report at `audit/2026-05-14/schema_drift/REPORT.md`.)
+- `tenants.is_deleted` — does **NOT** exist on prod. Drop the
+  `AND COALESCE(t.is_deleted, FALSE) = FALSE` line when running. No
+  tombstone column has shipped as of migration 071.
+- `tenants.updated_at` — does **NOT** exist on prod (discovered
+  2026-05-18). Drop the `t.updated_at AS tenant_updated_at` line when
+  running. Not a standard tombstone-style column so easy to miss in
+  audits — this caveat was not anticipated in the original draft.
+- `tenant_domains.is_primary` — **CONFIRMED** to exist on prod
+  (2026-05-18). The LEFT JOIN as written works as-is; no fallback
+  needed. Earlier draft flagged this as "potentially missing" — now
+  resolved.
+
+Coordinate with the schema_drift report at
+`audit/2026-05-14/schema_drift/REPORT.md` if new drifts surface.
 
 ## How to run
 
@@ -102,25 +113,43 @@ ORDER BY CASE WHEN t.id IN (3,21,33) THEN 0 ELSE 1 END, t.id;
 
 ## Results
 
-> **PENDING** — paste the result of the query into the table below before
-> the implementation session.
-
-Expected: ~25 rows (per the brief). The three protected rows appear first.
+Captured against prod on **2026-05-18**: 7 published tenants. The
+three protected rows (IDs 3 / 21 / 33) appear first.
 
 | tenant_id | slug | name | theme_key | shell_key | layout_key_v2 | custom_domain | publish_status | protection_tier |
 |-----------|------|------|-----------|-----------|---------------|---------------|----------------|-----------------|
-| 3 | `birdie-golf` | _Birdie Golf_ | | | | | `published` | **PROTECTED** |
-| 21 | `alrazi` | _Al-Razi_ | | | | | `published` | **PROTECTED** |
-| 33 | `aqababooking` | _aqababooking_ | | | | | `published` | **PROTECTED** |
-| … | … | … | | | | | | standard |
+| 3 | `birdie-golf` | _Birdie Golf_ | `premium-hospitality` | `null` | `null` | `birdiegolf-jo.com` | `published` | **PROTECTED** |
+| 21 | `alrazi` | _Al Razi_ | `premium_v2` | `null` | `null` | `alrazi-jo.com` | `published` | **PROTECTED** |
+| 33 | `karamhomes` | _Karam Homes_ | `premium_v1` | `null` | `null` | `null` | `published` | **PROTECTED** |
+| 22 | `dingdong` | _Ding Dong_ | `premium_v1` | `null` | `null` | `null` | `published` | standard |
+| 27 | `meesh` | _Meesh's App_ | `premium` | `null` | `null` | `null` | `published` | standard |
+| 32 | `abz` | _ABZ_ | `minimal` | `null` | `null` | `null` | `published` | standard |
+| 39 | `clinicx` | _Clinic X_ | `premium_light` | `null` | `null` | `null` | `published` | standard |
 
-Note from earlier audits (`audit/2026-05-14/schema_drift/` and the
-themes_v2 Phase 5.2 verification logs): Birdie + aqababooking were
-already verified at `shell.key=premium` (derived at read time from
-`theme_key=premium_v2`). `shell_key` itself is expected to be NULL for
-**every** tenant post-Phase-5.2 because Phase 5.2 explicitly did NOT
-populate the new columns. Same for `layout_key_v2`. Re-confirm on
-re-query.
+Findings from the 2026-05-18 capture:
+
+- **Tenant ID 33 is now `karamhomes`** (was `aqababooking` in original
+  scoping brief). Owner renamed the slug in the General-tab settings;
+  same business, same `tenant_id`. The (3, 21, 33) protected-tenant
+  contract is unchanged — slugs in docs are labels, `tenant_id` is the
+  stable identifier.
+- **`shell_key` and `layout_key_v2` are NULL for every tenant** —
+  confirms Phase 5.2's explicit-non-population guarantee. Phase 5.3
+  implementation will rely entirely on the read-time derivation path
+  (`null → legacy_default`).
+- **Theme-key distribution skews premium:** 6 of 7 tenants use a
+  `premium*` variant; ABZ is the lone `minimal`. The themes break
+  down as: premium-hospitality (Birdie), premium_v2 (Al-Razi),
+  premium_v1 (karamhomes + Ding Dong), premium (Meesh), premium_light
+  (Clinic X), minimal (ABZ).
+- **Two tenants have primary custom domains:** Birdie
+  (`birdiegolf-jo.com`) and Al-Razi (`alrazi-jo.com`). Script 05's
+  `--custom-domains` flag fires for those 2; the other 5 capture via
+  `https://flexrz.com/book/<slug>`.
+- **Nightly-business tenant:** karamhomes (tenant 33). REDESIGN-1
+  patch (hero relocation into the booking card) applies to this
+  tenant. See `phase-5-3-patch-tracker.md` for the full REDESIGN-1
+  context.
 
 ## Baseline-capture URL per tenant
 
@@ -142,9 +171,10 @@ This is the input to `scripts/themes_v2/05_capture_render_baseline.js
 
 ## What this doc is NOT
 
-- Not a published source for tenant counts. The 25-tenant figure comes
-  from the user brief; the query may return more or fewer (drafts,
-  recently added). Take the query output as truth.
+- Not a published source for tenant counts. The 7-tenant figure was
+  confirmed against prod on 2026-05-18; the query may return more or
+  fewer in future runs (drafts published, tenants added). Take the
+  query output as truth.
 - Not authoritative on custom-domain primacy. If multiple
   `tenant_domains` rows exist for a tenant and none has
   `is_primary = TRUE`, the harness must skip that tenant and surface a
