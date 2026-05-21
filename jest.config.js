@@ -8,7 +8,6 @@ module.exports = {
     "routes/**/*.js",
     "middleware/**/*.js",
     "utils/**/*.js",
-    "!utils/algolia/**",
     "!**/*.test.js",
     "!routes/bookings/**",
     "!routes/customerMemberships/**",
