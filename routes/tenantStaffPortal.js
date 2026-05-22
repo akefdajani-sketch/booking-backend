@@ -28,6 +28,7 @@ const requireAppAuth = require("../middleware/requireAppAuth");
 const ensureUser = require("../middleware/ensureUser");
 const { requireTenantRole } = require("../middleware/requireTenantRole");
 const { requireTenant } = require("../middleware/requireTenant");
+const { getInviteUrlBase } = require("../utils/inviteUrlBase");
 
 function sha256Hex(input) {
   return crypto.createHash("sha256").update(String(input)).digest("hex");
@@ -170,8 +171,7 @@ router.post(
         [tenantId, email, tokenHash, expiresAt.toISOString(), req.user.id, staffId]
       );
 
-      const base = String(process.env.FRONTEND_BASE_URL || "").replace(/\/$/, "");
-      const inviteUrl = base ? `${base}/invite?token=${token}` : null;
+      const inviteUrl = `${getInviteUrlBase()}/invite?token=${token}`;
 
       return res.status(201).json({
         ok: true,

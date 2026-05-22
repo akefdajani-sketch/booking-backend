@@ -45,9 +45,16 @@
 - `STRIPE_PRICE_PRO`
   - Stripe Price ID for the Pro plan
 - `FRONTEND_URL`
-  - Base URL of the frontend app, used for Stripe redirect URLs
+  - Base URL of the frontend app. Used for Stripe redirect URLs **and**
+    invite-acceptance link generation (`${FRONTEND_*}/invite?token=...`).
   - Example: `https://app.flexrz.com`
   - Default fallback: `https://flexrz.com`
+- `FRONTEND_BASE_URL`
+  - Historical alias for `FRONTEND_URL`, read first by `utils/inviteUrlBase.js`.
+  - Resolution order: `FRONTEND_BASE_URL` → `FRONTEND_URL` → `https://app.flexrz.com`
+  - **Set at least one in production.** On 2026-05-21, prod had only
+    `FRONTEND_URL` set; the invite route read only `FRONTEND_BASE_URL` and
+    silently dropped every invite email. The shared helper now prevents this.
 
 #### Stripe Setup Checklist
 1. Create products + recurring prices in Stripe dashboard (one per plan)
@@ -58,6 +65,20 @@
      `customer.subscription.deleted`, `invoice.payment_failed`
 5. Copy webhook signing secret into `STRIPE_WEBHOOK_SECRET`
 6. Run migration: `psql $DATABASE_URL -f migrations/004_stripe_customer_id.sql`
+
+### Email (Resend)
+- `RESEND_API_KEY`
+  - Resend API key (`re_...`). Get from: https://resend.com/api-keys
+  - **Omit to disable email** — `utils/email.js` fails open: logs the skip and
+    writes an `email_log` row with `status='skipped'`. Server boots and all
+    non-email routes work normally.
+- `EMAIL_FROM`
+  - Default sender address. Must be on a domain verified in Resend.
+  - Format: `"Display Name <address@domain>"`
+  - Default fallback: `Flexrz <noreply@flexrz.com>`
+- `EMAIL_REPLY_TO`
+  - Reply-To header on outbound mail.
+  - Default fallback: `support@flexrz.com`
 
 ### Recommended
 - `CORS_ORIGINS`
