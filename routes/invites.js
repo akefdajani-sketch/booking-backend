@@ -12,6 +12,7 @@ const router = express.Router();
 const crypto = require("crypto");
 
 const db = require("../db");
+const logger = require("../utils/logger");
 const requireAppAuth = require("../middleware/requireAppAuth");
 const ensureUser = require("../middleware/ensureUser");
 const { ensureRbacTables } = require("../utils/rbac");
@@ -101,11 +102,18 @@ router.post("/accept", requireAppAuth, ensureUser, async (req, res) => {
         [roleKey]
       );
       if (roleRow.rows.length) {
+        // tenant_user_roles allows multiple roles per (tenant, user) but
+        // a partial unique index `tenant_user_roles_one_primary_uq` enforces
+        // at most one row with is_primary=true per (tenant_id, user_id).
+        // Mark the accepted role as primary and use the matching partial
+        // index as the conflict target. Earlier code used
+        // `ON CONFLICT (tenant_id, user_id)` against a non-existent full
+        // unique index and threw PG 42P10 on every accept (2026-05-23).
         await client.query(
           `
           INSERT INTO tenant_user_roles (tenant_id, user_id, role_id, is_primary)
-          VALUES ($1, $2, $3, false)
-          ON CONFLICT (tenant_id, user_id)
+          VALUES ($1, $2, $3, true)
+          ON CONFLICT (tenant_id, user_id) WHERE is_primary = true
           DO UPDATE SET role_id = EXCLUDED.role_id
           `,
           [tenantId, userId, Number(roleRow.rows[0].id)]
@@ -148,7 +156,10 @@ router.post("/accept", requireAppAuth, ensureUser, async (req, res) => {
       staff_id: staffId,
     });
   } catch (err) {
-    console.error("Accept invite error:", err);
+    logger.error(
+      { err: err.message, code: err.code, stack: err.stack },
+      "Accept invite failed"
+    );
     return res.status(500).json({ error: "Failed to accept invite." });
   }
 });
