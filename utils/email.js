@@ -121,11 +121,21 @@ async function sendEmail(params) {
     replyTo,
   } = params || {};
 
-  // Validate
-  if (!kind)     return { ok: false, status: 'failed', error: 'missing kind' };
-  if (!to)       return { ok: false, status: 'failed', error: 'missing recipient' };
-  if (!subject)  return { ok: false, status: 'failed', error: 'missing subject' };
-  if (!html)     return { ok: false, status: 'failed', error: 'missing html' };
+  // Validate. Every validation failure writes an email_log row so silent
+  // drops are impossible — the invariant: every sendEmail() call leaves a
+  // trace in email_log (sent, failed, or skipped), without exception.
+  async function failValidation(errorMessage) {
+    logger.warn({ kind, to, error: errorMessage }, 'sendEmail validation failed');
+    await recordAttempt({
+      tenantId, kind, recipient: to, subject,
+      status: 'failed', errorMessage, meta,
+    });
+    return { ok: false, status: 'failed', error: errorMessage };
+  }
+  if (!kind)     return failValidation('missing kind');
+  if (!to)       return failValidation('missing recipient');
+  if (!subject)  return failValidation('missing subject');
+  if (!html)     return failValidation('missing html');
 
   // Kill switch — skip all sends, audit as 'skipped'.
   if (isKillSwitchActive()) {
