@@ -4,6 +4,7 @@
 
 const db = require("../../db");
 const crypto = require("crypto");
+const logger = require("../../utils/logger");
 const requireAppAuth = require("../../middleware/requireAppAuth");
 const requireAdmin   = require("../../middleware/requireAdmin");
 const ensureUser     = require("../../middleware/ensureUser");
@@ -87,21 +88,34 @@ router.post(
       const inviteUrl = `${getInviteUrlBase()}/invite?token=${token}`;
 
       // G: send the invite email. Non-fatal — if email fails, the invite row
-      // still exists in the DB. Logs the failure for observability.
-      try {
-        const { sendEmail } = require('../../utils/email');
-        const { renderInvite } = require('../../utils/emailTemplates');
+      // still exists in the DB. Every failure mode below logs a structured
+      // warn so silent drops are impossible (2026-05-23 incident: a missing
+      // column on the ctx query swallowed every invite for days).
+      const { sendEmail } = require('../../utils/email');
+      const { renderInvite } = require('../../utils/emailTemplates');
 
-        // Look up tenant name + inviter name in one query for the template.
+      // Look up tenant + inviter for the template. If this query fails (e.g.
+      // schema drift), continue with template defaults rather than skip the
+      // email — a generic invite is better than no invite.
+      let ctxRow = {};
+      try {
         const ctxRes = await db.query(
-          `SELECT t.name AS tenant_name, u.name AS inviter_name
+          `SELECT t.name AS tenant_name, u.full_name AS inviter_name
              FROM tenants t
              LEFT JOIN users u ON u.id = $2
             WHERE t.id = $1
             LIMIT 1`,
           [req.tenantId, req.user.id]
         );
-        const ctxRow = ctxRes.rows[0] || {};
+        ctxRow = ctxRes.rows[0] || {};
+      } catch (ctxErr) {
+        logger.warn(
+          { err: ctxErr.message, tenantId: req.tenantId },
+          'invite ctx query failed; sending email with template defaults'
+        );
+      }
+
+      try {
         const tpl = renderInvite({
           tenantName:  ctxRow.tenant_name  || 'your team',
           inviterName: ctxRow.inviter_name || 'A teammate',
@@ -109,7 +123,7 @@ router.post(
           inviteUrl,
           expiresAt:   expiresAt.toISOString(),
         });
-        await sendEmail({
+        const result = await sendEmail({
           kind: 'invite',
           to: email,
           subject: tpl.subject,
@@ -118,9 +132,17 @@ router.post(
           tenantId: req.tenantId,
           meta: { invite_id: ins.rows[0].id, role, inviter_user_id: req.user.id },
         });
+        if (!result.ok) {
+          logger.warn(
+            { to: email, status: result.status, error: result.error, tenantId: req.tenantId },
+            'invite email send returned non-ok'
+          );
+        }
       } catch (emailErr) {
-        // Already logged inside sendEmail. Don't fail the invite create.
-        console.warn('Invite email send failed (non-fatal):', emailErr.message);
+        logger.warn(
+          { err: emailErr.message, to: email, tenantId: req.tenantId },
+          'invite email send threw'
+        );
       }
 
       return res.status(201).json({
@@ -367,20 +389,29 @@ router.post(
       const inviteUrl = `${getInviteUrlBase()}/invite?token=${token}`;
 
       // G: send the resent invite email. Same non-fatal pattern as the
-      // initial invite create — log on failure, don't block the API response.
-      try {
-        const { sendEmail } = require('../../utils/email');
-        const { renderInvite } = require('../../utils/emailTemplates');
+      // initial invite create — log on every failure mode.
+      const { sendEmail } = require('../../utils/email');
+      const { renderInvite } = require('../../utils/emailTemplates');
 
+      let ctxRow = {};
+      try {
         const ctxRes = await db.query(
-          `SELECT t.name AS tenant_name, u.name AS inviter_name
+          `SELECT t.name AS tenant_name, u.full_name AS inviter_name
              FROM tenants t
              LEFT JOIN users u ON u.id = $2
             WHERE t.id = $1
             LIMIT 1`,
           [req.tenantId, req.user.id]
         );
-        const ctxRow = ctxRes.rows[0] || {};
+        ctxRow = ctxRes.rows[0] || {};
+      } catch (ctxErr) {
+        logger.warn(
+          { err: ctxErr.message, tenantId: req.tenantId },
+          'resend invite ctx query failed; sending email with template defaults'
+        );
+      }
+
+      try {
         const tpl = renderInvite({
           tenantName:  ctxRow.tenant_name  || 'your team',
           inviterName: ctxRow.inviter_name || 'A teammate',
@@ -388,7 +419,7 @@ router.post(
           inviteUrl,
           expiresAt:   expiresAt.toISOString(),
         });
-        await sendEmail({
+        const result = await sendEmail({
           kind: 'invite',
           to: upd.rows[0].email,
           subject: tpl.subject,
@@ -397,8 +428,17 @@ router.post(
           tenantId: req.tenantId,
           meta: { invite_id: upd.rows[0].id, role: upd.rows[0].role, resend: true, inviter_user_id: req.user.id },
         });
+        if (!result.ok) {
+          logger.warn(
+            { to: upd.rows[0].email, status: result.status, error: result.error, tenantId: req.tenantId },
+            'resend invite email send returned non-ok'
+          );
+        }
       } catch (emailErr) {
-        console.warn('Resend invite email failed (non-fatal):', emailErr.message);
+        logger.warn(
+          { err: emailErr.message, to: upd.rows[0].email, tenantId: req.tenantId },
+          'resend invite email send threw'
+        );
       }
 
       return res.json({
