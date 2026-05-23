@@ -14,7 +14,7 @@ require('dotenv').config();
 const db = require('../db');
 
 const REQUIRED_COLUMNS = [
-  // 2026-05-23 incident: invites.js read u.name; prod has u.full_name.
+  // 2026-05-23 incident #2: invites.js read u.name; prod has u.full_name.
   // The route caught the throw silently, never sent the email, never
   // wrote email_log. Cost: ~2 days of broken invites.
   { table: 'users',          column: 'full_name' },
@@ -28,6 +28,15 @@ const REQUIRED_COLUMNS = [
   { table: 'email_log',      column: 'status' },
 ];
 
+const REQUIRED_INDEXES = [
+  // 2026-05-23 incident #3: invites.js accept handler does
+  // `ON CONFLICT (tenant_id, user_id) WHERE is_primary = true` on
+  // tenant_user_roles. That requires this partial unique index. If it's
+  // missing or renamed, accept throws PG 42P10 and every acceptance
+  // returns a generic 500. Add a check that the name + uniqueness hold.
+  { table: 'tenant_user_roles', name: 'tenant_user_roles_one_primary_uq', mustBeUnique: true },
+];
+
 (async () => {
   const missing = [];
   for (const { table, column } of REQUIRED_COLUMNS) {
@@ -36,14 +45,28 @@ const REQUIRED_COLUMNS = [
        WHERE table_schema='public' AND table_name=$1 AND column_name=$2`,
       [table, column]
     );
-    if (r.rows.length === 0) missing.push(`${table}.${column}`);
+    if (r.rows.length === 0) missing.push(`column ${table}.${column}`);
+  }
+  for (const { table, name, mustBeUnique } of REQUIRED_INDEXES) {
+    const r = await db.query(
+      `SELECT indexdef FROM pg_indexes
+       WHERE schemaname='public' AND tablename=$1 AND indexname=$2`,
+      [table, name]
+    );
+    if (r.rows.length === 0) {
+      missing.push(`index ${table}.${name} (not present)`);
+    } else if (mustBeUnique && !/CREATE UNIQUE INDEX/i.test(r.rows[0].indexdef)) {
+      missing.push(`index ${table}.${name} (exists but not UNIQUE)`);
+    }
   }
   if (missing.length) {
-    console.error('Schema drift detected — missing columns:');
+    console.error('Schema drift detected:');
     missing.forEach(m => console.error('  - ' + m));
     process.exit(1);
   }
-  console.log(`Schema check passed (${REQUIRED_COLUMNS.length} columns verified).`);
+  console.log(
+    `Schema check passed (${REQUIRED_COLUMNS.length} columns + ${REQUIRED_INDEXES.length} indexes verified).`
+  );
   process.exit(0);
 })().catch(e => {
   console.error('Schema check failed:', e.message);
