@@ -21,6 +21,11 @@ const REQUIRED_COLUMNS = [
   { table: 'users',          column: 'email' },
   { table: 'tenants',        column: 'name' },
   { table: 'tenants',        column: 'slug' },
+  // 2026-05-23 incident #4: routes/publicTenantTheme.js depends on this column
+  // to hydrate `tenant.timezone` on the public booking page. Frontend uses it
+  // to convert customer slot picks into the correct UTC instant on submit;
+  // missing it causes browser-tz fallback and timezone-shifted bookings.
+  { table: 'tenants',        column: 'timezone' },
   { table: 'tenant_invites', column: 'token_hash' },
   { table: 'tenant_invites', column: 'accepted_at' },
   { table: 'email_log',      column: 'recipient' },

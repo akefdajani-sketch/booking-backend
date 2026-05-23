@@ -143,7 +143,14 @@ router.get("/:slug", async (req, res) => {
     : "NULL::text AS layout_key_v2";
 
   const t = await db.query(
-    `SELECT id, slug, name, theme_key, brand_overrides_json,
+    // `timezone` (IANA, e.g. "Asia/Amman") must be in this projection — the
+    // booking-frontend reads `tenant.timezone` via getTenantTimezone() and
+    // uses it to convert the customer's wall-clock slot pick into a UTC
+    // instant on submit. Pre-2026-05-23 this field was missing from the
+    // SELECT, so getTenantTimezone returned null and the frontend's
+    // parseStartWallTime fell back to browser-tz parsing — a London
+    // customer's 18:00 Birdie slot was stored as 20:00 Amman.
+    `SELECT id, slug, name, timezone, theme_key, brand_overrides_json,
             branding,
             branding_published,
             publish_status,
@@ -480,6 +487,16 @@ router.get("/:slug", async (req, res) => {
       // (migration 001), but we still null-coalesce for defense
       // in depth.
       name: tenant.name || null,
+      // 2026-05-23 (bookings 750/751/755): expose tenants.timezone so the
+      // booking-frontend can convert the customer's wall-clock slot pick
+      // into the correct UTC instant via getTenantTimezone() → wallTimeToInstant().
+      // Pre-fix this field was missing from both the SELECT and the response
+      // literal, so the frontend's parseStartWallTime fell back to browser-tz
+      // parsing and stored bookings at the customer's local time, not the
+      // tenant's. tenants.timezone is NOT NULL in prod for active tenants
+      // (Birdie='Asia/Amman', Beauty Book='Asia/Kuala_Lumpur'), but we
+      // null-coalesce for defense in depth.
+      timezone: tenant.timezone || null,
       logo_url: tenant.logo_url,
       cover_image_url: tenant.cover_image_url || null,
       // PR 131 — forward tenant tax_config so the public booking UI can
