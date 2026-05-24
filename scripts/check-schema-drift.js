@@ -31,6 +31,14 @@ const REQUIRED_COLUMNS = [
   { table: 'email_log',      column: 'recipient' },
   { table: 'email_log',      column: 'kind' },
   { table: 'email_log',      column: 'status' },
+  // 2026-05-24 incident: utils/tenantBookingUrl.js (and the WA/SMS/email
+  // notification blocks that call it) read these three columns to resolve
+  // the customer-facing booking URL on tenants that have a custom domain
+  // attached. If any of these drifts out of prod, every channel silently
+  // falls back to the platform URL (no crash, no log) — invisible breakage.
+  { table: 'tenant_domains', column: 'domain' },
+  { table: 'tenant_domains', column: 'is_primary' },
+  { table: 'tenant_domains', column: 'status' },
 ];
 
 const REQUIRED_INDEXES = [
