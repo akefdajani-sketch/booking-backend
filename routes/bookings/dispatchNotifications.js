@@ -29,6 +29,7 @@
 const db = require('../../db');
 const logger = require('../../utils/logger');
 const aiContextCache = require('../../utils/aiContextCache');
+const { resolveTenantBookingUrl } = require('../../utils/tenantBookingUrl');
 
 module.exports = function dispatchNotifications(ctx) {
   const {
@@ -90,26 +91,7 @@ module.exports = function dispatchNotifications(ctx) {
           paymentUrl,
           amountDue,
           currency,
-          bookingUrl: await (async () => {
-            if (!joined.booking_code) return null;
-            // Try to use the tenant's primary custom domain first
-            try {
-              const domainRes = await require('../../db').query(
-                `SELECT domain FROM tenant_domains
-                 WHERE tenant_id = $1 AND status = 'active' AND is_primary = TRUE
-                 LIMIT 1`,
-                [resolvedTenantId]
-              );
-              if (domainRes.rows.length) {
-                const d = domainRes.rows[0].domain.replace(/\/$/, '');
-                const base = d.startsWith('http') ? d : `https://${d}`;
-                return `${base}?ref=${encodeURIComponent(joined.booking_code)}`;
-              }
-            } catch (_) { /* non-fatal */ }
-            // Fall back to standard booking URL
-            const bookingBase = process.env.BOOKING_FRONTEND_URL || 'https://flexrz.com';
-            return `${bookingBase}/book/${slug}?ref=${encodeURIComponent(joined.booking_code)}`;
-          })(),
+          bookingUrl: await resolveTenantBookingUrl(resolvedTenantId, slug, joined.booking_code),
         });
         if (waResult.ok) {
           require('../../utils/logger').info({ bookingId, phone: joined.customer_phone, msgId: waResult.messageId, hasPaymentLink: !!paymentUrl }, 'WhatsApp confirmation sent');
@@ -173,29 +155,14 @@ module.exports = function dispatchNotifications(ctx) {
           }
         } catch (_plErr) { /* non-fatal — confirmation still sends without link */ }
 
-        // Build booking URL — custom primary domain first, otherwise
-        // BOOKING_FRONTEND_URL fallback. Mirrors the WhatsApp block so
-        // both channels deep-link to the same place.
-        let bookingUrl = null;
-        if (joined.booking_code) {
-          try {
-            const domainRes = await require('../../db').query(
-              `SELECT domain FROM tenant_domains
-               WHERE tenant_id = $1 AND status = 'active' AND is_primary = TRUE
-               LIMIT 1`,
-              [resolvedTenantId]
-            );
-            if (domainRes.rows.length) {
-              const d = domainRes.rows[0].domain.replace(/\/$/, '');
-              const base = d.startsWith('http') ? d : `https://${d}`;
-              bookingUrl = `${base}?ref=${encodeURIComponent(joined.booking_code)}`;
-            }
-          } catch (_) { /* non-fatal */ }
-          if (!bookingUrl) {
-            const bookingBase = process.env.BOOKING_FRONTEND_URL || 'https://flexrz.com';
-            bookingUrl = `${bookingBase}/book/${slug}?ref=${encodeURIComponent(joined.booking_code)}`;
-          }
-        }
+        // Build booking URL via shared resolver: custom primary domain first,
+        // BOOKING_FRONTEND_URL || flexrz.com fallback. Single source of truth
+        // shared with WhatsApp + email so the three channels can't drift again.
+        const bookingUrl = await resolveTenantBookingUrl(
+          resolvedTenantId,
+          slug,
+          joined.booking_code
+        );
 
         const smsResult = await sendSmsConfirmation({
           booking: joined,
@@ -256,12 +223,21 @@ module.exports = function dispatchNotifications(ctx) {
         );
         const tRow = tRes.rows?.[0] || {};
 
-        const APP_BASE = (process.env.APP_BASE_URL || 'https://app.flexrz.com').replace(/\/+$/, '');
+        // 2026-05-24 fix: the previous build used APP_BASE_URL (app.flexrz.com),
+        // whose middleware rewrites /book/* → /tenant/* → 404. Route through the
+        // shared helper so email matches WhatsApp + SMS: custom primary domain
+        // if present, BOOKING_FRONTEND_URL || flexrz.com otherwise, plus
+        // ?ref={booking_code} the email block previously lacked.
+        const bookingUrl = await resolveTenantBookingUrl(
+          resolvedTenantId,
+          slug || tRow.slug,
+          joined.booking_code
+        );
         const tpl = renderBookingConfirmation({
           tenantName:     tRow.name || 'Flexrz',
           tenantLogoUrl:  tRow.logo_url || null, // J.3: brand the email
           tenantTimezone: tRow.timezone || 'Asia/Amman',
-          bookingUrl:     tRow.slug ? `${APP_BASE}/book/${encodeURIComponent(tRow.slug)}` : null,
+          bookingUrl,
           customerName:   joined.customer_name,
           serviceName:    joined.service_name,
           resourceName:   joined.resource_name,
