@@ -670,6 +670,12 @@ async function runSupportAgent({
   consumerType = 'chat',
   handleAction = null,             // dependency-injected by route to avoid circular dep
   handleActionContext = null,      // { tenantId, tenantSlug, customerId, email, authToken }
+  // Voice-booking-approval-gate (2026-05-26). Route computes the two-factor
+  // approval signal once and threads it in. Default false = drop create_booking
+  // if a caller forgets to pass it (over-cautious, strictly safer than the
+  // pre-gate behaviour of unconditional execution). Non-create_booking actions
+  // bypass the gate inside executeActionWithGate.
+  isApprovedForCreateBooking = false,
 }) {
   // ─────────────────────────────────────────────────────────────────────
   // Phase 2.3 — Two-query orchestrator path behind
@@ -693,27 +699,43 @@ async function runSupportAgent({
     // Lazy require — keeps top-of-module clean, only loads when flag is ON.
     const { runBookingBrain } = require('./bookingBrain');
     const { speakReply } = require('./voicePersona');
+    const {
+      executeActionWithGate,
+      transformDroppedToProposal,
+    } = require('./voiceBookingApprovalGate');
 
     const brain = await runBookingBrain({
       tenantContext, customerData, isSignedIn, history, message, confirmationMode,
     });
 
+    // Voice-booking-approval-gate: gate brain.action via the shared util.
+    // When create_booking lacks an approval signal, executeActionWithGate
+    // returns { success:false, dropped:true, reason:'no_approval_signal' }
+    // without calling handleAction. We transform the brain output into a
+    // confirm_proposal so the persona's renderPendingBooking refreshes the
+    // sidecar with THIS turn's params (never a stale carry-over), and
+    // speakReply short-circuits to the deterministic re-propose prose.
     let actionResult = null;
+    let brainForPersona = brain;
     if (brain.action) {
-      const c = handleActionContext;
       try {
-        actionResult = await handleAction(
-          brain.action, c.tenantId, c.tenantSlug,
-          c.customerId, c.email, c.authToken,
-        );
+        actionResult = await executeActionWithGate({
+          action: brain.action,
+          isApprovedForCreateBooking,
+          handleAction,
+          context: handleActionContext,
+        });
       } catch (err) {
         console.error('[claudeService:twoQuery] handleAction threw:', err?.message || err);
         actionResult = { success: false, message: 'Action execution failed — please try again.' };
       }
+      if (actionResult?.dropped === true && brain.action.type === 'create_booking') {
+        brainForPersona = transformDroppedToProposal(brain.action);
+      }
     }
 
     const { reply, pendingBooking } = await speakReply({
-      tenantContext, brainOutput: brain, actionResult, language, consumerType,
+      tenantContext, brainOutput: brainForPersona, actionResult, language, consumerType,
     });
 
     return {
