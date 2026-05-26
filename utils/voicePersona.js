@@ -370,6 +370,26 @@ async function speakReply({
   // pendingBooking is computed up front — deterministic, never from Claude.
   const pendingBooking = renderPendingBooking(brainOutput);
 
+  // Drop-recovery short-circuit (voice-booking-approval-gate, 2026-05-26):
+  // when the gate dropped a create_booking on this turn, the orchestrator
+  // transformed the would-be action into a confirm_proposal-shaped brainOutput.
+  // Skip Claude and emit the deterministic re-propose prose — its output
+  // satisfies Threshold G by construction (see utils/voiceBookingApprovalGate.js
+  // and the recovery-template pin in __tests__/voiceBookingApprovalGate.test.js).
+  if (
+    actionResult?.dropped === true
+    && brainOutput?.intent === 'clarify'
+    && brainOutput?.answer?.kind === 'confirm_proposal'
+  ) {
+    const { formatDeterministicReProposeReply } = require('./voiceBookingApprovalGate');
+    const reply = formatDeterministicReProposeReply({
+      payload: brainOutput.answer.payload,
+      tenantContext,
+      language,
+    });
+    return { reply, pendingBooking };
+  }
+
   const systemPrompt = buildPersonaSystemPrompt({ tenantContext, language, consumerType });
   const userTurn = buildPersonaUserTurn({ tenantContext, brainOutput, actionResult, language });
 

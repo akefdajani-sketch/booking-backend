@@ -207,6 +207,12 @@ describe('I3 — flag ON, create_booking confirmation flow', () => {
       confirmationMode: true,
       handleAction: mockHandleAction,
       handleActionContext: HA_CONTEXT,
+      // Voice-booking-approval-gate (2026-05-26): the route computes this and
+      // threads it in. Here, simulate the approved-by-route path so the gate
+      // permits the create_booking — otherwise the gate would correctly drop
+      // it (route-level two-factor approval is exercised in
+      // __tests__/route_pending_action_gate.test.js).
+      isApprovedForCreateBooking: true,
     });
 
     expect(result.orchestrated).toBe(true);

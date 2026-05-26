@@ -50,6 +50,15 @@ const isConfirmationMessage = aiRoutes.isConfirmationMessage;
 const hasRecentPendingBooking = aiRoutes.hasRecentPendingBooking;
 const optionalAuth          = aiRoutes.optionalAuth;
 
+// Voice-booking-approval-gate (2026-05-26). Direct imports — same shape as
+// ai.js. The util encapsulates the two-factor gate, drop transform,
+// executeActionWithGate, and deterministic re-propose prose.
+const {
+  hasCreateBookingApproval,
+  executeActionWithGate,
+  formatDeterministicReProposeReply,
+} = require("../utils/voiceBookingApprovalGate");
+
 const VOICE_MAX_SESSION_SECONDS = 30 * 60; // 30-min hard cap per call
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -240,9 +249,27 @@ router.post("/:tenantSlug/booking-assistant", optionalAuth, async (req, res) => 
 
     const customerData = isSignedIn ? await fetchCustomerData(tenant.id, email) : null;
 
+    // Voice-booking-approval-gate (2026-05-26): compute confirmationMode
+    // BEFORE the direct-execute branch so the gate below can check it.
+    // Code-motion safety: `query`, `history`, `isConfirming` are
+    // const-destructured from req.body at L222 — no mutation between there
+    // and here.
+    const confirmationMode = (typeof isConfirming === "boolean")
+      ? isConfirming
+      : (isConfirmationMessage(query) && hasRecentPendingBooking(history));
+
     // ── DIRECT BOOKING via pendingAction (same fast path as text chat) ────
-    if (pendingAction?.type === "create_booking" && pendingAction?.service_id && pendingAction?.start_time) {
-      console.log("[voice] pendingAction direct-execute:", JSON.stringify(pendingAction));
+    // Voice-booking-approval-gate: TWO-FACTOR required. Sidecar
+    // (pendingAction.type==='create_booking' + service_id + start_time) AND
+    // the customer's current turn signalling confirmation (confirmationMode).
+    // Without the second factor, a stale pendingAction carried over from a
+    // prior proposal turn would write a booking on any subsequent customer
+    // utterance (off-topic question, "actually no", etc.) — phantom hole.
+    if (pendingAction?.type === "create_booking"
+        && pendingAction?.service_id
+        && pendingAction?.start_time
+        && confirmationMode === true) {
+      console.log("[voice] pendingAction direct-execute with confirmation:", JSON.stringify(pendingAction));
       const directResult = await handleAction(
         pendingAction, tenant.id, tenant.slug,
         customerData?.profile?.id || null, email, authToken
@@ -265,16 +292,18 @@ router.post("/:tenantSlug/booking-assistant", optionalAuth, async (req, res) => 
     // Claude's runSupportAgent call.
     const businessContext = await fetchBusinessContext(tenant.id, tenant.slug);
 
-    // The voice agent passes isConfirming=true when the user said "yes" /
-    // "confirm" to a pending booking. If absent, fall back to the text-side
-    // detector for safety.
-    const confirmationMode = (typeof isConfirming === "boolean")
-      ? isConfirming
-      : (isConfirmationMessage(query) && hasRecentPendingBooking(history));
+    // Composite approval signal for the orchestrated brain.action AND the
+    // legacy Claude-emitted ACTION path below. Computed once.
+    // (confirmationMode declared above the direct-execute branch — re-used here.)
+    const isApprovedForCreateBooking = hasCreateBookingApproval({
+      pendingAction,
+      confirmationMode,
+      history,
+    });
 
     // Phase 2.3 — read session language from query (frontend voice client may
-    // pass ?lang=ar). Defaults to 'en'. Only used by persona when the
-    // two-query orchestrator path is active.
+    // pass ?lang=ar). Defaults to 'en'. Used by persona on the orchestrated
+    // path, and by the drop-path's deterministic re-propose prose.
     const requestedLang = String(req.query.lang || "en").toLowerCase();
     const language = ["en", "ar"].includes(requestedLang) ? requestedLang : "en";
 
@@ -298,6 +327,7 @@ router.post("/:tenantSlug/booking-assistant", optionalAuth, async (req, res) => 
       consumerType: 'voice',
       handleAction,
       handleActionContext,
+      isApprovedForCreateBooking,
     });
 
     // Phase 2.3 — orchestrator did everything; short-circuit legacy follow-up.
@@ -317,10 +347,49 @@ router.post("/:tenantSlug/booking-assistant", optionalAuth, async (req, res) => 
     let finalReply   = reply || "";
 
     if (action) {
-      actionResult = await handleAction(
-        action, tenant.id, tenant.slug,
-        customerData?.profile?.id || null, email, authToken
-      );
+      // Voice-booking-approval-gate: route create_booking through the gate
+      // util. Non-create_booking actions (check_availability, cancel_booking)
+      // bypass the gate — they don't write to the bookings table.
+      actionResult = await executeActionWithGate({
+        action,
+        isApprovedForCreateBooking,
+        handleAction,
+        context: {
+          tenantId: tenant.id,
+          tenantSlug: tenant.slug,
+          customerId: customerData?.profile?.id || null,
+          email,
+          authToken,
+        },
+      });
+
+      // Voice-booking-approval-gate: on drop, emit deterministic re-propose
+      // prose (Arabic on ar sessions — language is dynamic) and refresh the
+      // sidecar from THIS turn's action (never a stale carry-over from
+      // req.body.pendingAction). Early-returns the response.
+      if (actionResult?.dropped === true && action?.type === "create_booking") {
+        const refreshed = {
+          service_id: action.service_id ?? null,
+          start_time: action.start_time ?? null,
+          duration_minutes: action.duration_minutes ?? null,
+          resource_id: action.resource_id ?? null,
+          staff_id: action.staff_id ?? null,
+          payment_method: action.payment_method ?? null,
+          membership_id: action.membership_id ?? null,
+          prepaid_entitlement_id: action.prepaid_entitlement_id ?? null,
+          slots: action.slots ?? null,
+        };
+        return res.json({
+          reply: formatDeterministicReProposeReply({
+            payload: refreshed,
+            tenantContext: { ...tenant, ...businessContext },
+            language,
+          }),
+          action: actionResult,
+          pendingBooking: refreshed,
+          slots: null,
+        });
+      }
 
       // If the action was check_availability, follow up so Claude phrases the
       // result naturally instead of dumping raw slot times. Same two-pass

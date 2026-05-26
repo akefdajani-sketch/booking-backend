@@ -106,31 +106,21 @@ function isConfirmationMessage(msg) {
   return patterns.some(p => clean === p || clean.startsWith(p + " ") || clean === "yes confirm it");
 }
 
-// Gate for isConfirmationMessage: only treat a "yes/ok/sure"-style reply as a
-// booking confirmation when the prior assistant turn actually looked like a
-// proposal awaiting yes/no. Without this, openers like "ok book sim 3 tonight"
-// flip confirmationMode on turn 1 and the model is told to skip PENDING_BOOKING.
+// Threshold P (lenient) — drives confirmationMode only. Delegated to the
+// shared util utils/voiceBookingApprovalGate.js, which adds Arabic
+// confirm-keyword coverage so Birdie's Arabic voice can set confirmationMode
+// at all. Worst-case false positive: the model is told it MAY confirm when
+// it shouldn't — no DB write (the strict Threshold G inside hasCreateBookingApproval
+// gates the actual write).
 //
-// English-only for now. Arabic-side gating is a follow-up: this helper falls
-// open (returns false) for Arabic proposal turns, so the fallback path will
-// under-trigger rather than over-trigger for Arabic — which is the safer
-// failure mode (no false confirmations; at worst the model asks again).
-function hasRecentPendingBooking(history) {
-  if (!Array.isArray(history) || history.length === 0) return false;
-  let lastAssistant = null;
-  for (let i = history.length - 1; i >= 0; i--) {
-    const m = history[i];
-    if (m && m.role === "assistant" && typeof m.content === "string") {
-      lastAssistant = m.content;
-      break;
-    }
-  }
-  if (!lastAssistant) return false;
-  const trimmed = lastAssistant.trim();
-  const endsWithQuestion = /\?\s*$/.test(trimmed);
-  const hasConfirmWord = /\b(confirm|shall i|book it|proceed|go ahead)\b/i.test(lastAssistant);
-  return endsWithQuestion && hasConfirmWord;
-}
+// hasRecentPendingBooking is re-exported at the bottom of this file so
+// routes/voice.js continues to import it via aiRoutes.
+const {
+  hasRecentPendingBooking,
+  hasCreateBookingApproval,
+  executeActionWithGate,
+  formatDeterministicReProposeReply,
+} = require("../utils/voiceBookingApprovalGate");
 
 
 // ── Optional auth — sets req.googleUser/req.auth when token present, never blocks ──
@@ -1123,10 +1113,24 @@ router.post("/:tenantSlug/chat", optionalAuth, async (req, res) => {
       req.headers.authorization?.replace("Bearer ", "") ||
       req.cookies?.bf_session || null;
 
+    // Voice-booking-approval-gate (2026-05-26): compute confirmationMode
+    // BEFORE the direct-execute branch so the gate below can check it.
+    // Code-motion safety: `message` and `history` are const-destructured
+    // from req.body at L1096 — no mutation between there and here.
+    const isConfirmation = isConfirmationMessage(message) && hasRecentPendingBooking(history);
+
     // ── DIRECT BOOKING via pendingAction (most reliable path) ─────────
-    // Frontend sends pendingAction when user confirms a PENDING_BOOKING embedded by Claude
-    if (pendingAction?.type === "create_booking" && pendingAction?.service_id && pendingAction?.start_time) {
-      console.log("[AI] pendingAction received — executing directly:", JSON.stringify(pendingAction));
+    // Voice-booking-approval-gate: TWO-FACTOR required. Sidecar
+    // (pendingAction.type==='create_booking' + service_id + start_time) AND
+    // the customer's current turn signalling confirmation (isConfirmation).
+    // Without the second factor, a stale pendingAction carried over from a
+    // prior proposal turn would write a booking on any subsequent customer
+    // message (off-topic question, "actually no", etc.) — the phantom hole.
+    if (pendingAction?.type === "create_booking"
+        && pendingAction?.service_id
+        && pendingAction?.start_time
+        && isConfirmation === true) {
+      console.log("[AI] pendingAction received with confirmation — executing directly:", JSON.stringify(pendingAction));
       const directResult = await handleAction(
         pendingAction, tenant.id, tenant.slug,
         customerData?.profile?.id || null, email, authToken
@@ -1140,7 +1144,13 @@ router.post("/:tenantSlug/chat", optionalAuth, async (req, res) => {
       return res.json({ reply: directReply, action: directResult });
     }
 
-    const isConfirmation = isConfirmationMessage(message) && hasRecentPendingBooking(history);
+    // Composite approval signal for the orchestrated brain.action AND the
+    // legacy Claude-emitted ACTION path below. Computed once.
+    const isApprovedForCreateBooking = hasCreateBookingApproval({
+      pendingAction,
+      confirmationMode: isConfirmation,
+      history,
+    });
 
     // Phase 2.3 — inject handleAction + context so runSupportAgent can run
     // the two-query orchestrator (brain → handleAction → persona) when the
@@ -1165,6 +1175,7 @@ router.post("/:tenantSlug/chat", optionalAuth, async (req, res) => {
       consumerType: 'chat',
       handleAction,
       handleActionContext,
+      isApprovedForCreateBooking,
     });
 
     // Phase 2.3 — orchestrator did brain + handleAction + persona internally.
@@ -1180,17 +1191,53 @@ router.post("/:tenantSlug/chat", optionalAuth, async (req, res) => {
 
     const { reply, action } = supportResult;
 
-    // Execute action if Claude requested one
+    // Execute action if Claude requested one. Voice-booking-approval-gate
+    // routes create_booking through executeActionWithGate so phantom-booking
+    // is impossible without the two-factor approval signal computed above.
+    // Non-create_booking actions (check_availability, cancel_booking) bypass
+    // the gate inside the util — they don't write to the bookings table.
     let actionResult = null;
     if (action) {
-      actionResult = await handleAction(
+      actionResult = await executeActionWithGate({
         action,
-        tenant.id,
-        tenant.slug,
-        customerData?.profile?.id || null,
-        email,
-        authToken
-      );
+        isApprovedForCreateBooking,
+        handleAction,
+        context: {
+          tenantId: tenant.id,
+          tenantSlug: tenant.slug,
+          customerId: customerData?.profile?.id || null,
+          email,
+          authToken,
+        },
+      });
+    }
+
+    // Voice-booking-approval-gate: on drop, emit deterministic re-propose
+    // prose and refresh the sidecar from THIS turn's action (never a stale
+    // carry-over from req.body.pendingAction). Early-returns the response,
+    // skipping the legacy follow-up Claude call below.
+    if (actionResult?.dropped === true && action?.type === "create_booking") {
+      const refreshed = {
+        service_id: action.service_id ?? null,
+        start_time: action.start_time ?? null,
+        duration_minutes: action.duration_minutes ?? null,
+        resource_id: action.resource_id ?? null,
+        staff_id: action.staff_id ?? null,
+        payment_method: action.payment_method ?? null,
+        membership_id: action.membership_id ?? null,
+        prepaid_entitlement_id: action.prepaid_entitlement_id ?? null,
+        slots: action.slots ?? null,
+      };
+      return res.json({
+        reply: formatDeterministicReProposeReply({
+          payload: refreshed,
+          tenantContext: { ...tenant, ...businessContext },
+          language: 'en',
+        }),
+        action: actionResult,
+        pendingBooking: refreshed,
+        slots: null,
+      });
     }
 
     // If an action was executed, send the results back to Claude for a follow-up response
