@@ -76,7 +76,7 @@ module.exports = function dispatchNotifications(ctx) {
             [bookingId]
           );
           if (plRes.rows.length) {
-          const frontendUrl = process.env.FRONTEND_URL || 'https://app.flexrz.com';
+          const frontendUrl = process.env.BOOKING_FRONTEND_URL || 'https://flexrz.com';
             paymentUrl = `${frontendUrl}/pay/${plRes.rows[0].token}`;
             amountDue  = plRes.rows[0].amount_requested;
             currency   = plRes.rows[0].currency_code || currency;
@@ -148,7 +148,7 @@ module.exports = function dispatchNotifications(ctx) {
             [bookingId]
           );
           if (plRes.rows.length) {
-            const frontendUrl = process.env.FRONTEND_URL || 'https://app.flexrz.com';
+            const frontendUrl = process.env.BOOKING_FRONTEND_URL || 'https://flexrz.com';
             paymentUrl = `${frontendUrl}/pay/${plRes.rows[0].token}`;
             amountDue  = plRes.rows[0].amount_requested;
             currency   = plRes.rows[0].currency_code || currency;
