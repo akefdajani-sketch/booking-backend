@@ -6,3 +6,6 @@ uploads
 # Claude Code working directories
 .audit/
 .claude/
+
+# Audit probe outputs (local only — may contain DB shape info)
+probe*.json
