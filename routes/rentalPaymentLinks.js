@@ -124,7 +124,7 @@ router.post(
       const link = ins.rows[0];
 
       // Build the portal URL
-      const frontendUrl = process.env.FRONTEND_URL || 'https://app.flexrz.com';
+      const frontendUrl = process.env.BOOKING_FRONTEND_URL || 'https://flexrz.com';
       const portalUrl   = `${frontendUrl}/pay/${link.token}`;
 
       logger.info({ tenantId, bookingId, linkId: link.id, amount: amountRequested }, 'Payment link created');
@@ -205,7 +205,7 @@ router.get(
                 b.booking_code, b.customer_name, b.customer_phone, b.customer_email,
                 b.checkin_date, b.checkout_date, b.nights_count, b.status AS booking_status,
                 r.name AS resource_name,
-                '${process.env.FRONTEND_URL || 'https://app.flexrz.com'}/pay/' || l.token AS portal_url
+                '${process.env.BOOKING_FRONTEND_URL || 'https://flexrz.com'}/pay/' || l.token AS portal_url
          FROM rental_payment_links l
          JOIN bookings b  ON b.id = l.booking_id
          LEFT JOIN resources r ON r.id = b.resource_id
@@ -267,7 +267,7 @@ router.patch(
       );
       if (!r.rows.length) return res.status(404).json({ error: 'Link not found' });
 
-      const frontendUrl = process.env.FRONTEND_URL || 'https://app.flexrz.com';
+      const frontendUrl = process.env.BOOKING_FRONTEND_URL || 'https://flexrz.com';
       return res.json({ ok: true, link: { ...r.rows[0], portal_url: `${frontendUrl}/pay/${r.rows[0].token}` } });
     } catch (err) {
       logger.error({ err }, 'PATCH /rental-payment-links/:id error');
@@ -368,7 +368,7 @@ router.post('/public/:token/pay', async (req, res) => {
       }
 
       const orderId    = generateOrderId(link.tenant_id);
-      const frontendUrl = process.env.FRONTEND_URL || 'https://app.flexrz.com';
+      const frontendUrl = process.env.BOOKING_FRONTEND_URL || 'https://flexrz.com';
       const returnUrl  = `${frontendUrl}/pay/${token}/result?orderId=${encodeURIComponent(orderId)}`;
       const currency   = link.currency_code || 'JOD';
       const amount     = Number(link.amount_requested) - Number(link.amount_paid);
