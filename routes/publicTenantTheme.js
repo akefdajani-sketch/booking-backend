@@ -442,8 +442,34 @@ router.get("/:slug", async (req, res) => {
     console.warn(`[publicTenantTheme] shell '${effectiveShellKey}' not found in platform_shells (tenant: ${slug})`);
   }
 
+  // Phase 5.3 PR-1: schema-compat for the new render_mode column (migration 072).
+  // Falls back to the default 'stacked_static' when running against an env that
+  // hasn't applied 072 yet, so this route never references a missing column.
+  let __platformLayoutsHasRenderMode = null;
+  if (__platformLayoutsHasRenderMode == null) {
+    try {
+      const r = await db.query(
+        `SELECT 1
+           FROM information_schema.columns
+          WHERE table_schema = 'public'
+            AND table_name  = 'platform_layouts'
+            AND column_name = 'render_mode'
+          LIMIT 1`
+      );
+      __platformLayoutsHasRenderMode = r.rowCount > 0;
+    } catch {
+      __platformLayoutsHasRenderMode = false;
+    }
+  }
+  const renderModeSel = __platformLayoutsHasRenderMode
+    ? "render_mode"
+    : "'stacked_static'::text AS render_mode";
+
   const layoutQ = await db.query(
-    "SELECT key, name, sections_json, supported_section_types_json FROM platform_layouts WHERE key = $1 AND is_published = TRUE LIMIT 1",
+    `SELECT key, name, sections_json, supported_section_types_json, ${renderModeSel}
+       FROM platform_layouts
+      WHERE key = $1 AND is_published = TRUE
+      LIMIT 1`,
     [effectiveLayoutKeyV2]
   );
   const layoutRow = layoutQ.rows[0] || null;
@@ -455,16 +481,21 @@ router.get("/:slug", async (req, res) => {
     ? { key: shellRow.key, name: shellRow.name }
     : { key: effectiveShellKey, name: null };
 
+  // Phase 5.3 PR-1: layout.render_mode added as a top-level field on the
+  // layout block. Defaults to 'stacked_static' so a missing column or
+  // missing seed row stays safe for the frontend dispatcher.
   const layoutBlock = layoutRow
     ? {
         key: layoutRow.key,
         name: layoutRow.name,
+        render_mode: layoutRow.render_mode || "stacked_static",
         sections_json: layoutRow.sections_json || [],
         supported_section_types_json: layoutRow.supported_section_types_json || [],
       }
     : {
         key: effectiveLayoutKeyV2,
         name: null,
+        render_mode: "stacked_static",
         sections_json: [],
         supported_section_types_json: [],
       };
