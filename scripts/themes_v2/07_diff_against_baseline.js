@@ -115,6 +115,45 @@ const REGEX_RULES = [
   { name: "css_module_hash_suffix",
     pattern: /(__)[A-Za-z0-9_-]{5,8}(?=[\s"'>])/g,
     replacement: "$1[HASH]" },
+  // App Router emits per-request Sentry IDs in <head> meta tags; the legacy
+  // sentry_trace_id rule above only matches Pages-Router-shaped JSON.
+  // sentry-release stays unmasked — it's the deployed commit SHA and a
+  // deploy-identity signal we want surfaced if it drifts between captures.
+  { name: "sentry_trace_meta",
+    pattern: /(<meta\s+name="sentry-trace"\s+content=")[^"]*(")/g,
+    replacement: "$1[SENTRY-TRACE]$2" },
+  { name: "sentry_baggage_trace_id",
+    pattern: /(sentry-trace_id=)[0-9a-f]{32}/g,
+    replacement: "$1[TRACE-ID]" },
+  { name: "sentry_baggage_sample_rand",
+    pattern: /(sentry-sample_rand=)[0-9.]+/g,
+    replacement: "$1[RAND]" },
+  // Stateful debug blob; appears raw in <head> AND escaped inside
+  // __next_f.push flight payloads. One anchor handles both because the
+  // interior never contains '<' before the closing '};'.
+  { name: "bf_ssr_debug_blob",
+    pattern: /(window\.__BF_SSR_DEBUG__\s*=\s*)\{[^<]*?\};/g,
+    replacement: "$1[BF-SSR-DEBUG];" },
+  // snapshotUsed / snapshotVersion are backend cache-warmth signals that
+  // also leak into the API tenant-theme payload embedded in the React
+  // Flight stream. The (\\*") + \1 backref matches raw, single-escaped,
+  // and triple-escaped quote levels symmetrically.
+  { name: "snapshot_used_field",
+    pattern: /(\\*")snapshotUsed\1\s*:\s*(true|false)/g,
+    replacement: "$1snapshotUsed$1:[CACHE]" },
+  { name: "snapshot_version_field",
+    pattern: /(\\*")snapshotVersion\1\s*:\s*\d+/g,
+    replacement: "$1snapshotVersion$1:[CACHE]" },
+  // The appearance subtree (landing/assets/resolvedCssVars/resolvedContractCssVars)
+  // is also embedded as escaped JSON inside React Flight pushes. Same backend
+  // key-order non-determinism applies. Standalone copy is handled via
+  // canonicalizeJson in compareTenant; this masks the duplicate here. Bounded
+  // by "landing":{ on the left and the snapshotUsed:[CACHE] sentinel produced
+  // by snapshot_used_field on the right. Region verified pure data (no Flight
+  // component-tree markers) so masking loses zero signal.
+  { name: "embedded_appearance_data_island",
+    pattern: /(\\*")landing\1:\{[\s\S]*?\1snapshotUsed\1:\[CACHE\]/g,
+    replacement: "$1landing$1:[APPEARANCE-DATA-ISLAND],$1snapshotUsed$1:[CACHE]" },
 ];
 
 function collapseWhitespace(text) {
@@ -146,6 +185,22 @@ function readUtf8OrNull(p) {
 function readShaOrNull(p) {
   try { return fs.readFileSync(p, "utf8").trim(); } catch { return null; }
 }
+// Defangs non-stable JSON key order from the backend tenant-theme snapshot
+// serializer (cold/warm cache paths emit same keys/values in different order).
+// See memory: themes-v2-backend-stable-key-order.
+function sortDeep(v) {
+  if (Array.isArray(v)) return v.map(sortDeep);
+  if (v && typeof v === "object") {
+    const out = {};
+    for (const k of Object.keys(v).sort()) out[k] = sortDeep(v[k]);
+    return out;
+  }
+  return v;
+}
+function canonicalizeJson(text) {
+  try { return JSON.stringify(sortDeep(JSON.parse(text))); }
+  catch { return null; }
+}
 function buildTenantUnion(baseline, current) {
   const b = new Set((baseline.captured || []).map((c) => c.slug));
   const c = new Set((current.captured || []).map((c) => c.slug));
@@ -156,7 +211,7 @@ function buildTenantUnion(baseline, current) {
 
 function metaWarnings(baseline, current) {
   const warn = [];
-  for (const k of ["htmlBase", "apiBase", "customDomainsEnabled", "userAgent", "timeoutMs", "slugFilter"]) {
+  for (const k of ["htmlBase", "apiBase", "customDomainsEnabled", "customDomainOverrides", "userAgent", "timeoutMs", "slugFilter"]) {
     const a = JSON.stringify(baseline[k] ?? null);
     const c = JSON.stringify(current[k] ?? null);
     if (a !== c) warn.push(`baseline.${k}=${a} != current.${k}=${c}`);
@@ -232,6 +287,21 @@ function compareTenant(slug, baseline, current) {
   out.api.baselineHash  = bApiSha;
   out.api.currentHash   = cApiSha;
   out.api.match = !!(bApiSha && cApiSha && bApiSha === cApiSha);
+
+  // Raw hash fast-path failed. Fall through to canonical-form compare so
+  // backend key-order drift (cold vs warm cache path) doesn't surface as
+  // a false api_drift. Real value drift still fails the canonical compare.
+  if (!out.api.match && bApiSha && cApiSha) {
+    const bApiJson = readUtf8OrNull(path.join(BASELINE_DIR, `${slug}.api.json`));
+    const cApiJson = readUtf8OrNull(path.join(CURRENT_DIR,  `${slug}.api.json`));
+    if (bApiJson != null && cApiJson != null) {
+      const bCanon = canonicalizeJson(bApiJson);
+      const cCanon = canonicalizeJson(cApiJson);
+      if (bCanon != null && cCanon != null && bCanon === cCanon) {
+        out.api.match = true;
+      }
+    }
+  }
 
   if (bHtmlSha === cHtmlSha) {
     out.html.match = true;
