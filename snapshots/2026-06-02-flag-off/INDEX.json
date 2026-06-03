@@ -1,0 +1,159 @@
+{
+  "timestamp": "2026-06-03T00:34:38.639Z",
+  "prodMode": true,
+  "htmlBase": "https://flexrz.com",
+  "apiBase": "https://booking-backend-6jbc.onrender.com",
+  "timeoutMs": 5000,
+  "customDomainsEnabled": true,
+  "customDomainOverrides": {
+    "birdie-golf": "https://www.birdiegolf-jo.com/",
+    "alrazi": "https://www.alrazi-jo.com/"
+  },
+  "rateLimitMs": 1000,
+  "userAgent": "Flexrz-Internal-Phase-5-3-Audit/1.0",
+  "slugFilter": null,
+  "tenantCount": 7,
+  "captured": [
+    {
+      "slug": "birdie-golf",
+      "tenantId": 3,
+      "themeKey": "premium-hospitality",
+      "usedCustomDomain": true,
+      "customDomain": "birdiegolf-jo.com",
+      "urlSource": "override",
+      "html": {
+        "status": 200,
+        "bytes": 92082,
+        "sha256": "ff892f502cfee1a50fa6652826406624c5eef345483c4e86be27dd35e9a3fdc1",
+        "elapsed_ms": 1767
+      },
+      "api": {
+        "status": 200,
+        "bytes": 65374,
+        "sha256": "7cf600fba8e4f48c2ddeed7d9afdb6bb605e5500bd22f529fe5f0ed7b15e8e67",
+        "elapsed_ms": 630
+      }
+    },
+    {
+      "slug": "alrazi",
+      "tenantId": 21,
+      "themeKey": "premium_v2",
+      "usedCustomDomain": true,
+      "customDomain": "alrazi-jo.com",
+      "urlSource": "override",
+      "html": {
+        "status": 200,
+        "bytes": 71059,
+        "sha256": "f490042d2c7b4803619dc1954ee34d03a1825af57e7d43060fae76c7cb073464",
+        "elapsed_ms": 969
+      },
+      "api": {
+        "status": 200,
+        "bytes": 35381,
+        "sha256": "7688e9323be61996038d50f37b1a5fb0b392e93f62bcea6f088cfc7302b4c539",
+        "elapsed_ms": 360
+      }
+    },
+    {
+      "slug": "dingdong",
+      "tenantId": 22,
+      "themeKey": "premium_v1",
+      "usedCustomDomain": false,
+      "customDomain": null,
+      "urlSource": "slug-route",
+      "html": {
+        "status": 200,
+        "bytes": 53191,
+        "sha256": "eed7c80d21082b4d630cb4ee99f3bff7ae271722670bec075aa09648d5912b38",
+        "elapsed_ms": 674
+      },
+      "api": {
+        "status": 200,
+        "bytes": 12089,
+        "sha256": "0bc43ad6fc30067bac1676a140c405a313586842b70b68d237ef467b6cb70c49",
+        "elapsed_ms": 388
+      }
+    },
+    {
+      "slug": "meesh",
+      "tenantId": 27,
+      "themeKey": "premium",
+      "usedCustomDomain": false,
+      "customDomain": null,
+      "urlSource": "slug-route",
+      "html": {
+        "status": 200,
+        "bytes": 53300,
+        "sha256": "a89d8cab87d6556faeede02700823597e2962ec6ef8c67fdf52c9240a2a956b5",
+        "elapsed_ms": 573
+      },
+      "api": {
+        "status": 200,
+        "bytes": 11839,
+        "sha256": "613626e5d2881e01d30caa99c27f01b30462018a6f1e87f0b104488fdad9fd84",
+        "elapsed_ms": 399
+      }
+    },
+    {
+      "slug": "abz",
+      "tenantId": 32,
+      "themeKey": "minimal",
+      "usedCustomDomain": false,
+      "customDomain": null,
+      "urlSource": "slug-route",
+      "html": {
+        "status": 200,
+        "bytes": 54835,
+        "sha256": "da6fcb41fe651318fc2478392370cfa430915bb323d38a38d7ff87dad50291e0",
+        "elapsed_ms": 584
+      },
+      "api": {
+        "status": 200,
+        "bytes": 16701,
+        "sha256": "d9c9e67e444c5ca7fd74ecae80cf4763eb19b15dbd600dbb383399b461b832b2",
+        "elapsed_ms": 369
+      }
+    },
+    {
+      "slug": "karamhomes",
+      "tenantId": 33,
+      "themeKey": "premium_v1",
+      "usedCustomDomain": false,
+      "customDomain": null,
+      "urlSource": "slug-route",
+      "html": {
+        "status": 200,
+        "bytes": 75492,
+        "sha256": "9e37566c5cfea029f949026b1f59d7df24d29d8e4b4d13f08eac30921094fba1",
+        "elapsed_ms": 627
+      },
+      "api": {
+        "status": 200,
+        "bytes": 29742,
+        "sha256": "6443c82c1f4ce6177a883f8347301a80cafe3dd7d232eb3395ffaa976e867138",
+        "elapsed_ms": 394
+      }
+    },
+    {
+      "slug": "clinicx",
+      "tenantId": 39,
+      "themeKey": "premium_light",
+      "usedCustomDomain": false,
+      "customDomain": null,
+      "urlSource": "slug-route",
+      "html": {
+        "status": 200,
+        "bytes": 72281,
+        "sha256": "a60dd29d7f2e1193bb584e9e3b0fe74ca69851043049413d27f73608c1543eb5",
+        "elapsed_ms": 492
+      },
+      "api": {
+        "status": 200,
+        "bytes": 30031,
+        "sha256": "17af1eaeac5a57f9ba59a99c576ee7f538e4191c1705ad838ac31089e3e900cc",
+        "elapsed_ms": 367
+      }
+    }
+  ],
+  "findings": []
+}

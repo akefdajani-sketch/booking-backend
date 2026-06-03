@@ -95,6 +95,23 @@ const USER_AGENT = getArg(
   "--user-agent",
   "Flexrz-Internal-Phase-5-3-Audit/1.0"
 );
+// Per-tenant URL override. Maps each slug to the exact URL we want captured,
+// bypassing tenant_domains resolution. Used for canonical-URL fixes like
+// apex→www where the inventory has the apex but Vercel routes everyone to www.
+// Format: --custom-domain-override=slug1=url1,slug2=url2
+const URL_OVERRIDE_RAW = getArg("--custom-domain-override", "");
+const URL_OVERRIDES = new Map();
+if (URL_OVERRIDE_RAW) {
+  for (const pair of URL_OVERRIDE_RAW.split(",").map((s) => s.trim()).filter(Boolean)) {
+    const eq = pair.indexOf("=");
+    if (eq <= 0 || eq === pair.length - 1) {
+      console.error(`Fatal: malformed --custom-domain-override entry: "${pair}"`);
+      console.error(`       expected: slug=https://full-url/`);
+      process.exit(1);
+    }
+    URL_OVERRIDES.set(pair.slice(0, eq), pair.slice(eq + 1));
+  }
+}
 
 const OUTPUT_DIR = path.isAbsolute(OUTPUT_DIR_REL)
   ? OUTPUT_DIR_REL
@@ -151,13 +168,23 @@ function sleep(ms) {
 // API target ALWAYS uses API_BASE — the backend is single-host regardless
 // of custom domains.
 function resolveUrls(t) {
+  // Override wins over DB-derived custom domain. urlSource discriminates
+  // between override / DB / slug-route so the INDEX captures provenance.
+  const override = URL_OVERRIDES.get(t.slug);
   const useCustom =
-    CUSTOM_DOMAINS && t.custom_domain && t.custom_domain_is_primary;
-  const htmlUrl = useCustom
-    ? `https://${t.custom_domain}/`
-    : `${HTML_BASE}/book/${encodeURIComponent(t.slug)}`;
+    !override && CUSTOM_DOMAINS && t.custom_domain && t.custom_domain_is_primary;
+  const htmlUrl = override
+    ? override
+    : useCustom
+      ? `https://${t.custom_domain}/`
+      : `${HTML_BASE}/book/${encodeURIComponent(t.slug)}`;
   const apiUrl = `${API_BASE}/api/public/tenant-theme/${encodeURIComponent(t.slug)}`;
-  return { htmlUrl, apiUrl, usedCustomDomain: !!useCustom };
+  return {
+    htmlUrl,
+    apiUrl,
+    usedCustomDomain: !!(override || useCustom),
+    urlSource: override ? "override" : useCustom ? "db" : "slug-route",
+  };
 }
 
 // Schema-drift guard: --custom-domains needs tenant_domains.is_primary.
@@ -193,6 +220,10 @@ async function main() {
   if (RATE_LIMIT_MS > 0) console.log(`Rate limit:     ${RATE_LIMIT_MS}ms between tenants`);
   console.log(`User-Agent:     ${USER_AGENT}`);
   if (SLUG_FILTER) console.log(`Slug filter:    ${[...SLUG_FILTER].join(", ")}`);
+  if (URL_OVERRIDES.size) {
+    console.log("URL overrides:");
+    for (const [slug, url] of URL_OVERRIDES) console.log(`  ${slug} → ${url}`);
+  }
   console.log("");
 
   fs.mkdirSync(OUTPUT_DIR, { recursive: true });
@@ -232,7 +263,7 @@ async function main() {
   const findings = [];
 
   for (const t of tenants) {
-    const { htmlUrl, apiUrl, usedCustomDomain } = resolveUrls(t);
+    const { htmlUrl, apiUrl, usedCustomDomain, urlSource } = resolveUrls(t);
 
     const htmlR = await fetchWithTimeout(htmlUrl, TIMEOUT_MS);
     const apiR = await fetchWithTimeout(apiUrl, TIMEOUT_MS);
@@ -243,6 +274,7 @@ async function main() {
       themeKey: t.theme_key,
       usedCustomDomain,
       customDomain: usedCustomDomain ? t.custom_domain : null,
+      urlSource,
     };
 
     // ── HTML artifact ──
@@ -328,6 +360,7 @@ async function main() {
     apiBase: API_BASE,
     timeoutMs: TIMEOUT_MS,
     customDomainsEnabled: CUSTOM_DOMAINS,
+    customDomainOverrides: URL_OVERRIDES.size ? Object.fromEntries(URL_OVERRIDES) : null,
     rateLimitMs: RATE_LIMIT_MS,
     userAgent: USER_AGENT,
     slugFilter: SLUG_FILTER ? [...SLUG_FILTER] : null,
