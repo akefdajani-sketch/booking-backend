@@ -122,6 +122,19 @@ const REGEX_RULES = [
   { name: "sentry_trace_meta",
     pattern: /(<meta\s+name="sentry-trace"\s+content=")[^"]*(")/g,
     replacement: "$1[SENTRY-TRACE]$2" },
+  // Whole-baggage-value mask. The entire baggage content is per-request
+  // Sentry telemetry (trace_id, transaction, sampled, sample_rand,
+  // sample_rate) — all noise the harness has no business diffing. Anchored
+  // to <meta name="baggage" content="..."> so it can't over-match elsewhere.
+  // Root cause: sentry-transaction is emitted only when sampled=true and
+  // sentry-sampled flips per-request, so partial-field masks below leave
+  // intermittent presence/absence drift (karamhomes 2026-06-02 45-byte hunk).
+  { name: "sentry_baggage_meta",
+    pattern: /(<meta\s+name="baggage"\s+content=")[^"]*(")/g,
+    replacement: "$1[BAGGAGE]$2" },
+  // NOTE: the two rules below mask INSIDE the baggage value and are now
+  // subsumed by sentry_baggage_meta above. Kept for defense-in-depth in
+  // case a future change inlines the baggage content elsewhere.
   { name: "sentry_baggage_trace_id",
     pattern: /(sentry-trace_id=)[0-9a-f]{32}/g,
     replacement: "$1[TRACE-ID]" },

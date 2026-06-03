@@ -2,7 +2,7 @@
   "slug": "alrazi",
   "tenantId": 21,
   "themeKey": "premium_v2",
-  "capturedAt": "2026-06-02T22:04:46.079Z",
+  "capturedAt": "2026-06-03T00:34:27.696Z",
   "html": {
     "url": "https://www.alrazi-jo.com/",
     "status": 200,
@@ -12,7 +12,7 @@
       "content-encoding": "br",
       "content-security-policy": "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob: https://vercel.live https://va.vercel-scripts.com https://ap-gateway.mastercard.com https://test-network.mtf.gateway.mastercard.com https://*.mastercard.com https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com https://vercel.live; img-src 'self' data: blob: https://pub-2c33c37f0815407996bd1a0461881160.r2.dev https://maps.googleapis.com https://vercel.com https://vercel.live; connect-src 'self' https://*.flexrz.com https://*.onrender.com https://*.vercel.app https://*.sentry.io https://vercel.live wss://ws-us3.pusher.com https://ap-gateway.mastercard.com https://test-network.mtf.gateway.mastercard.com https://*.mastercard.com https://api.elevenlabs.io https://*.elevenlabs.io wss://api.elevenlabs.io wss://*.elevenlabs.io https://cdn.jsdelivr.net; frame-src https://www.google.com https://maps.google.com https://maps.app.goo.gl https://maps.goo.gl https://ap-gateway.mastercard.com https://test-network.mtf.gateway.mastercard.com https://*.mastercard.com https://vercel.live; manifest-src 'self'; worker-src 'self' blob: https://cdn.jsdelivr.net; media-src 'self' data: blob: https://*.elevenlabs.io; object-src 'none'; base-uri 'self'; form-action 'self' https://ap-gateway.mastercard.com https://test-network.mtf.gateway.mastercard.com https://*.mastercard.com",
       "content-type": "text/html; charset=utf-8",
-      "date": "Tue, 02 Jun 2026 22:04:45 GMT",
+      "date": "Wed, 03 Jun 2026 00:34:26 GMT",
       "link": "</_next/static/media/797e433ab948586e-s.p.479bea2b.woff2>; rel=preload; as=\"font\"; crossorigin=\"\"; type=\"font/woff2\", </_next/static/media/caa3a2e1cccd8315-s.p.3b6cae6d.woff2>; rel=preload; as=\"font\"; crossorigin=\"\"; type=\"font/woff2\", </_next/static/chunks/a7b97d28d8d7b094.css?dpl=dpl_HgdaQTjX8bpSDt4S86drRpfedgkt>; rel=preload; as=\"style\", </_next/static/chunks/eec87baed4a6da6d.css?dpl=dpl_HgdaQTjX8bpSDt4S86drRpfedgkt>; rel=preload; as=\"style\"",
       "permissions-policy": "camera=(), microphone=(self), geolocation=(), interest-cohort=()",
       "referrer-policy": "strict-origin-when-cross-origin",
@@ -25,11 +25,11 @@
       "x-matched-path": "/book/[slug]",
       "x-powered-by": "Next.js",
       "x-vercel-cache": "MISS",
-      "x-vercel-id": "fra1::iad1::mxt8c-1780437884805-074b66c9abd4",
+      "x-vercel-id": "fra1::iad1::znqxw-1780446866373-dd6f5702a934",
       "x-xss-protection": "1; mode=block"
     },
     "error": null,
-    "elapsed_ms": 1019
+    "elapsed_ms": 969
   },
   "api": {
     "url": "https://booking-backend-6jbc.onrender.com/api/public/tenant-theme/alrazi",
@@ -39,19 +39,19 @@
       "alt-svc": "h3=\":443\"; ma=86400",
       "cache-control": "no-store",
       "cf-cache-status": "DYNAMIC",
-      "cf-ray": "a059c170bf3288d2-AMM",
+      "cf-ray": "a05a9cb7dbbd14dd-AMM",
       "connection": "keep-alive",
       "content-encoding": "br",
       "content-type": "application/json; charset=utf-8",
-      "date": "Tue, 02 Jun 2026 22:04:45 GMT",
+      "date": "Wed, 03 Jun 2026 00:34:27 GMT",
       "etag": "W/\"8a35-ieKhbXCGJ4k8QnXuqe7k6SMnGY8\"",
       "permissions-policy": "camera=(), microphone=(), geolocation=(), interest-cohort=()",
       "ratelimit-limit": "120",
       "ratelimit-policy": "120;w=60",
-      "ratelimit-remaining": "117",
-      "ratelimit-reset": "60",
+      "ratelimit-remaining": "114",
+      "ratelimit-reset": "58",
       "referrer-policy": "strict-origin-when-cross-origin",
-      "rndr-id": "3b0899da-5c0f-4924",
+      "rndr-id": "b7b47f9c-6769-49d0",
       "server": "cloudflare",
       "strict-transport-security": "max-age=31536000; includeSubDomains",
       "transfer-encoding": "chunked",
@@ -60,10 +60,10 @@
       "x-content-type-options": "nosniff",
       "x-frame-options": "DENY",
       "x-render-origin-server": "Render",
-      "x-request-id": "067f1743-e446-43ae-a420-5cfb316cf3f7",
+      "x-request-id": "fa96eedd-3aef-42d1-84b8-b6bf64f377dc",
       "x-xss-protection": "1; mode=block"
     },
     "error": null,
-    "elapsed_ms": 392
+    "elapsed_ms": 360
   }
 }
