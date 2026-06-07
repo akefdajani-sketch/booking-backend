@@ -9,3 +9,8 @@ uploads
 
 # Audit probe outputs (local only — may contain DB shape info)
 probe*.json
+
+# Themes v2 harness snapshot byte content — captures are local-only;
+# only INDEX.json / MANIFEST.json / *.sha256 / *.meta.json get committed.
+snapshots/*/*.html
+snapshots/*/*.api.json

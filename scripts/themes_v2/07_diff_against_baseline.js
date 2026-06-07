@@ -63,6 +63,26 @@ if (!BASELINE_DIR || !CURRENT_DIR) {
 // in declared order, then whitespace cleanup. Order matters: regex rules
 // after the JSON pass so they don't accidentally rewrite inside JSON
 // string values before parsing.
+//
+// 2026-06-06 — first cross-deploy diff + git-CRLF-baseline lessons:
+//   • Vercel emits a per-deploy `dpl_<rand>` query token on every
+//     /_next/static/ asset; without masking it floods every tenant with
+//     identical noise hunks across deploys. Masked as [DPL].
+//   • Next.js content-hashes chunk filenames per build (16-hex .js/.css,
+//     turbopack-<hash>.js, <hash>-s.p.<hash>.woff2 fonts). These ride
+//     every deploy and only ever surface as path-shape-preserving rename
+//     hunks. Mask the hash segment only; the regexes are anchored to
+//     /_next/static/[BUILD-ID]/ so they can never reach tenant content.
+//   • Git autocrlf rewrote the on-disk baseline to CRLF on first checkout
+//     while live captures are LF, producing whole-file diff residue that
+//     looked like content drift. Line endings are now unified on BOTH
+//     inputs at raw file load (see readUtf8OrNull), BEFORE any rule runs.
+//     Paired fix: snapshots/** -text in .gitattributes + untrack baseline
+//     byte content from the repo so line endings can't be rewritten again.
+//   • snapshotVersion and publishedAt are intentionally NOT masked — they
+//     are publish-event canaries (abz cut a new theme version on
+//     2026-06-04). The earlier snapshot_version_field rule was removed
+//     in this commit to keep that signal visible in the diff.
 
 function normalizeNextData(text) {
   return text.replace(
@@ -94,6 +114,19 @@ const REGEX_RULES = [
   { name: "next_static_build_id",
     pattern: /\/_next\/static\/[^\/"'\s]+\//g,
     replacement: "/_next/static/[BUILD-ID]/" },
+  // The next three rules mask per-build chunk-filename hashes that ride
+  // every deploy. Anchored to /_next/static/[BUILD-ID]/ (the prefix the
+  // preceding rule produces) so they can never reach tenant content.
+  // Only the hash segment is replaced; extension + path shape preserved.
+  { name: "next_static_chunk_hash",
+    pattern: /(\/_next\/static\/\[BUILD-ID\]\/)[0-9a-f]{16}(\.(?:js|css))/g,
+    replacement: "$1[CHUNK]$2" },
+  { name: "next_static_turbopack_hash",
+    pattern: /(\/_next\/static\/\[BUILD-ID\]\/turbopack-)[0-9a-f]+(\.js)/g,
+    replacement: "$1[CHUNK]$2" },
+  { name: "next_static_font_hash",
+    pattern: /(\/_next\/static\/\[BUILD-ID\]\/)[0-9a-f]+(-s\.p\.)[0-9a-f]+(\.woff2)/g,
+    replacement: "$1[CHUNK]$2[CHUNK]$3" },
   { name: "data_build_id_attr",
     pattern: /(data-build-id=")[^"]*(")/g,
     replacement: "$1[BUILD-ID]$2" },
@@ -106,6 +139,13 @@ const REGEX_RULES = [
   { name: "cache_buster_query",
     pattern: /(\?v=)[0-9a-fA-F]+/g,
     replacement: "$1[HASH]" },
+  // Vercel per-deploy token, e.g. ?dpl=dpl_HgdaQTjX8bpSDt4S86drRpfedgkt.
+  // Appears as a query string on every /_next/static/ asset; rotates each
+  // deploy. `dpl_` is a Vercel-specific prefix unlikely to occur as
+  // legitimate tenant content, so a global mask is safe.
+  { name: "vercel_deploy_token",
+    pattern: /dpl_[A-Za-z0-9]+/g,
+    replacement: "[DPL]" },
   { name: "rendered_at_comment",
     pattern: /<!--\s*rendered at[^>]*-->/gi,
     replacement: "" },
@@ -147,16 +187,28 @@ const REGEX_RULES = [
   { name: "bf_ssr_debug_blob",
     pattern: /(window\.__BF_SSR_DEBUG__\s*=\s*)\{[^<]*?\};/g,
     replacement: "$1[BF-SSR-DEBUG];" },
-  // snapshotUsed / snapshotVersion are backend cache-warmth signals that
-  // also leak into the API tenant-theme payload embedded in the React
-  // Flight stream. The (\\*") + \1 backref matches raw, single-escaped,
-  // and triple-escaped quote levels symmetrically.
+  // App Router emits the Next.js per-build buildId in TWO places:
+  //   1. <script id="__NEXT_DATA__">{"buildId":"…"}</script>  — already
+  //      handled by normalizeNextData() above.
+  //   2. self.__next_f.push([1,"0:{\"P\":null,\"b\":\"<buildId>\"…"])  —
+  //      the Flight segment-0 payload encodes the same buildId, escaped.
+  // Without this rule, every cross-deploy diff surfaces a 21-char rename
+  // hunk in all 7 tenants (2026-06-06 incident). Anchored to the literal
+  // segment-0 shape so it cannot reach tenant content. The (\\*") + \2
+  // backref pattern matches whatever escape level the Flight push is at.
+  { name: "flight_router_build_id",
+    pattern: /(self\.__next_f\.push\(\[1,"0:\{)(\\*")P\2:null,\2b\2:\2[A-Za-z0-9_-]+\2/g,
+    replacement: "$1$2P$2:null,$2b$2:$2[BUILD-ID]$2" },
+  // snapshotUsed is a backend cache-warmth signal that leaks into the
+  // API tenant-theme payload embedded in the React Flight stream. The
+  // (\\*") + \1 backref matches raw, single-escaped, and triple-escaped
+  // quote levels symmetrically.
+  // NOTE: snapshotVersion was previously masked here as a "cache-warmth
+  // signal" but is now intentionally left unmasked — it's a publish-event
+  // canary. See the 2026-06-06 lesson block above.
   { name: "snapshot_used_field",
     pattern: /(\\*")snapshotUsed\1\s*:\s*(true|false)/g,
     replacement: "$1snapshotUsed$1:[CACHE]" },
-  { name: "snapshot_version_field",
-    pattern: /(\\*")snapshotVersion\1\s*:\s*\d+/g,
-    replacement: "$1snapshotVersion$1:[CACHE]" },
   // The appearance subtree (landing/assets/resolvedCssVars/resolvedContractCssVars)
   // is also embedded as escaped JSON inside React Flight pushes. Same backend
   // key-order non-determinism applies. Standalone copy is handled via
@@ -193,7 +245,13 @@ function readJsonOrNull(p) {
   try { return JSON.parse(fs.readFileSync(p, "utf8")); } catch { return null; }
 }
 function readUtf8OrNull(p) {
-  try { return fs.readFileSync(p, "utf8"); } catch { return null; }
+  // CRLF→LF unification at raw file load, BEFORE tokenization and before
+  // any normalization rule. Git autocrlf can rewrite on-disk baselines to
+  // CRLF on checkout while live captures are LF — without this, every
+  // tenant HTML diff explodes into whole-file line-ending residue. See
+  // .gitattributes (snapshots/** -text) for the paired root fix.
+  try { return fs.readFileSync(p, "utf8").replace(/\r\n/g, "\n"); }
+  catch { return null; }
 }
 function readShaOrNull(p) {
   try { return fs.readFileSync(p, "utf8").trim(); } catch { return null; }
