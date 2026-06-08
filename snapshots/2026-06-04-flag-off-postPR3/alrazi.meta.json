@@ -1,10 +1,10 @@
 {
-  "slug": "dingdong",
-  "tenantId": 22,
-  "themeKey": "premium_v1",
-  "capturedAt": "2026-06-03T00:34:29.773Z",
+  "slug": "alrazi",
+  "tenantId": 21,
+  "themeKey": "premium_v2",
+  "capturedAt": "2026-06-04T17:21:23.180Z",
   "html": {
-    "url": "https://flexrz.com/book/dingdong",
+    "url": "https://www.alrazi-jo.com/",
     "status": 200,
     "headers": {
       "age": "0",
@@ -12,8 +12,8 @@
       "content-encoding": "br",
       "content-security-policy": "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob: https://vercel.live https://va.vercel-scripts.com https://ap-gateway.mastercard.com https://test-network.mtf.gateway.mastercard.com https://*.mastercard.com https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com https://vercel.live; img-src 'self' data: blob: https://pub-2c33c37f0815407996bd1a0461881160.r2.dev https://maps.googleapis.com https://vercel.com https://vercel.live; connect-src 'self' https://*.flexrz.com https://*.onrender.com https://*.vercel.app https://*.sentry.io https://vercel.live wss://ws-us3.pusher.com https://ap-gateway.mastercard.com https://test-network.mtf.gateway.mastercard.com https://*.mastercard.com https://api.elevenlabs.io https://*.elevenlabs.io wss://api.elevenlabs.io wss://*.elevenlabs.io https://cdn.jsdelivr.net; frame-src https://www.google.com https://maps.google.com https://maps.app.goo.gl https://maps.goo.gl https://ap-gateway.mastercard.com https://test-network.mtf.gateway.mastercard.com https://*.mastercard.com https://vercel.live; manifest-src 'self'; worker-src 'self' blob: https://cdn.jsdelivr.net; media-src 'self' data: blob: https://*.elevenlabs.io; object-src 'none'; base-uri 'self'; form-action 'self' https://ap-gateway.mastercard.com https://test-network.mtf.gateway.mastercard.com https://*.mastercard.com",
       "content-type": "text/html; charset=utf-8",
-      "date": "Wed, 03 Jun 2026 00:34:29 GMT",
-      "link": "</_next/static/media/797e433ab948586e-s.p.479bea2b.woff2>; rel=preload; as=\"font\"; crossorigin=\"\"; type=\"font/woff2\", </_next/static/media/caa3a2e1cccd8315-s.p.3b6cae6d.woff2>; rel=preload; as=\"font\"; crossorigin=\"\"; type=\"font/woff2\", </_next/static/chunks/a7b97d28d8d7b094.css?dpl=dpl_HgdaQTjX8bpSDt4S86drRpfedgkt>; rel=preload; as=\"style\", </_next/static/chunks/eec87baed4a6da6d.css?dpl=dpl_HgdaQTjX8bpSDt4S86drRpfedgkt>; rel=preload; as=\"style\"",
+      "date": "Thu, 04 Jun 2026 17:21:21 GMT",
+      "link": "</_next/static/media/797e433ab948586e-s.p.479bea2b.woff2>; rel=preload; as=\"font\"; crossorigin=\"\"; type=\"font/woff2\", </_next/static/media/caa3a2e1cccd8315-s.p.3b6cae6d.woff2>; rel=preload; as=\"font\"; crossorigin=\"\"; type=\"font/woff2\", </_next/static/chunks/a7b97d28d8d7b094.css?dpl=dpl_8CguaoVLgpSgsWWbq2mberoggLAz>; rel=preload; as=\"style\", </_next/static/chunks/0f9c61b70dcd61af.css?dpl=dpl_8CguaoVLgpSgsWWbq2mberoggLAz>; rel=preload; as=\"style\", </_next/static/chunks/d3d053c8a8a0f1fc.css?dpl=dpl_8CguaoVLgpSgsWWbq2mberoggLAz>; rel=preload; as=\"style\"",
       "permissions-policy": "camera=(), microphone=(self), geolocation=(), interest-cohort=()",
       "referrer-policy": "strict-origin-when-cross-origin",
       "server": "Vercel",
@@ -25,45 +25,45 @@
       "x-matched-path": "/book/[slug]",
       "x-powered-by": "Next.js",
       "x-vercel-cache": "MISS",
-      "x-vercel-id": "fra1::iad1::xx96x-1780446868719-c37461bf9049",
+      "x-vercel-id": "fra1::iad1::6p4p5-1780593681253-5098f04f7f61",
       "x-xss-protection": "1; mode=block"
     },
     "error": null,
-    "elapsed_ms": 674
+    "elapsed_ms": 1070
   },
   "api": {
-    "url": "https://booking-backend-6jbc.onrender.com/api/public/tenant-theme/dingdong",
+    "url": "https://booking-backend-6jbc.onrender.com/api/public/tenant-theme/alrazi",
     "status": 200,
     "headers": {
       "access-control-allow-credentials": "true",
       "alt-svc": "h3=\":443\"; ma=86400",
       "cache-control": "no-store",
       "cf-cache-status": "DYNAMIC",
-      "cf-ray": "a05a9cc4a88b14dd-AMM",
+      "cf-ray": "a0689d112e7c5409-AMM",
       "connection": "keep-alive",
       "content-encoding": "br",
-      "content-length": "3312",
       "content-type": "application/json; charset=utf-8",
-      "date": "Wed, 03 Jun 2026 00:34:29 GMT",
-      "etag": "W/\"2f39-9F9I2dTgPRPUihV10gPDGrH2a5I\"",
+      "date": "Thu, 04 Jun 2026 17:21:22 GMT",
+      "etag": "W/\"8a35-ieKhbXCGJ4k8QnXuqe7k6SMnGY8\"",
       "permissions-policy": "camera=(), microphone=(), geolocation=(), interest-cohort=()",
       "ratelimit-limit": "120",
       "ratelimit-policy": "120;w=60",
       "ratelimit-remaining": "117",
       "ratelimit-reset": "60",
       "referrer-policy": "strict-origin-when-cross-origin",
-      "rndr-id": "80735b48-1f99-4ac8",
+      "rndr-id": "aa4c1abe-efcb-4b19",
       "server": "cloudflare",
       "strict-transport-security": "max-age=31536000; includeSubDomains",
+      "transfer-encoding": "chunked",
       "vary": "Origin, Accept-Encoding",
       "x-api-version": "1",
       "x-content-type-options": "nosniff",
       "x-frame-options": "DENY",
       "x-render-origin-server": "Render",
-      "x-request-id": "7ffee5ef-5526-4591-a783-09b2b0d97755",
+      "x-request-id": "fe8ed8b2-144f-43e4-8e3e-70fc704c0d56",
       "x-xss-protection": "1; mode=block"
     },
     "error": null,
-    "elapsed_ms": 388
+    "elapsed_ms": 399
   }
 }
