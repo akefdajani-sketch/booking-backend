@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-06-03T00:34:38.639Z",
+  "timestamp": "2026-06-04T17:21:34.579Z",
   "prodMode": true,
   "htmlBase": "https://flexrz.com",
   "apiBase": "https://booking-backend-6jbc.onrender.com",
@@ -23,15 +23,15 @@
       "urlSource": "override",
       "html": {
         "status": 200,
-        "bytes": 92082,
-        "sha256": "ff892f502cfee1a50fa6652826406624c5eef345483c4e86be27dd35e9a3fdc1",
-        "elapsed_ms": 1767
+        "bytes": 92533,
+        "sha256": "a4e20fab0bd5e57aeefac3b562db5c6a9e83b5dc7f029f255a9ee3f4c02bd9ba",
+        "elapsed_ms": 1836
       },
       "api": {
         "status": 200,
         "bytes": 65374,
         "sha256": "7cf600fba8e4f48c2ddeed7d9afdb6bb605e5500bd22f529fe5f0ed7b15e8e67",
-        "elapsed_ms": 630
+        "elapsed_ms": 496
       }
     },
     {
@@ -43,15 +43,15 @@
       "urlSource": "override",
       "html": {
         "status": 200,
-        "bytes": 71059,
-        "sha256": "f490042d2c7b4803619dc1954ee34d03a1825af57e7d43060fae76c7cb073464",
-        "elapsed_ms": 969
+        "bytes": 71509,
+        "sha256": "b9bfe403b9cfec58b0e86b0856c964e261b0f7e64a8ad67adaa63e3f23400ae7",
+        "elapsed_ms": 1070
       },
       "api": {
         "status": 200,
         "bytes": 35381,
         "sha256": "7688e9323be61996038d50f37b1a5fb0b392e93f62bcea6f088cfc7302b4c539",
-        "elapsed_ms": 360
+        "elapsed_ms": 399
       }
     },
     {
@@ -63,15 +63,15 @@
       "urlSource": "slug-route",
       "html": {
         "status": 200,
-        "bytes": 53191,
-        "sha256": "eed7c80d21082b4d630cb4ee99f3bff7ae271722670bec075aa09648d5912b38",
-        "elapsed_ms": 674
+        "bytes": 53644,
+        "sha256": "ebcdea1cd20a9efbb5271f7b5f9e10a22aced710ec96de5bb03c2a28b78ae36b",
+        "elapsed_ms": 775
       },
       "api": {
         "status": 200,
         "bytes": 12089,
         "sha256": "0bc43ad6fc30067bac1676a140c405a313586842b70b68d237ef467b6cb70c49",
-        "elapsed_ms": 388
+        "elapsed_ms": 900
       }
     },
     {
@@ -83,15 +83,15 @@
       "urlSource": "slug-route",
       "html": {
         "status": 200,
-        "bytes": 53300,
-        "sha256": "a89d8cab87d6556faeede02700823597e2962ec6ef8c67fdf52c9240a2a956b5",
-        "elapsed_ms": 573
+        "bytes": 53749,
+        "sha256": "6b96a7cce2e6c8599690b7493cfd77e660319671d1216cd143ada10c26c2f42d",
+        "elapsed_ms": 492
       },
       "api": {
         "status": 200,
         "bytes": 11839,
         "sha256": "613626e5d2881e01d30caa99c27f01b30462018a6f1e87f0b104488fdad9fd84",
-        "elapsed_ms": 399
+        "elapsed_ms": 358
       }
     },
     {
@@ -103,15 +103,15 @@
       "urlSource": "slug-route",
       "html": {
         "status": 200,
-        "bytes": 54835,
-        "sha256": "da6fcb41fe651318fc2478392370cfa430915bb323d38a38d7ff87dad50291e0",
-        "elapsed_ms": 584
+        "bytes": 55333,
+        "sha256": "405a41ff59e239263b12495ebe75bc392c35c8cdd43c5e1d8ba1fa2bb68809d5",
+        "elapsed_ms": 599
       },
       "api": {
         "status": 200,
         "bytes": 16701,
-        "sha256": "d9c9e67e444c5ca7fd74ecae80cf4763eb19b15dbd600dbb383399b461b832b2",
-        "elapsed_ms": 369
+        "sha256": "c3508d6998ad95cc936f7d774cc84d4bf81e196a857f0d11a54f1786b5b6b442",
+        "elapsed_ms": 401
       }
     },
     {
@@ -123,15 +123,15 @@
       "urlSource": "slug-route",
       "html": {
         "status": 200,
-        "bytes": 75492,
-        "sha256": "9e37566c5cfea029f949026b1f59d7df24d29d8e4b4d13f08eac30921094fba1",
-        "elapsed_ms": 627
+        "bytes": 75943,
+        "sha256": "99525c591fe54217a326fe88d1a735903109e3ecdbd5c5f49aae8dab168b6a77",
+        "elapsed_ms": 512
       },
       "api": {
         "status": 200,
         "bytes": 29742,
         "sha256": "6443c82c1f4ce6177a883f8347301a80cafe3dd7d232eb3395ffaa976e867138",
-        "elapsed_ms": 394
+        "elapsed_ms": 418
       }
     },
     {
@@ -143,15 +143,15 @@
       "urlSource": "slug-route",
       "html": {
         "status": 200,
-        "bytes": 72281,
-        "sha256": "a60dd29d7f2e1193bb584e9e3b0fe74ca69851043049413d27f73608c1543eb5",
+        "bytes": 72686,
+        "sha256": "c12b559b895b9358c07bb90ba87159478965a3ca93a9c0a1c0a35fbd6fc64111",
         "elapsed_ms": 492
       },
       "api": {
         "status": 200,
         "bytes": 30031,
         "sha256": "17af1eaeac5a57f9ba59a99c576ee7f538e4191c1705ad838ac31089e3e900cc",
-        "elapsed_ms": 367
+        "elapsed_ms": 382
       }
     }
   ],

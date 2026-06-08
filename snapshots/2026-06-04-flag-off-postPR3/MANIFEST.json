@@ -1,0 +1,152 @@
+{
+  "manifestVersion": 2,
+  "phase": "themes-v2 phase 5.3 — locked baseline (flag-off, post-PR3 frontend)",
+  "status": "LOCKED — Phase 5.3 Gates 3–6 reference baseline",
+  "generatedAt": "2026-06-08T08:05:10.630Z",
+  "baselineDir": "snapshots/2026-06-04-flag-off-postPR3",
+  "captureTimestamp": "2026-06-04T17:21:34.579Z",
+  "captureCommand": "node scripts/themes_v2/05_capture_render_baseline.js --prod --custom-domains --custom-domain-override=birdie-golf=https://www.birdiegolf-jo.com/,alrazi=https://www.alrazi-jo.com/ --output-dir=snapshots/2026-06-04-flag-off-postPR3",
+  "captureEnvironment": {
+    "prodMode": true,
+    "htmlBase": "https://flexrz.com",
+    "apiBase": "https://booking-backend-6jbc.onrender.com",
+    "timeoutMs": 5000,
+    "rateLimitMs": 1000,
+    "userAgent": "Flexrz-Internal-Phase-5-3-Audit/1.0"
+  },
+  "deployedMainSha": "b2e42b8dd398cb8325124b8c46af69e0b6b9d3dd",
+  "deployedMainSubject": "Themes v2/phase 5 3 equivalence harness (#485)",
+  "deployedMainCommittedAt": "2026-06-03T04:35:57+03:00",
+  "deployedMainNote": "Main HEAD at the 2026-06-04 capture was b2e42b8 (#485, Phase 5.3 equivalence harness — scripts/themes_v2/ only). The last commit touching backend RUNTIME code was #484 (PR-2: sections_json reorder + customer_form->confirm_summary rename, 4a2aa2f). The commits between PR-2 and this lock (#485 equivalence harness; #486 harness deploy-noise masks + CRLF safety) touched only harness scripts, git line-ending/tracking metadata, snapshot files, and one documentation note (docs/themes-v2-backend-stable-key-order.md, recording the known non-stable serializer key-order that the harness masks) — no runtime code paths. Render auto-deploys main; the live-at-capture SHA was not independently verified — rendered-output equivalence to the retired 06-02 baseline is proven empirically by Gate 2 forensics (zero content/seam/branding deltas).",
+  "deployedFrontendVercel": {
+    "shaShort": "a4f7613",
+    "pr": "frontend PR #44 (Phase 5.3 PR-3)",
+    "platform": "Vercel Production",
+    "deployedAt": "2026-06-04"
+  },
+  "customDomainOverrides": {
+    "birdie-golf": "https://www.birdiegolf-jo.com/",
+    "alrazi": "https://www.alrazi-jo.com/"
+  },
+  "annotations": [
+    {
+      "id": "a",
+      "category": "build-graph footprint (accepted, not masked)",
+      "description": "PR-3 CSS chunk-split: eec87baed4a6da6d.css → 0f9c61b7… + d3d053c8…; head <link rel=\"stylesheet\"> count 2 → 3; uniform across all 7 tenants. Accepted PR-3 build-graph footprint — recorded in this MANIFEST, deliberately not normalized away in 07.js."
+    },
+    {
+      "id": "b",
+      "category": "publish event (owned, baked into baseline)",
+      "description": "abz snapshotVersion 21 → 22 plus the publishedAt timestamp are baked into this baseline as an owned publish event captured at lock time. Deliberately unmasked downstream — see annotation (c)."
+    },
+    {
+      "id": "c",
+      "category": "harness contract change",
+      "description": "Harness rule #15 removed in PR #486 (commit 24bbf2d). snapshotVersion and publishedAt fields are now deliberately unmasked in scripts/themes_v2/07_diff_against_baseline.js — they function as publish-event canaries. Future diffs that surface these fields against this baseline are signal, not noise."
+    }
+  ],
+  "harnessReference": {
+    "harnessHeadAtLock": "24bbf2decc6d5962d07b0b021c081cff4b4ceea2",
+    "harnessHeadSubject": "fix(themes-v2): harness deploy-noise masks + CRLF baseline safety (#486)",
+    "diffsApplyMasksFrom": "post-PR #486",
+    "note": "scripts/themes_v2/07_diff_against_baseline.js at this SHA — or any later SHA that preserves the post-#486 rule set — is the diff contract for this baseline."
+  },
+  "tenants": [
+    {
+      "slug": "birdie-golf",
+      "id": 3,
+      "themeKey": "premium-hospitality",
+      "protected": true,
+      "customDomain": "birdiegolf-jo.com",
+      "urlSource": "override",
+      "htmlSha256": "a4e20fab0bd5e57aeefac3b562db5c6a9e83b5dc7f029f255a9ee3f4c02bd9ba",
+      "htmlBytes": 92533,
+      "apiSha256": "7cf600fba8e4f48c2ddeed7d9afdb6bb605e5500bd22f529fe5f0ed7b15e8e67",
+      "apiBytes": 65374
+    },
+    {
+      "slug": "alrazi",
+      "id": 21,
+      "themeKey": "premium_v2",
+      "protected": true,
+      "customDomain": "alrazi-jo.com",
+      "urlSource": "override",
+      "htmlSha256": "b9bfe403b9cfec58b0e86b0856c964e261b0f7e64a8ad67adaa63e3f23400ae7",
+      "htmlBytes": 71509,
+      "apiSha256": "7688e9323be61996038d50f37b1a5fb0b392e93f62bcea6f088cfc7302b4c539",
+      "apiBytes": 35381
+    },
+    {
+      "slug": "dingdong",
+      "id": 22,
+      "themeKey": "premium_v1",
+      "protected": false,
+      "customDomain": null,
+      "urlSource": "slug-route",
+      "htmlSha256": "ebcdea1cd20a9efbb5271f7b5f9e10a22aced710ec96de5bb03c2a28b78ae36b",
+      "htmlBytes": 53644,
+      "apiSha256": "0bc43ad6fc30067bac1676a140c405a313586842b70b68d237ef467b6cb70c49",
+      "apiBytes": 12089
+    },
+    {
+      "slug": "meesh",
+      "id": 27,
+      "themeKey": "premium",
+      "protected": false,
+      "customDomain": null,
+      "urlSource": "slug-route",
+      "htmlSha256": "6b96a7cce2e6c8599690b7493cfd77e660319671d1216cd143ada10c26c2f42d",
+      "htmlBytes": 53749,
+      "apiSha256": "613626e5d2881e01d30caa99c27f01b30462018a6f1e87f0b104488fdad9fd84",
+      "apiBytes": 11839
+    },
+    {
+      "slug": "abz",
+      "id": 32,
+      "themeKey": "minimal",
+      "protected": false,
+      "customDomain": null,
+      "urlSource": "slug-route",
+      "htmlSha256": "405a41ff59e239263b12495ebe75bc392c35c8cdd43c5e1d8ba1fa2bb68809d5",
+      "htmlBytes": 55333,
+      "apiSha256": "c3508d6998ad95cc936f7d774cc84d4bf81e196a857f0d11a54f1786b5b6b442",
+      "apiBytes": 16701
+    },
+    {
+      "slug": "karamhomes",
+      "id": 33,
+      "themeKey": "premium_v1",
+      "protected": true,
+      "customDomain": null,
+      "urlSource": "slug-route",
+      "htmlSha256": "99525c591fe54217a326fe88d1a735903109e3ecdbd5c5f49aae8dab168b6a77",
+      "htmlBytes": 75943,
+      "apiSha256": "6443c82c1f4ce6177a883f8347301a80cafe3dd7d232eb3395ffaa976e867138",
+      "apiBytes": 29742
+    },
+    {
+      "slug": "clinicx",
+      "id": 39,
+      "themeKey": "premium_light",
+      "protected": false,
+      "customDomain": null,
+      "urlSource": "slug-route",
+      "htmlSha256": "c12b559b895b9358c07bb90ba87159478965a3ca93a9c0a1c0a35fbd6fc64111",
+      "htmlBytes": 72686,
+      "apiSha256": "17af1eaeac5a57f9ba59a99c576ee7f538e4191c1705ad838ac31089e3e900cc",
+      "apiBytes": 30031
+    }
+  ],
+  "verification": {
+    "status": "deferred",
+    "rationale": "Phase 5.3 Gates 3–6 exercise this baseline; per-tenant verdicts are recorded by those gates.",
+    "reverificationInstructions": "Run captureCommand into a fresh --output-dir, then scripts/themes_v2/07_diff_against_baseline.js --baseline-dir=snapshots/2026-06-04-flag-off-postPR3 --current-dir=<fresh-dir>. Expect 7/7 PASS while Vercel deploy is a4f7613 and backend remains runtime-equivalent to PR-2."
+  },
+  "notes": [
+    "INDEX.json is the immutable capture record; this MANIFEST is the lock-time artifact authored at generatedAt above. INDEX.json must not be modified after capture — its embedded hashes cross-check the sidecars.",
+    "Sidecars (*.sha256) exist only for the gitignored *.html and *.api.json files. INDEX.json and this MANIFEST receive integrity from git tracking; no sidecars are emitted for them.",
+    "Supersedes snapshots/2026-06-02-flag-off (retired in the same commit that authors this MANIFEST).",
+    "Raw bytes encode wall-clock capture moment (per-request Sentry trace_ids and cache-warmth, plus the deliberately-unmasked snapshotVersion / publishedAt — see annotations b and c). The verified-equivalence claim holds at the normalizer's output, not at raw sha256.",
+    "Protected tenants (3 = birdie-golf, 21 = alrazi, 33 = karamhomes) ship branding changes through a stricter review and are an attention prior when triaging future DIFF verdicts; Phase 5.3 protocol bars data scripts against them."
+  ]
+}
