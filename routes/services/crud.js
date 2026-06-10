@@ -22,6 +22,8 @@ module.exports = function mount(router) {
 router.get("/", async (req, res) => {
   try {
     const { tenantSlug, tenantId, includeInactive, categoryId } = req.query;
+    const includeArchivedRaw = String(req.query.include_archived || "").toLowerCase();
+    const showArchived = includeArchivedRaw === "1" || includeArchivedRaw === "true";
 
     // PR-3: pagination
     const limitRaw  = req.query.limit  ? Number(req.query.limit)  : 100;
@@ -43,6 +45,11 @@ router.get("/", async (req, res) => {
     // default: only active services unless includeInactive=1
     if (!includeInactive || String(includeInactive) !== "1") {
       where.push(`COALESCE(s.is_active, true) = true`);
+    }
+
+    // default: suppress archived; include_archived=1/true returns all
+    if (!showArchived) {
+      where.push(`s.archived_at IS NULL`);
     }
 
     const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
@@ -548,6 +555,48 @@ router.delete("/:id", resolveTenantFromServiceId, requireAdminOrTenantRole("mana
   } catch (err) {
     console.error("Error deleting service:", err);
     return res.status(500).json({ error: "Failed to delete service" });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/services/:id/archive  (admin/manager)
+// POST /api/services/:id/restore  (admin/manager)
+// Archive is a THIRD state, independent from is_active=false / deleted_at.
+// Suppression at the query layer in discovery/list endpoints; existing
+// bookings keep rendering archived service names (history joins are bare).
+// ---------------------------------------------------------------------------
+router.post("/:id/archive", resolveTenantFromServiceId, requireAdminOrTenantRole("manager"), async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!id) return res.status(400).json({ error: "invalid id" });
+    const actor = String(req.user?.email || (req.adminBypass ? "admin" : "")).trim() || null;
+    const { rows } = await db.query(
+      `UPDATE services SET archived_at = NOW(), archived_by = $2 WHERE id = $1 RETURNING *`,
+      [id, actor]
+    );
+    if (!rows.length) return res.status(404).json({ error: "not found" });
+    aiContextCache.bustBusiness(rows[0]?.tenant_id);
+    return res.json({ ok: true, service: rows[0] });
+  } catch (err) {
+    console.error("Error archiving service:", err);
+    return res.status(500).json({ error: "Failed to archive service" });
+  }
+});
+
+router.post("/:id/restore", resolveTenantFromServiceId, requireAdminOrTenantRole("manager"), async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!id) return res.status(400).json({ error: "invalid id" });
+    const { rows } = await db.query(
+      `UPDATE services SET archived_at = NULL, archived_by = NULL WHERE id = $1 RETURNING *`,
+      [id]
+    );
+    if (!rows.length) return res.status(404).json({ error: "not found" });
+    aiContextCache.bustBusiness(rows[0]?.tenant_id);
+    return res.json({ ok: true, service: rows[0] });
+  } catch (err) {
+    console.error("Error restoring service:", err);
+    return res.status(500).json({ error: "Failed to restore service" });
   }
 });
 

@@ -95,7 +95,7 @@ router.post("/:slug/pricing/quote", injectTenantSlug, requireTenant, async (req,
         COALESCE(s.slot_interval_minutes, s.duration_minutes) AS slot_interval_minutes,
         ${priceExpr}
       FROM services s
-      WHERE s.tenant_id = $1 AND s.id = $2
+      WHERE s.tenant_id = $1 AND s.id = $2 AND s.archived_at IS NULL
       LIMIT 1
       `,
       [tenantId, serviceId]

@@ -193,3 +193,154 @@ describe('POST /api/resources', () => {
     expect([200, 201, 400, 401]).toContain(res.status);
   });
 });
+
+// ─── Archive / Restore (migration 074) ────────────────────────────────────────
+
+describe('Staff archive / restore', () => {
+  function makeStaffApp() {
+    const app = express();
+    app.use(express.json());
+    jest.doMock('../utils/aiContextCache', () => ({ bustBusiness: jest.fn() }));
+    const router = require('../routes/staff');
+    app.use('/api/staff', router);
+    app.use((err, req, res, next) => res.status(500).json({ error: err.message }));
+    return app;
+  }
+
+  test('GET /api/staff includes archived_at IS NULL in SQL by default', async () => {
+    const seen = [];
+    pool.query.mockImplementation(async (sql) => {
+      seen.push(String(sql));
+      if (String(sql).includes('FROM tenants WHERE slug')) return { rows: [{ id: 1 }] };
+      return { rows: [] };
+    });
+    await request(makeStaffApp()).get('/api/staff?tenantSlug=birdie');
+    const listSql = seen.find((s) => s.includes('FROM staff'));
+    expect(listSql).toBeDefined();
+    expect(listSql).toMatch(/archived_at IS NULL/);
+  });
+
+  test('GET /api/staff?include_archived=true OMITS archived_at IS NULL', async () => {
+    const seen = [];
+    pool.query.mockImplementation(async (sql) => {
+      seen.push(String(sql));
+      if (String(sql).includes('FROM tenants WHERE slug')) return { rows: [{ id: 1 }] };
+      return { rows: [] };
+    });
+    await request(makeStaffApp()).get('/api/staff?tenantSlug=birdie&include_archived=true');
+    const listSql = seen.find((s) => s.includes('FROM staff'));
+    expect(listSql).toBeDefined();
+    expect(listSql).not.toMatch(/archived_at IS NULL/);
+  });
+
+  test('POST /api/staff/:id/archive updates archived_at and returns row', async () => {
+    pool.query.mockImplementation(async (sql) => {
+      const s = String(sql);
+      if (s.includes('SELECT tenant_id FROM staff')) return { rows: [{ tenant_id: 1 }] };
+      if (s.includes('UPDATE staff SET archived_at = NOW()')) {
+        return { rows: [{ id: 7, tenant_id: 1, archived_at: '2026-06-10T00:00:00Z', archived_by: 'test@example.com' }] };
+      }
+      return { rows: [] };
+    });
+    const res = await request(makeStaffApp()).post('/api/staff/7/archive');
+    expect([200, 401]).toContain(res.status);
+    if (res.status === 200) {
+      expect(res.body.staff?.archived_at).toBeTruthy();
+    }
+  });
+
+  test('POST /api/staff/:id/restore clears archived_at', async () => {
+    pool.query.mockImplementation(async (sql) => {
+      const s = String(sql);
+      if (s.includes('SELECT tenant_id FROM staff')) return { rows: [{ tenant_id: 1 }] };
+      if (s.includes('UPDATE staff SET archived_at = NULL')) {
+        return { rows: [{ id: 7, tenant_id: 1, archived_at: null, archived_by: null }] };
+      }
+      return { rows: [] };
+    });
+    const res = await request(makeStaffApp()).post('/api/staff/7/restore');
+    expect([200, 401]).toContain(res.status);
+    if (res.status === 200) {
+      expect(res.body.staff?.archived_at).toBeNull();
+    }
+  });
+
+  test('POST /api/staff/:id/archive returns 404 when row not found', async () => {
+    pool.query.mockImplementation(async (sql) => {
+      if (String(sql).includes('SELECT tenant_id FROM staff')) return { rows: [{ tenant_id: 1 }] };
+      return { rows: [] };
+    });
+    const res = await request(makeStaffApp()).post('/api/staff/99999/archive');
+    expect([404, 401]).toContain(res.status);
+  });
+});
+
+describe('Resources archive / restore', () => {
+  function makeResourcesApp() {
+    const app = express();
+    app.use(express.json());
+    jest.doMock('../utils/aiContextCache', () => ({ bustBusiness: jest.fn() }));
+    const router = require('../routes/resources');
+    app.use('/api/resources', router);
+    app.use((err, req, res, next) => res.status(500).json({ error: err.message }));
+    return app;
+  }
+
+  test('GET /api/resources includes archived_at IS NULL in SQL by default', async () => {
+    const seen = [];
+    pool.query.mockImplementation(async (sql) => {
+      seen.push(String(sql));
+      if (String(sql).includes('FROM tenants WHERE slug')) return { rows: [{ id: 1 }] };
+      return { rows: [] };
+    });
+    await request(makeResourcesApp()).get('/api/resources?tenantSlug=birdie');
+    const listSql = seen.find((s) => s.includes('FROM resources'));
+    expect(listSql).toBeDefined();
+    expect(listSql).toMatch(/archived_at IS NULL/);
+  });
+
+  test('GET /api/resources?include_archived=1 OMITS archived_at IS NULL', async () => {
+    const seen = [];
+    pool.query.mockImplementation(async (sql) => {
+      seen.push(String(sql));
+      if (String(sql).includes('FROM tenants WHERE slug')) return { rows: [{ id: 1 }] };
+      return { rows: [] };
+    });
+    await request(makeResourcesApp()).get('/api/resources?tenantSlug=birdie&include_archived=1');
+    const listSql = seen.find((s) => s.includes('FROM resources'));
+    expect(listSql).toBeDefined();
+    expect(listSql).not.toMatch(/archived_at IS NULL/);
+  });
+
+  test('POST /api/resources/:id/archive updates archived_at and returns row', async () => {
+    pool.query.mockImplementation(async (sql) => {
+      const s = String(sql);
+      if (s.includes('SELECT tenant_id FROM resources')) return { rows: [{ tenant_id: 1 }] };
+      if (s.includes('UPDATE resources SET archived_at = NOW()')) {
+        return { rows: [{ id: 5, tenant_id: 1, archived_at: '2026-06-10T00:00:00Z', archived_by: 'test@example.com' }] };
+      }
+      return { rows: [] };
+    });
+    const res = await request(makeResourcesApp()).post('/api/resources/5/archive');
+    expect([200, 401]).toContain(res.status);
+    if (res.status === 200) {
+      expect(res.body.resource?.archived_at).toBeTruthy();
+    }
+  });
+
+  test('POST /api/resources/:id/restore clears archived_at', async () => {
+    pool.query.mockImplementation(async (sql) => {
+      const s = String(sql);
+      if (s.includes('SELECT tenant_id FROM resources')) return { rows: [{ tenant_id: 1 }] };
+      if (s.includes('UPDATE resources SET archived_at = NULL')) {
+        return { rows: [{ id: 5, tenant_id: 1, archived_at: null, archived_by: null }] };
+      }
+      return { rows: [] };
+    });
+    const res = await request(makeResourcesApp()).post('/api/resources/5/restore');
+    expect([200, 401]).toContain(res.status);
+    if (res.status === 200) {
+      expect(res.body.resource?.archived_at).toBeNull();
+    }
+  });
+});

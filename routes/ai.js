@@ -168,6 +168,9 @@ async function fetchBusinessContext(tenantId, tenantSlug) {
     // membership_plans columns
     hasMpBillingType, hasMpIncMins, hasMpIncUses, hasMpValidity,
     hasMpCurrency, hasMpDescription,
+    // Migration 074 — archive column existence guards (defensive across the
+    // deploy window between code release and `npm run migrate`).
+    hasServicesArchivedAt, hasResourcesArchivedAt, hasStaffArchivedAt,
     // services allow_membership
   ] = await Promise.all([
     columnExists("services", "description"),
@@ -191,6 +194,9 @@ async function fetchBusinessContext(tenantId, tenantSlug) {
     columnExists("membership_plans", "validity_days"),
     columnExists("membership_plans", "currency"),
     columnExists("membership_plans", "description"),
+    columnExists("services",  "archived_at"),
+    columnExists("resources", "archived_at"),
+    columnExists("staff",     "archived_at"),
   ]);
 
   const priceCol      = hasPriceAmount && hasPrice ? "COALESCE(s.price_amount, s.price)"
@@ -207,6 +213,18 @@ async function fetchBusinessContext(tenantId, tenantSlug) {
   const maxConsecCol  = hasMaxConsec     ? "s.max_consecutive_slots" : "NULL::int AS max_consecutive_slots";
   const deletedWhere  = hasDeletedAt     ? "AND s.deleted_at IS NULL" : "";
   const activeWhere   = hasIsActive      ? "AND COALESCE(s.is_active, true) = true" : "";
+  // Migration 074 archive guards — empty string until the column lands.
+  const archivedSvcWhere     = hasServicesArchivedAt  ? "AND s.archived_at IS NULL"  : "";
+  const archivedResWhereBare = hasResourcesArchivedAt ? " AND archived_at IS NULL"   : "";
+  const archivedResWhereR    = hasResourcesArchivedAt ? "AND r.archived_at IS NULL"  : "";
+  const archivedStaffBare    = hasStaffArchivedAt     ? " AND archived_at IS NULL"   : "";
+  const archivedStaffSt      = hasStaffArchivedAt     ? "AND st.archived_at IS NULL" : "";
+  // 324 (service_hours): per-service hours leak archived-service context to
+  // the voice agent (documented fabrication mode). Suppress via subquery so
+  // we don't have to restructure to a JOIN.
+  const archivedSvcHoursSub  = hasServicesArchivedAt
+    ? "AND service_id IN (SELECT id FROM services WHERE tenant_id = $1 AND archived_at IS NULL)"
+    : "";
 
   // membership_plans safe columns
   const mpBillingCol  = hasMpBillingType ? "billing_type"    : "NULL::text AS billing_type";
@@ -228,6 +246,7 @@ async function fetchBusinessContext(tenantId, tenantSlug) {
          WHERE s.tenant_id = $1
            ${activeWhere}
            ${deletedWhere}
+           ${archivedSvcWhere}
          ORDER BY s.name ASC`,
         [tenantId]
       ).catch((e) => { console.error("[AI services query error]", e.message); return { rows: [] }; }),
@@ -269,7 +288,7 @@ async function fetchBusinessContext(tenantId, tenantSlug) {
       db.query(
         `SELECT id, name${hasResourceCapacity ? ", capacity" : ""}
          FROM resources
-         WHERE tenant_id = $1${hasResourceIsActive ? " AND COALESCE(is_active, true) = true" : ""}
+         WHERE tenant_id = $1${hasResourceIsActive ? " AND COALESCE(is_active, true) = true" : ""}${archivedResWhereBare}
          ORDER BY name ASC`,
         [tenantId]
       ).catch(() => ({ rows: [] })),
@@ -277,7 +296,7 @@ async function fetchBusinessContext(tenantId, tenantSlug) {
       db.query(
         `SELECT id, name${hasStaffEmail ? ", email" : ""}${hasIsActive ? ", is_active" : ""}
          FROM staff
-         WHERE tenant_id = $1${hasIsActive ? " AND COALESCE(is_active, true) = true" : ""}
+         WHERE tenant_id = $1${hasIsActive ? " AND COALESCE(is_active, true) = true" : ""}${archivedStaffBare}
          ORDER BY name ASC`,
         [tenantId]
       ).catch(() => ({ rows: [] })),
@@ -302,7 +321,9 @@ async function fetchBusinessContext(tenantId, tenantSlug) {
          FROM resource_service_links rsl
          JOIN resources r ON r.id = rsl.resource_id
          JOIN services s ON s.id = rsl.service_id
-         WHERE rsl.tenant_id = $1`,
+         WHERE rsl.tenant_id = $1
+           ${archivedResWhereR}
+           ${archivedSvcWhere}`,
         [tenantId]
       ).catch(() => ({ rows: [] })),
 
@@ -313,7 +334,9 @@ async function fetchBusinessContext(tenantId, tenantSlug) {
          FROM staff_service_links ssl
          JOIN staff st ON st.id = ssl.staff_id
          JOIN services s ON s.id = ssl.service_id
-         WHERE ssl.tenant_id = $1`,
+         WHERE ssl.tenant_id = $1
+           ${archivedStaffSt}
+           ${archivedSvcWhere}`,
         [tenantId]
       ).catch(() => ({ rows: [] })),
 
@@ -325,6 +348,7 @@ async function fetchBusinessContext(tenantId, tenantSlug) {
         `SELECT service_id, day_of_week, open_time, close_time
          FROM service_hours
          WHERE tenant_id = $1
+           ${archivedSvcHoursSub}
          ORDER BY service_id, day_of_week`,
         [tenantId]
       ).catch(() => ({ rows: [] })),
@@ -358,6 +382,7 @@ async function fetchBusinessContext(tenantId, tenantSlug) {
          FROM services s
          WHERE s.tenant_id = $1
            ${deletedWhere}
+           ${archivedSvcWhere}
          ORDER BY s.name ASC`,
         [tenantId]
       );
@@ -375,7 +400,7 @@ async function fetchBusinessContext(tenantId, tenantSlug) {
   if (resourcesRows.length === 0) {
     try {
       const retryRes = await db.query(
-        `SELECT id, name${hasResourceCapacity ? ", capacity" : ""} FROM resources WHERE tenant_id = $1 ORDER BY name ASC`,
+        `SELECT id, name${hasResourceCapacity ? ", capacity" : ""} FROM resources WHERE tenant_id = $1${archivedResWhereBare} ORDER BY name ASC`,
         [tenantId]
       );
       resourcesRows = retryRes.rows;
@@ -390,7 +415,7 @@ async function fetchBusinessContext(tenantId, tenantSlug) {
   if (staffRows.length === 0) {
     try {
       const retryRes = await db.query(
-        `SELECT id, name${hasStaffEmail ? ", email" : ""} FROM staff WHERE tenant_id = $1 ORDER BY name ASC`,
+        `SELECT id, name${hasStaffEmail ? ", email" : ""} FROM staff WHERE tenant_id = $1${archivedStaffBare} ORDER BY name ASC`,
         [tenantId]
       );
       staffRows = retryRes.rows;
@@ -608,7 +633,7 @@ async function handleAction(action, tenantId, tenantSlug, customerId, customerEm
 
         // Get full service details (SELECT * needed for requires_resource, availability_basis etc.)
         const svcRes = await db.query(
-          `SELECT * FROM services WHERE id = $1 AND tenant_id = $2 LIMIT 1`,
+          `SELECT * FROM services WHERE id = $1 AND tenant_id = $2 AND archived_at IS NULL LIMIT 1`,
           [action.service_id, tenantId]
         );
         if (svcRes.rows.length === 0) return { success: false, message: "Service not found." };
@@ -637,7 +662,7 @@ async function handleAction(action, tenantId, tenantSlug, customerId, customerEm
         if (action.resource_id) {
           // Customer specified a resource — use only that one
           const r = await db.query(
-            `SELECT id, name FROM resources WHERE id = $1 AND tenant_id = $2 LIMIT 1`,
+            `SELECT id, name FROM resources WHERE id = $1 AND tenant_id = $2 AND archived_at IS NULL LIMIT 1`,
             [Number(action.resource_id), tenantId]
           ).catch(() => ({ rows: [] }));
           resourceCandidates = r.rows;
@@ -648,6 +673,7 @@ async function handleAction(action, tenantId, tenantSlug, customerId, customerEm
              JOIN resource_service_links rsl ON rsl.resource_id = r.id
              WHERE rsl.service_id = $1 AND r.tenant_id = $2
                AND COALESCE(r.is_active, true) = true
+               AND r.archived_at IS NULL
              ORDER BY r.id ASC`,
             [action.service_id, tenantId]
           ).catch(() => ({ rows: [] }));
@@ -656,7 +682,7 @@ async function handleAction(action, tenantId, tenantSlug, customerId, customerEm
             // No linked resources — fall back to any active resource (legacy single-resource tenants)
             const any = await db.query(
               `SELECT id, name FROM resources
-               WHERE tenant_id = $1 AND COALESCE(is_active, true) = true
+               WHERE tenant_id = $1 AND COALESCE(is_active, true) = true AND archived_at IS NULL
                ORDER BY id ASC LIMIT 1`,
               [tenantId]
             ).catch(() => ({ rows: [] }));
@@ -668,7 +694,7 @@ async function handleAction(action, tenantId, tenantSlug, customerId, customerEm
         let staffCandidates = [];
         if (action.staff_id) {
           const s = await db.query(
-            `SELECT id, name FROM staff WHERE id = $1 AND tenant_id = $2 LIMIT 1`,
+            `SELECT id, name FROM staff WHERE id = $1 AND tenant_id = $2 AND archived_at IS NULL LIMIT 1`,
             [Number(action.staff_id), tenantId]
           ).catch(() => ({ rows: [] }));
           staffCandidates = s.rows;
@@ -679,6 +705,7 @@ async function handleAction(action, tenantId, tenantSlug, customerId, customerEm
              JOIN staff_service_links ssl ON ssl.staff_id = st.id
              WHERE ssl.service_id = $1 AND st.tenant_id = $2
                AND COALESCE(st.is_active, true) = true
+               AND st.archived_at IS NULL
              ORDER BY st.id ASC`,
             [action.service_id, tenantId]
           ).catch(() => ({ rows: [] }));

@@ -36,6 +36,8 @@ const fs = require("fs/promises");
 router.get("/", async (req, res) => {
   try {
     const { tenantSlug, tenantId, includeInactive } = req.query;
+    const includeArchivedRaw = String(req.query.include_archived || "").toLowerCase();
+    const showArchived = includeArchivedRaw === "1" || includeArchivedRaw === "true";
 
     const params = [];
     let where = "";
@@ -50,6 +52,10 @@ router.get("/", async (req, res) => {
 
     if (!includeInactive || includeInactive === "false") {
       where += where ? " AND r.is_active = true" : " WHERE r.is_active = true";
+    }
+
+    if (!showArchived) {
+      where += where ? " AND r.archived_at IS NULL" : " WHERE r.archived_at IS NULL";
     }
 
     const q = `
@@ -142,6 +148,46 @@ router.delete("/:id", resolveTenantFromResourceId, requireAdminOrTenantRole("man
   } catch (err) {
     console.error("DELETE /api/resources/:id error:", err);
     return res.status(500).json({ error: "Failed to delete resource" });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/resources/:id/archive  (admin/manager)
+// POST /api/resources/:id/restore  (admin/manager)
+// Archive is a THIRD state, independent from is_active=false. Suppression
+// happens at the query layer in discovery/list endpoints; existing bookings
+// keep rendering archived names because history joins are bare by id.
+// ---------------------------------------------------------------------------
+router.post("/:id/archive", resolveTenantFromResourceId, requireAdminOrTenantRole("manager"), async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const actor = String(req.user?.email || (req.adminBypass ? "admin" : "")).trim() || null;
+    const result = await db.query(
+      `UPDATE resources SET archived_at = NOW(), archived_by = $2 WHERE id = $1 RETURNING *`,
+      [id, actor]
+    );
+    if (!result.rows.length) return res.status(404).json({ error: "Resource not found" });
+    aiContextCache.bustBusiness(req.tenantId);
+    return res.json({ ok: true, resource: result.rows[0] });
+  } catch (err) {
+    console.error("POST /api/resources/:id/archive error:", err);
+    return res.status(500).json({ error: "Failed to archive resource" });
+  }
+});
+
+router.post("/:id/restore", resolveTenantFromResourceId, requireAdminOrTenantRole("manager"), async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const result = await db.query(
+      `UPDATE resources SET archived_at = NULL, archived_by = NULL WHERE id = $1 RETURNING *`,
+      [id]
+    );
+    if (!result.rows.length) return res.status(404).json({ error: "Resource not found" });
+    aiContextCache.bustBusiness(req.tenantId);
+    return res.json({ ok: true, resource: result.rows[0] });
+  } catch (err) {
+    console.error("POST /api/resources/:id/restore error:", err);
+    return res.status(500).json({ error: "Failed to restore resource" });
   }
 });
 
