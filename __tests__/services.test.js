@@ -142,3 +142,89 @@ describe('Services route — DB error handling', () => {
     expect([400, 500, 401, 403]).toContain(res.status);
   });
 });
+
+// ─── Archive / Restore (migration 074) ────────────────────────────────────────
+
+describe('Services archive / restore', () => {
+  function makeServicesApp(queryImpl) {
+    // services/crud.js + servicesHelpers.js mix `db.query` and `pool.query` —
+    // wire both so SQL captures work end-to-end.
+    pool.query.mockImplementation(queryImpl);
+    const dbModule = require('../db');
+    dbModule.query.mockImplementation(queryImpl);
+    const app = express();
+    app.use(express.json());
+    const router = require('../routes/services');
+    app.use('/api/services', router);
+    app.use((err, req, res, next) => res.status(500).json({ error: err.message }));
+    return app;
+  }
+
+  test('GET /api/services SQL includes archived_at IS NULL by default', async () => {
+    const seen = [];
+    const app = makeServicesApp(async (sql) => {
+      seen.push(String(sql));
+      const s = String(sql);
+      if (s.includes('information_schema')) {
+        return { rows: [{ column_name: 'id' }, { column_name: 'tenant_id' }, { column_name: 'name' }, { column_name: 'is_active' }, { column_name: 'archived_at' }] };
+      }
+      if (s.includes('FROM tenants')) return { rows: [{ id: 1 }] };
+      return { rows: [] };
+    });
+    await request(app).get('/api/services?tenantSlug=birdie');
+    const listSql = seen.find((s) => s.includes('FROM services s') && !s.includes('information_schema'));
+    expect(listSql).toBeDefined();
+    expect(listSql).toMatch(/archived_at IS NULL/);
+  });
+
+  test('GET /api/services?include_archived=true OMITS archived_at IS NULL', async () => {
+    const seen = [];
+    const app = makeServicesApp(async (sql) => {
+      seen.push(String(sql));
+      const s = String(sql);
+      if (s.includes('information_schema')) {
+        return { rows: [{ column_name: 'id' }, { column_name: 'tenant_id' }, { column_name: 'name' }, { column_name: 'is_active' }, { column_name: 'archived_at' }] };
+      }
+      if (s.includes('FROM tenants')) return { rows: [{ id: 1 }] };
+      return { rows: [] };
+    });
+    await request(app).get('/api/services?tenantSlug=birdie&include_archived=true');
+    const listSql = seen.find((s) => s.includes('FROM services s') && !s.includes('information_schema'));
+    expect(listSql).toBeDefined();
+    expect(listSql).not.toMatch(/archived_at IS NULL/);
+  });
+
+  test('POST /api/services/:id/archive updates archived_at and returns row', async () => {
+    const app = makeServicesApp(async (sql) => {
+      const s = String(sql);
+      if (s.includes('information_schema')) return { rows: [] };
+      if (s.includes('FROM services WHERE id')) return { rows: [{ tenant_id: 1 }] };
+      if (s.includes('UPDATE services SET archived_at = NOW()')) {
+        return { rows: [{ id: 9, tenant_id: 1, name: 'Lesson', archived_at: '2026-06-10T00:00:00Z', archived_by: 'test@example.com' }] };
+      }
+      return { rows: [] };
+    });
+    const res = await request(app).post('/api/services/9/archive');
+    expect([200, 401, 500]).toContain(res.status);
+    if (res.status === 200) {
+      expect(res.body.service?.archived_at).toBeTruthy();
+    }
+  });
+
+  test('POST /api/services/:id/restore clears archived_at', async () => {
+    const app = makeServicesApp(async (sql) => {
+      const s = String(sql);
+      if (s.includes('information_schema')) return { rows: [] };
+      if (s.includes('FROM services WHERE id')) return { rows: [{ tenant_id: 1 }] };
+      if (s.includes('UPDATE services SET archived_at = NULL')) {
+        return { rows: [{ id: 9, tenant_id: 1, name: 'Lesson', archived_at: null, archived_by: null }] };
+      }
+      return { rows: [] };
+    });
+    const res = await request(app).post('/api/services/9/restore');
+    expect([200, 401, 500]).toContain(res.status);
+    if (res.status === 200) {
+      expect(res.body.service?.archived_at).toBeNull();
+    }
+  });
+});

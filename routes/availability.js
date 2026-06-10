@@ -56,9 +56,10 @@ router.get("/", async (req, res) => {
       return res.status(400).json({ error: "Invalid tenantId/serviceId" });
     }
 
-    // Fetch service
+    // Fetch service (archived services suppressed -- a stale deep link 404s
+    // instead of letting the engine compute slots for an archived service).
     const svcResult = await pool.query(
-      "SELECT * FROM services WHERE id = $1 AND tenant_id = $2",
+      "SELECT * FROM services WHERE id = $1 AND tenant_id = $2 AND archived_at IS NULL",
       [serviceId, tenantId]
     );
     if (!svcResult.rows.length) return res.status(404).json({ error: "Service not found" });

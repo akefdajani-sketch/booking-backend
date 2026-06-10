@@ -28,6 +28,12 @@ const { assertWithinPlanLimit } = require("../utils/planEnforcement");
 const requireGoogleAuth = require("../middleware/requireGoogleAuth");
 const { upload, uploadErrorHandler } = require("../middleware/upload");
 const { uploadFileToR2, safeName } = require("../utils/r2");
+// Migration 074: staff appears in the AI/voice context (routes/ai.js :279
+// discovery + :313 staff_service_links). New archive/restore endpoints bust
+// the business cache so voice never offers an archived staff member after a
+// dashboard toggle. The existing DELETE handler does NOT bust (pre-existing
+// staleness, tracked separately) — intentionally not changing that here.
+const aiContextCache = require("../utils/aiContextCache");
 
 const fs = require("fs/promises");
 
@@ -69,6 +75,8 @@ async function getStaffColumnSet() {
 router.get("/", async (req, res) => {
   try {
     const { tenantSlug, tenantId, includeInactive } = req.query;
+    const includeArchivedRaw = String(req.query.include_archived || "").toLowerCase();
+    const showArchived = includeArchivedRaw === "1" || includeArchivedRaw === "true";
 
     const params = [];
     let where = "";
@@ -83,6 +91,10 @@ router.get("/", async (req, res) => {
 
     if (!includeInactive || includeInactive === "false") {
       where += where ? " AND st.is_active = true" : " WHERE st.is_active = true";
+    }
+
+    if (!showArchived) {
+      where += where ? " AND st.archived_at IS NULL" : " WHERE st.archived_at IS NULL";
     }
 
     // SELECT * + service_ids array from staff_service_links join.
@@ -266,6 +278,46 @@ router.delete("/:id", resolveTenantFromStaffId, requireAdminOrTenantRole("manage
   } catch (err) {
     console.error("DELETE /api/staff/:id error:", err);
     return res.status(500).json({ error: "Failed to delete staff" });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/staff/:id/archive  (admin/manager)
+// POST /api/staff/:id/restore  (admin/manager)
+// Archive is a THIRD state, independent from is_active=false. Suppression
+// happens at the query layer in discovery/list endpoints; existing bookings
+// keep rendering archived names because history joins are bare by id.
+// ---------------------------------------------------------------------------
+router.post("/:id/archive", resolveTenantFromStaffId, requireAdminOrTenantRole("manager"), async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const actor = String(req.user?.email || (req.adminBypass ? "admin" : "")).trim() || null;
+    const result = await db.query(
+      `UPDATE staff SET archived_at = NOW(), archived_by = $2 WHERE id = $1 RETURNING *`,
+      [id, actor]
+    );
+    if (!result.rows.length) return res.status(404).json({ error: "Staff not found" });
+    aiContextCache.bustBusiness(req.tenantId);
+    return res.json({ ok: true, staff: result.rows[0] });
+  } catch (err) {
+    console.error("POST /api/staff/:id/archive error:", err);
+    return res.status(500).json({ error: "Failed to archive staff" });
+  }
+});
+
+router.post("/:id/restore", resolveTenantFromStaffId, requireAdminOrTenantRole("manager"), async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const result = await db.query(
+      `UPDATE staff SET archived_at = NULL, archived_by = NULL WHERE id = $1 RETURNING *`,
+      [id]
+    );
+    if (!result.rows.length) return res.status(404).json({ error: "Staff not found" });
+    aiContextCache.bustBusiness(req.tenantId);
+    return res.json({ ok: true, staff: result.rows[0] });
+  } catch (err) {
+    console.error("POST /api/staff/:id/restore error:", err);
+    return res.status(500).json({ error: "Failed to restore staff" });
   }
 });
 
