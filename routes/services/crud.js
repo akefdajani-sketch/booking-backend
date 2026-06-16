@@ -166,6 +166,8 @@ router.get("/", async (req, res) => {
         ${allowMembershipExpr},
         s.availability_basis                AS availability_basis,
         COALESCE(s.is_active, true)         AS is_active,
+        s.archived_at                       AS archived_at,
+        s.archived_by                       AS archived_by,
         ${imageExpr},
         ${currencyExpr},
         s.category_id,
