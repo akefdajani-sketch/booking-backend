@@ -241,6 +241,10 @@ app.use("/api/invites", invitesRouter);
 // ─── PAY-1: Network payment flow (public — customer checkout) ─────────────────
 app.use("/api/network-payment", networkPaymentsRouter);
 
+// SPIKE — REMOVE BEFORE PROD ADAPTER MERGE
+app.use("/api/payments/_spike", require("./routes/payments/_spike"));
+app.use("/spike-test", require("express").static("scripts")); // SPIKE — REMOVE
+
 // ─── PR-4: Billing REST endpoints (checkout, portal, status) ─────────────────
 app.use("/api/billing", billingRouter);
 app.use("/api/dsr", csrfProtection, dsrRouter); // PR-16 // PR-8: GDPR Data Subject Requests
