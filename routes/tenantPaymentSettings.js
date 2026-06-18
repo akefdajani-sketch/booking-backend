@@ -24,6 +24,11 @@ const {
   clearNetworkCredentials,
   getNetworkCredentials,
 } = require('../utils/networkCredentials');
+const {
+  saveBankEtihadCredentials,
+  clearBankEtihadCredentials,
+  DEFAULT_HOST: BAE_DEFAULT_HOST,
+} = require('../utils/bankEtihadCredentials');
 const { testCredentials }   = require('../utils/network');
 const { getTenantIdFromSlug } = require('../utils/tenants');
 const requireGoogleAuth     = require('../middleware/requireGoogleAuth');
@@ -194,6 +199,102 @@ router.delete('/:slug/payment-settings', resolveTenant, requireOwnerOrAdmin, asy
   } catch (err) {
     logger.error({ err }, 'DELETE payment-settings error');
     return res.status(500).json({ error: 'Failed to disconnect payment gateway.' });
+  }
+});
+
+// ─── Bank al Etihad (Cybersource) ─────────────────────────────────────────────
+// PAY-BAE: Second gateway. Mirrors the MPGS routes above but uses
+// utils/bankEtihadCredentials and a /bae sub-path so MPGS routes are untouched.
+
+// GET /api/tenant/:slug/payment-settings/bae
+// Returns connection status — never exposes api_secret or cc_token.
+
+router.get('/:slug/payment-settings/bae', resolveTenant, requireOwnerOrAdmin, async (req, res) => {
+  try {
+    const { rows } = await db.query(
+      `SELECT bank_etihad_merchant_id,
+              bank_etihad_host,
+              payment_provider,
+              (bank_etihad_api_secret IS NOT NULL AND bank_etihad_api_secret <> '') AS has_secret,
+              (bank_etihad_cc_token   IS NOT NULL AND bank_etihad_cc_token   <> '') AS has_token
+       FROM tenants WHERE id = $1`,
+      [req.tenantId]
+    );
+
+    if (!rows.length) return res.status(404).json({ error: 'Tenant not found.' });
+    const row = rows[0];
+
+    const provider  = row.payment_provider || null;
+    const hasSecret = Boolean(row.has_secret);
+    const hasToken  = Boolean(row.has_token);
+
+    return res.json({
+      connected:  provider === 'bank_etihad' && hasSecret,
+      merchantId: row.bank_etihad_merchant_id || null,
+      host:       row.bank_etihad_host || BAE_DEFAULT_HOST,
+      hasSecret,
+      hasToken,
+      provider,
+    });
+  } catch (err) {
+    logger.error({ err }, 'GET payment-settings/bae error');
+    return res.status(500).json({ error: 'Failed to load Bank al Etihad payment settings.' });
+  }
+});
+
+// POST /api/tenant/:slug/payment-settings/bae
+// Save credentials to DB (api_secret + cc_token encrypted).
+// Body: { merchantId, apiSecret, ccToken, host? }
+// No live gateway test in v1 — Cybersource flow needs capture-context which is the flow arc.
+
+router.post('/:slug/payment-settings/bae', resolveTenant, requireOwnerOrAdmin, async (req, res) => {
+  try {
+    const merchantId = String(req.body?.merchantId || '').trim();
+    const apiSecret  = String(req.body?.apiSecret  || '').trim();
+    const ccToken    = String(req.body?.ccToken    || '').trim();
+    const host       = String(req.body?.host       || '').trim();
+
+    if (!merchantId) return res.status(400).json({ error: 'merchantId is required.' });
+    if (!apiSecret)  return res.status(400).json({ error: 'apiSecret is required.' });
+    if (!ccToken)    return res.status(400).json({ error: 'ccToken is required.' });
+
+    await saveBankEtihadCredentials(req.tenantId, {
+      merchantId,
+      apiSecret,
+      ccToken,
+      host: host || BAE_DEFAULT_HOST,
+    });
+
+    logger.info({ tenantId: req.tenantId, merchantId }, 'Bank al Etihad credentials saved');
+
+    aiContextCache.bustBusiness(req.tenantId);
+    return res.json({
+      ok:         true,
+      message:    'Bank al Etihad payment gateway connected successfully.',
+      merchantId,
+      host:       host || BAE_DEFAULT_HOST,
+    });
+  } catch (err) {
+    logger.error({ err }, 'POST payment-settings/bae error');
+    if (err.message?.includes('TENANT_CREDS_KEY')) {
+      return res.status(500).json({ error: 'Server encryption key not configured. Contact platform admin.' });
+    }
+    return res.status(500).json({ error: 'Failed to save Bank al Etihad payment settings.' });
+  }
+});
+
+// DELETE /api/tenant/:slug/payment-settings/bae
+// Disconnect Bank al Etihad gateway — clears credentials and resets payment_provider.
+
+router.delete('/:slug/payment-settings/bae', resolveTenant, requireOwnerOrAdmin, async (req, res) => {
+  try {
+    await clearBankEtihadCredentials(req.tenantId);
+    logger.info({ tenantId: req.tenantId }, 'Bank al Etihad credentials cleared');
+    aiContextCache.bustBusiness(req.tenantId);
+    return res.json({ ok: true, message: 'Bank al Etihad payment gateway disconnected.' });
+  } catch (err) {
+    logger.error({ err }, 'DELETE payment-settings/bae error');
+    return res.status(500).json({ error: 'Failed to disconnect Bank al Etihad payment gateway.' });
   }
 });
 
