@@ -73,6 +73,7 @@ const paymentScheduleTemplatesRouter  = require("./routes/paymentScheduleTemplat
 
 // PAY-1: Network payment routes
 const networkPaymentsRouter       = require("./routes/networkPayments");
+const bankEtihadPaymentsRouter    = require("./routes/bankEtihadPayments");
 const tenantPaymentSettingsRouter = require("./routes/tenantPaymentSettings");
 // WA-1: Per-tenant WhatsApp settings
 const tenantWhatsAppSettingsRouter = require("./routes/tenantWhatsAppSettings");
@@ -240,6 +241,7 @@ app.use("/api/invites", invitesRouter);
 
 // ─── PAY-1: Network payment flow (public — customer checkout) ─────────────────
 app.use("/api/network-payment", networkPaymentsRouter);
+app.use("/api/bank-etihad-payment", bankEtihadPaymentsRouter);
 
 // ─── PR-4: Billing REST endpoints (checkout, portal, status) ─────────────────
 app.use("/api/billing", billingRouter);
