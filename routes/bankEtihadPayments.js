@@ -208,9 +208,12 @@ router.post('/:slug/initiate', async (req, res) => {
 
 // ─── POST /api/bank-etihad-payment/:slug/complete ─────────────────────────────
 //
-// IMPORTANT (PIECE 2a scope): this route only records the payment outcome on
-// bank_etihad_payments. It does NOT update the bookings table — linking the
-// payment to a booking_id and flipping booking.payment_status is PIECE 2b.
+// Records the Cybersource completion outcome on bank_etihad_payments and, when
+// the bank_etihad_payments row was linked to a booking at create time (PIECE 2b
+// in routes/bookings/persist.js), flips that booking from the 17-min pending
+// hold to confirmed + payment_status='completed'. Race-safe via WHERE guards
+// that match only the still-pending hold state — the 2c expiry sweep cancelling
+// the same booking cannot collide.
 
 router.post('/:slug/complete', async (req, res) => {
   try {
@@ -230,7 +233,7 @@ router.post('/:slug/complete', async (req, res) => {
     }
 
     const lookup = await db.query(
-      `SELECT id, status FROM bank_etihad_payments
+      `SELECT id, status, booking_id FROM bank_etihad_payments
         WHERE tenant_id = $1 AND order_id = $2
         LIMIT 1`,
       [tenant.id, orderId]
@@ -273,6 +276,42 @@ router.post('/:slug/complete', async (req, res) => {
       isSuccess,
       hasTransactionId: !!transactionId,
     }, '[bae] completion recorded');
+
+    // PAY-BAE (2b): on success, flip the linked booking out of its 17-min hold.
+    // The WHERE guards (status='pending' AND payment_status='pending') make this
+    // race-safe against the 2c expiry sweep — only one side can match a given
+    // row's current state. On failure we leave the booking alone; the sweep
+    // will cancel the expired hold. Non-fatal: a flip error must not turn a
+    // successful payment into a 500 to the browser.
+    if (isSuccess && payment.booking_id) {
+      try {
+        const flip = await db.query(
+          `UPDATE bookings
+              SET status                  = 'confirmed',
+                  payment_status          = 'completed',
+                  payment_hold_expires_at = NULL,
+                  updated_at              = NOW()
+            WHERE id              = $1
+              AND tenant_id       = $2
+              AND status          = 'pending'
+              AND payment_status  = 'pending'`,
+          [payment.booking_id, tenant.id]
+        );
+        logger.info({
+          tenantId: tenant.id,
+          orderId,
+          bookingId: payment.booking_id,
+          rowCount: flip.rowCount,
+        }, '[bae] booking hold flipped to confirmed');
+      } catch (flipErr) {
+        logger.error({
+          err: flipErr,
+          tenantId: tenant.id,
+          orderId,
+          bookingId: payment.booking_id,
+        }, '[bae] booking flip failed (non-fatal)');
+      }
+    }
 
     if (isSuccess) {
       return res.json({ ok: true, status: rawStatus || 'AUTHORIZED', orderId });
