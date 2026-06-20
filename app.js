@@ -82,6 +82,7 @@ const tenantTwilioSettingsRouter = require("./routes/tenantTwilioSettings");
 const tenantNotificationSettingsRouter = require("./routes/tenantNotificationSettings"); // D5: per-tenant notification toggle matrix
 const ownerDashboardRouter = require("./routes/ownerDashboard"); // E: platform-admin overview metrics
 const trialSweepJobRouter = require("./routes/trialSweepJob"); // F: defensive trial-status sync via Stripe
+const bankEtihadHoldSweepJobRouter = require("./routes/bankEtihadHoldSweepJob"); // PIECE 2c: BAE pending-payment hold expiry sweep
 const emailReminderJobRouter = require("./routes/emailReminderJob"); // PR H — Email booking reminders
 const emailLogRouter = require("./routes/emailLog"); // G2: owner-facing email log surface
 const ownerAlertsRouter = require("./routes/ownerAlerts"); // I: real platform-health alerts
@@ -263,6 +264,7 @@ app.use("/api/admin/themes", adminThemesRouter);
 app.use("/api/owner-alerts", ownerAlertsRouter); // I: GET / (admin-only)
 app.use("/api/email-log", emailLogRouter); // G2: GET email log + stats (admin-only)
 app.use("/api/jobs", trialSweepJobRouter); // F: POST /api/jobs/trial-sweep (admin-only)
+app.use("/api/jobs", bankEtihadHoldSweepJobRouter); // PIECE 2c: POST /api/jobs/bae-hold-sweep (admin-only)
 app.use("/api/jobs", activationStatusRouter); // L: POST /api/jobs/activation-nudge (cron)
 app.use("/api/owner-dashboard", ownerDashboardRouter); // E: GET /overview (admin-only)
 app.use("/api/admin/tenants", adminTenantsThemeRouter);
