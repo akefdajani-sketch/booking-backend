@@ -27,6 +27,7 @@ function derivePayment(ctx) {
   const {
     finalCustomerMembershipId, prepaidApplied,
     price_amount, requestedPaymentMethod, networkPaymentOrderId,
+    paymentProvider, baeOrderId,
   } = ctx;
 
   // PAY-INTENT-1: trust client-declared method for card/cliq without
@@ -43,10 +44,22 @@ function derivePayment(ctx) {
             ? requestedPaymentMethod
             : null;
 
+  // PAY-BAE (2b): a BAE-card booking is a HOLD — payment_status must be
+  // 'pending' at create time, regardless of any order-id presence. BAE uses
+  // baeOrderId (not networkPaymentOrderId), so the existing card+orderId rule
+  // below cannot fire for BAE; this explicit guard makes the contract
+  // unambiguous and regression-proof. /complete flips it to 'completed' once
+  // Cybersource returns AUTHORIZED.
+  const isBaeCardHold =
+    paymentProvider === 'bank_etihad' &&
+    payment_method === 'card' &&
+    !!baeOrderId;
+
   // CLIQ-CONFIRM-1: completed for auto-settled methods + verified card;
   // pending for card-without-order-id and cliq (waiting for operator).
   const payment_status =
-    payment_method == null ? null
+    isBaeCardHold ? 'pending'
+    : payment_method == null ? null
     : (payment_method === 'membership' ||
        payment_method === 'package' ||
        payment_method === 'free' ||
@@ -81,6 +94,35 @@ async function probeBookingColumns() {
     } catch (_) { return false; }
   })();
 
+  // PAY-BAE (2b): payment_reference column (migration 064) — written here at
+  // create time for BAE-card holds (the MRC). Probed for forward-compat parity
+  // with payment_status above; in practice any deployment with migration 064
+  // applied has both.
+  const hasPaymentReferenceCol = await (async () => {
+    try {
+      const r = await db.query(
+        `SELECT 1 FROM information_schema.columns
+          WHERE table_schema='public' AND table_name='bookings'
+            AND column_name='payment_reference'`
+      );
+      return r.rows.length > 0;
+    } catch (_) { return false; }
+  })();
+
+  // PAY-BAE (2b): payment_hold_expires_at column (migration 075) — 17-min
+  // expiry on BAE-card pending bookings. Probe-guarded so older DBs without
+  // migration 075 still INSERT successfully (column simply omitted).
+  const hasPaymentHoldCol = await (async () => {
+    try {
+      const r = await db.query(
+        `SELECT 1 FROM information_schema.columns
+          WHERE table_schema='public' AND table_name='bookings'
+            AND column_name='payment_hold_expires_at'`
+      );
+      return r.rows.length > 0;
+    } catch (_) { return false; }
+  })();
+
   // PR-TAX-1: detect tax columns (migration 031 guard — safe on old DBs)
   const hasTaxCols = await (async () => {
     try {
@@ -94,7 +136,7 @@ async function probeBookingColumns() {
     } catch (_) { return false; }
   })();
 
-  return { hasMoneyCols, hasRateCols, hasPaymentMethodCol, hasPaymentStatusCol, hasTaxCols };
+  return { hasMoneyCols, hasRateCols, hasPaymentMethodCol, hasPaymentStatusCol, hasPaymentReferenceCol, hasPaymentHoldCol, hasTaxCols };
 }
 
 // ─── findOrCreateSessionFlow ───────────────────────────────────────────────
@@ -151,11 +193,12 @@ async function insertBookingRow(client, ctx, payment, cols, resolvedSessionId) {
     isNightlyBooking, checkin_date, checkout_date, nights_count,
     incomingAddonsJson, incomingGuestsCount,
     tenantCurrencyCode, networkPaymentOrderId,
+    baeOrderId, baeHoldExpiry, // PAY-BAE (2b)
     price_amount, charge_amount, applied_rate_rule_id, applied_rate_snapshot, taxData,
     serviceMaxParallel,
   } = ctx;
   const { payment_method, payment_status } = payment;
-  const { hasMoneyCols, hasRateCols, hasPaymentMethodCol, hasPaymentStatusCol, hasTaxCols } = cols;
+  const { hasMoneyCols, hasRateCols, hasPaymentMethodCol, hasPaymentStatusCol, hasPaymentReferenceCol, hasPaymentHoldCol, hasTaxCols } = cols;
 
   // PAY-2: include payment_method only if column exists (defensive — see ensurePaymentMethodColumn)
   // RENTAL-1: check if nightly columns exist (added by migration 023)
@@ -183,6 +226,11 @@ async function insertBookingRow(client, ctx, payment, cols, resolvedSessionId) {
   let extraCols = hasPaymentMethodCol ? ', payment_method' : '';
   // CLIQ-CONFIRM-1: payment_status column added by migration 064
   if (hasPaymentStatusCol) extraCols += ', payment_status';
+  // PAY-BAE (2b): payment_reference + payment_hold_expires_at. Gated on BOTH
+  // the column probe AND the value being set, so legacy / MPGS / CliQ /
+  // membership / etc. bookings produce byte-identical INSERT SQL to before.
+  if (hasPaymentReferenceCol && baeOrderId) extraCols += ', payment_reference';
+  if (hasPaymentHoldCol && baeHoldExpiry) extraCols += ', payment_hold_expires_at';
   if (isNightlyBooking && hasNightlyCols) {
     extraCols += ', booking_mode, checkin_date, checkout_date, nights_count';
   }
@@ -199,6 +247,9 @@ async function insertBookingRow(client, ctx, payment, cols, resolvedSessionId) {
        initialStatus, idemKey, finalCustomerMembershipId, resolvedSessionId];
   if (hasPaymentMethodCol) baseVals.push(payment_method);
   if (hasPaymentStatusCol) baseVals.push(payment_status); // CLIQ-CONFIRM-1
+  // PAY-BAE (2b): lockstep with the extraCols block above — same guards.
+  if (hasPaymentReferenceCol && baeOrderId) baseVals.push(String(baeOrderId).trim());
+  if (hasPaymentHoldCol && baeHoldExpiry) baseVals.push(baeHoldExpiry.toISOString());
   if (isNightlyBooking && hasNightlyCols) {
     baseVals.push('nightly');
     baseVals.push(checkin_date || null);
@@ -283,6 +334,25 @@ async function insertBookingRow(client, ctx, payment, cols, resolvedSessionId) {
         );
       } catch (linkErr) {
         console.warn('[PAY] Could not link network_payment to booking:', linkErr?.message);
+      }
+    }
+
+    // PAY-BAE (2b): sibling of the MPGS linkage above. One-way back-edge:
+    // the bank_etihad_payments row (minted by /initiate before the booking
+    // existed) gets its booking_id populated here so /complete can find the
+    // booking to flip on AUTHORIZED. Non-fatal.
+    if (baeOrderId && bookingId) {
+      try {
+        await client.query(
+          `UPDATE bank_etihad_payments
+             SET booking_id  = $1,
+                 updated_at  = NOW()
+           WHERE order_id  = $2
+             AND tenant_id = $3`,
+          [bookingId, String(baeOrderId).trim(), tenantId]
+        );
+      } catch (linkErr) {
+        console.warn('[PAY-BAE] Could not link bank_etihad_payment to booking:', linkErr?.message);
       }
     }
 

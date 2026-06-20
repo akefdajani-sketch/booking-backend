@@ -52,6 +52,8 @@ router.post("/", requireAppAuth, requireTenant, async (req, res) => {
       requirePrepaid,
       requestedPaymentMethod,
       networkPaymentOrderId,
+      paymentProvider,
+      baeOrderId,
       incomingBookingMode,
       checkin_date,
       checkout_date,
@@ -198,6 +200,18 @@ router.post("/", requireAppAuth, requireTenant, async (req, res) => {
 
       const initialStatus = requiresConfirmation ? "pending" : "confirmed";
 
+      // PAY-BAE (2b): a BAE card booking is a 17-min hold. It MUST be pending
+      // even if the service's requires_confirmation is false. The /complete
+      // route flips it to confirmed once Cybersource returns AUTHORIZED.
+      const isBaeCardHold =
+        paymentProvider === 'bank_etihad' &&
+        requestedPaymentMethod === 'card' &&
+        !!baeOrderId;
+      const baeHoldExpiry = isBaeCardHold
+        ? new Date(Date.now() + 17 * 60 * 1000)
+        : null;
+      const finalStatus = isBaeCardHold ? 'pending' : initialStatus;
+
       // ─── Phase 5: pricing ─────────────────────────────────────────────────────
       // PR 4: pool-only pricing pipeline. Orchestrator owns the ROLLBACK on
       // Gate B failure (matches the post-BEGIN failure convention).
@@ -247,7 +261,7 @@ router.post("/", requireAppAuth, requireTenant, async (req, res) => {
         cleanName,
         cleanPhone,
         cleanEmail,
-        initialStatus,
+        initialStatus: finalStatus, // PAY-BAE (2b): BAE-card hold forces pending; otherwise = initialStatus
         idemKey,
         isNightlyBooking,
         checkin_date,
@@ -260,6 +274,9 @@ router.post("/", requireAppAuth, requireTenant, async (req, res) => {
         tenantCurrencyCode,
         requestedPaymentMethod,
         networkPaymentOrderId,
+        paymentProvider,
+        baeOrderId,
+        baeHoldExpiry,
         finalCustomerMembershipId,
         prepaidApplied,
         price_amount,

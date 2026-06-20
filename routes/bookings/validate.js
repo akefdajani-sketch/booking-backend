@@ -53,6 +53,11 @@ function parseInputs(req) {
     requirePrepaid,
     paymentMethod: requestedPaymentMethod, // PAY-2: cash | card | cliq from client
     networkPaymentOrderId, // PAY-1: MPGS order ID when booking follows card payment
+    // PAY-BAE (2b): provider tag + BAE MRC. Kept separate from networkPaymentOrderId
+    // so derivePayment's existing card+orderId→completed rule cannot misfire on a
+    // BAE booking — BAE bookings are a HOLD (pending), MPGS bookings are settled.
+    paymentProvider, // 'bank_etihad' for BAE Unified Checkout; absent/anything else = legacy path
+    baeOrderId, // BAE MRC returned by POST /bank-etihad-payment/:slug/initiate
     // RENTAL-1: nightly booking fields
     booking_mode: incomingBookingMode,
     checkin_date,
@@ -126,6 +131,8 @@ function parseInputs(req) {
     requirePrepaid,
     requestedPaymentMethod,
     networkPaymentOrderId,
+    paymentProvider,
+    baeOrderId,
     incomingBookingMode,
     checkin_date,
     checkout_date,
