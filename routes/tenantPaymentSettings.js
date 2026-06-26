@@ -307,7 +307,7 @@ module.exports = router;
 router.get('/:slug/payment-methods', resolveTenant, async (req, res) => {
   try {
     const { rows } = await db.query(
-      `SELECT branding FROM tenants WHERE id = $1 LIMIT 1`,
+      `SELECT branding, payment_provider FROM tenants WHERE id = $1 LIMIT 1`,
       [req.tenantId]
     );
     const branding = rows[0]?.branding || {};
@@ -318,6 +318,7 @@ router.get('/:slug/payment-methods', resolveTenant, async (req, res) => {
       allow_card:  settings.allow_card  !== false,
       allow_cliq:  settings.allow_cliq  !== false,
       allow_cash:  settings.allow_cash  !== false, // PAY-2: cash on by default, off only if explicitly disabled
+      payment_provider: rows[0]?.payment_provider || null,
     });
   } catch (err) {
     logger.error({ err }, 'GET payment-methods error');
