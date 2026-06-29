@@ -6,9 +6,9 @@
 -- a single payment row can never accidentally settle two things.
 --
 -- NO BEGIN/COMMIT — same convention as 077/078. The migrate runner (or DBeaver
--- when applied manually) wraps execution. Additive + idempotent: ADD COLUMN IF
--- NOT EXISTS, CREATE INDEX IF NOT EXISTS, DROP CONSTRAINT IF EXISTS before
--- re-adding. Columns first, constraints after.
+-- when applied manually) wraps execution. Additive + idempotent: column adds
+-- are guarded with IF NOT EXISTS, indexes likewise, and the CHECK constraint
+-- is dropped (IF EXISTS) before re-adding. Columns first, constraints after.
 
 -- Columns first.
 ALTER TABLE bank_etihad_payments
