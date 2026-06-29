@@ -31,6 +31,13 @@ const {
 } = require('../utils/bankEtihad');
 const { getTenantBySlug } = require('../utils/tenants');
 
+// PR-6a: payment-link settlement utils. /complete uses these to settle a
+// rental or contract-invoice payment link when the BAE row carries a link
+// token instead of a booking_id. SettlementError → needs_reconcile reason.
+const { settleRentalLinkByToken }          = require('../utils/rentalPaymentLinkSettlement');
+const { settleContractInvoiceLinkByToken } = require('../utils/contractInvoiceLinkSettlement');
+const { SettlementError }                  = require('../utils/settlementError');
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 async function baeGuard(tenantId, res) {
@@ -94,11 +101,17 @@ function extractTransactionId(payload) {
   );
 }
 
-async function createPaymentRecord({ tenantId, orderId, captureContextId, amount, currency, rawResponse }) {
+async function createPaymentRecord({
+  tenantId, orderId, captureContextId, amount, currency, rawResponse,
+  // PR-6a: at most one of these is non-null (enforced by chk_bae_settle_target_exclusive).
+  rentalPaymentLinkToken,
+  contractInvoiceLinkToken,
+}) {
   const result = await db.query(
     `INSERT INTO bank_etihad_payments
-       (tenant_id, booking_id, order_id, capture_context_id, amount, currency, status, raw_response)
-     VALUES ($1, NULL, $2, $3, $4, $5, 'pending', $6)
+       (tenant_id, booking_id, order_id, capture_context_id, amount, currency, status, raw_response,
+        rental_payment_link_token, contract_invoice_link_token)
+     VALUES ($1, NULL, $2, $3, $4, $5, 'pending', $6, $7, $8)
      RETURNING id`,
     [
       tenantId,
@@ -107,6 +120,8 @@ async function createPaymentRecord({ tenantId, orderId, captureContextId, amount
       amount,
       currency,
       rawResponse ? JSON.stringify(rawResponse) : null,
+      rentalPaymentLinkToken   || null,
+      contractInvoiceLinkToken || null,
     ]
   );
   return result.rows[0].id;
@@ -159,6 +174,79 @@ router.post('/:slug/initiate', async (req, res) => {
       return res.status(400).json({ error: 'targetOrigin is required.' });
     }
 
+    // PR-6a: optional settlement target. When the BAE flow is invoked from a
+    // payment-link portal (/pay/[token] or /pay-invoice/[token]) the frontend
+    // passes settleTarget so /complete knows what to settle. Booking flow
+    // passes nothing; booking_id is back-edged later by routes/bookings/persist.
+    //
+    // This is the trust boundary. The token here is committed to the
+    // bank_etihad_payments row; /complete reads it off the row and never
+    // accepts a settlement target from the client. We refuse to mint a
+    // capture context unless the token:
+    //   (i)   exists in the corresponding link table,
+    //   (ii)  belongs to THIS tenant (the :slug in the path),
+    //   (iii) is in a settleable state — for rental: status IN ('pending','partial');
+    //         for contract invoice: link.status='pending' AND invoice not paid/void/cancelled.
+    let rentalPaymentLinkToken   = null;
+    let contractInvoiceLinkToken = null;
+    const settleTarget = req.body?.settleTarget;
+    if (settleTarget != null) {
+      const kind  = String(settleTarget.kind  || '').trim();
+      const tokenIn = String(settleTarget.token || '').trim();
+
+      if (!kind || !tokenIn) {
+        return res.status(400).json({ error: 'settleTarget.kind and settleTarget.token are required.' });
+      }
+      if (kind !== 'rental_link' && kind !== 'contract_invoice_link') {
+        return res.status(400).json({ error: 'settleTarget.kind must be rental_link or contract_invoice_link.' });
+      }
+
+      if (kind === 'rental_link') {
+        const r = await db.query(
+          `SELECT tenant_id, status
+             FROM rental_payment_links
+            WHERE token = $1
+            LIMIT 1`,
+          [tokenIn]
+        );
+        if (!r.rows.length) {
+          return res.status(404).json({ error: 'Payment link not found.' });
+        }
+        if (Number(r.rows[0].tenant_id) !== Number(tenant.id)) {
+          return res.status(403).json({ error: 'Payment link does not belong to this tenant.' });
+        }
+        if (!['pending', 'partial'].includes(r.rows[0].status)) {
+          return res.status(409).json({ error: `Payment link is in '${r.rows[0].status}' state; cannot settle.` });
+        }
+        rentalPaymentLinkToken = tokenIn;
+      } else {
+        // contract_invoice_link — need both the link state and the invoice state.
+        const r = await db.query(
+          `SELECT cipl.tenant_id,
+                  cipl.status      AS link_status,
+                  ci.status        AS invoice_status
+             FROM contract_invoice_payment_links cipl
+             JOIN contract_invoices ci ON ci.id = cipl.contract_invoice_id
+            WHERE cipl.token = $1
+            LIMIT 1`,
+          [tokenIn]
+        );
+        if (!r.rows.length) {
+          return res.status(404).json({ error: 'Payment link not found.' });
+        }
+        if (Number(r.rows[0].tenant_id) !== Number(tenant.id)) {
+          return res.status(403).json({ error: 'Payment link does not belong to this tenant.' });
+        }
+        if (r.rows[0].link_status !== 'pending') {
+          return res.status(409).json({ error: `Payment link is in '${r.rows[0].link_status}' state; cannot settle.` });
+        }
+        if (['paid', 'void', 'cancelled'].includes(r.rows[0].invoice_status)) {
+          return res.status(409).json({ error: `Invoice is ${r.rows[0].invoice_status}; cannot settle.` });
+        }
+        contractInvoiceLinkToken = tokenIn;
+      }
+    }
+
     const orderId = generateMrc(slug);
 
     let cc;
@@ -175,12 +263,14 @@ router.post('/:slug/initiate', async (req, res) => {
     }
 
     const paymentId = await createPaymentRecord({
-      tenantId:         tenant.id,
+      tenantId:                 tenant.id,
       orderId,
-      captureContextId: cc.captureContext,
-      amount:           parseFloat(amount),
+      captureContextId:         cc.captureContext,
+      amount:                   parseFloat(amount),
       currency,
-      rawResponse:      cc.raw,
+      rawResponse:              cc.raw,
+      rentalPaymentLinkToken,   // PR-6a (null for booking flow)
+      contractInvoiceLinkToken, // PR-6a (null for booking flow)
     });
 
     logger.info({
@@ -191,6 +281,9 @@ router.post('/:slug/initiate', async (req, res) => {
       currency,
       targetOrigin,
       hasCaptureContext: !!cc.captureContext,
+      settleTargetKind:  rentalPaymentLinkToken ? 'rental_link'
+                       : contractInvoiceLinkToken ? 'contract_invoice_link'
+                       : null,
     }, '[bae] capture-context minted, pending payment row created');
 
     return res.json({
@@ -233,7 +326,11 @@ router.post('/:slug/complete', async (req, res) => {
     }
 
     const lookup = await db.query(
-      `SELECT id, status, booking_id FROM bank_etihad_payments
+      `SELECT id, status, booking_id,
+              rental_payment_link_token,
+              contract_invoice_link_token,
+              amount
+         FROM bank_etihad_payments
         WHERE tenant_id = $1 AND order_id = $2
         LIMIT 1`,
       [tenant.id, orderId]
@@ -322,7 +419,84 @@ router.post('/:slug/complete', async (req, res) => {
           bookingId: payment.booking_id,
         }, '[bae] booking flip failed (non-fatal)');
       }
-    } else if (isSuccess && !payment.booking_id) {
+    } else if (isSuccess && payment.rental_payment_link_token) {
+      // PR-6a: settle the rental_payment_link via the shared util. amountPaid:0
+      // engages the util's card-settle-all branch — the util resolves the
+      // link's CURRENT outstanding. expectedAmount carries the captured BAE
+      // amount (M1 silent-over-collection guard): the util throws
+      // amount_mismatch if outstanding has drifted (e.g. partial cash landed
+      // between /initiate and /complete), so the link stays untouched and we
+      // flag needs_reconcile instead of settling at the smaller outstanding
+      // while the customer's card is over-collected.
+      try {
+        const settle = await settleRentalLinkByToken({
+          token:          payment.rental_payment_link_token,
+          paidVia:        'card',
+          amountPaid:     0,
+          paymentRef:     orderId,
+          notes:          'BAE Unified Checkout',
+          expectedAmount: Number(payment.amount), // PR-6a M1
+        });
+        logger.info({
+          tenantId: tenant.id,
+          orderId,
+          paymentId: payment.id,
+          linkToken: payment.rental_payment_link_token,
+          status:    settle.status,
+          fullyPaid: settle.fullyPaid,
+        }, '[bae] rental payment link settled');
+      } catch (settleErr) {
+        needsReconcileReason = settleErr instanceof SettlementError
+          ? `settle_failed_${settleErr.code}`
+          : 'settle_failed';
+        logger.error({
+          err: settleErr,
+          tenantId: tenant.id,
+          orderId,
+          paymentId: payment.id,
+          linkToken: payment.rental_payment_link_token,
+          reason:    needsReconcileReason,
+        }, '[bae] rental link settle failed (will mark needs_reconcile)');
+      }
+    } else if (isSuccess && payment.contract_invoice_link_token) {
+      // PR-6a: settle the contract_invoice_payment_link via the shared util.
+      // The util owns its own transaction (BEGIN, SELECT FOR UPDATE, COMMIT)
+      // — race-safe against a concurrent rep recording a cash payment.
+      // expectedAmount enforces the M1 silent-over-collection guard, same as
+      // the rental branch: ROLLBACK + amount_mismatch if outstanding drifted.
+      try {
+        const settle = await settleContractInvoiceLinkByToken({
+          token:          payment.contract_invoice_link_token,
+          paidVia:        'card',
+          amountPaid:     0,
+          paymentRef:     orderId,
+          notes:          'BAE Unified Checkout',
+          expectedAmount: Number(payment.amount), // PR-6a M1
+        });
+        logger.info({
+          tenantId: tenant.id,
+          orderId,
+          paymentId: payment.id,
+          linkToken: payment.contract_invoice_link_token,
+          fullyPaid: settle.fullyPaid,
+        }, '[bae] contract invoice link settled');
+      } catch (settleErr) {
+        needsReconcileReason = settleErr instanceof SettlementError
+          ? `settle_failed_${settleErr.code}`
+          : 'settle_failed';
+        logger.error({
+          err: settleErr,
+          tenantId: tenant.id,
+          orderId,
+          paymentId: payment.id,
+          linkToken: payment.contract_invoice_link_token,
+          reason:    needsReconcileReason,
+        }, '[bae] invoice link settle failed (will mark needs_reconcile)');
+      }
+    } else if (isSuccess) {
+      // No settlement target attached at /initiate time — true orphan.
+      // The exclusivity CHECK guarantees we land here only when booking_id,
+      // rental_payment_link_token, and contract_invoice_link_token are all NULL.
       needsReconcileReason = 'orphan';
     }
 

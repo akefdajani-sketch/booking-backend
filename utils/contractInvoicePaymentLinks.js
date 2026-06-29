@@ -268,6 +268,7 @@ async function getLinkByToken(token) {
        t.slug                      AS tenant_slug,
        t.name                      AS tenant_name,
        t.timezone                  AS tenant_timezone,
+       t.payment_provider          AS tenant_payment_provider,
 
        cu.id                       AS customer_id,
        cu.name                     AS customer_name,
@@ -324,10 +325,13 @@ async function getLinkByToken(token) {
     },
 
     tenant: {
-      id:       r.tenant_id,
-      slug:     r.tenant_slug,
-      name:     r.tenant_name,
-      timezone: r.tenant_timezone,
+      id:              r.tenant_id,
+      slug:            r.tenant_slug,
+      name:            r.tenant_name,
+      timezone:        r.tenant_timezone,
+      // PR-6a: raw tenants.payment_provider — mirrors #497's convention
+      // (no normalization, null fallback). Frontend branches MPGS vs BAE.
+      paymentProvider: r.tenant_payment_provider || null,
     },
 
     customer: {

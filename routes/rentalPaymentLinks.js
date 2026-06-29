@@ -35,6 +35,11 @@ try {
   ({ createCheckoutSession } = require('../utils/network'));
 } catch { /* payment gateway optional */ }
 
+// PR-6a: settlement util — extracted from record-payment so BAE /complete can
+// settle a rental_payment_link through the same code path.
+const { settleRentalLinkByToken } = require('../utils/rentalPaymentLinkSettlement');
+const { SettlementError }         = require('../utils/settlementError');
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -294,6 +299,8 @@ router.get('/public/:token', async (req, res) => {
               r.building_name,
               r.property_details_json,
               t.name AS tenant_name, t.currency_code AS tenant_currency,
+              t.slug AS tenant_slug,
+              t.payment_provider,
               t.network_merchant_id,
               t.payment_gateway_active
        FROM rental_payment_links l
@@ -418,6 +425,13 @@ router.post('/public/:token/pay', async (req, res) => {
 // POST /api/rental-payment-links/public/:token/record-payment
 // Semi-public — rep records a cash or cliq payment.
 // Requires a simple rep PIN stored on the tenant (or use admin key).
+//
+// PR-6a known issue (NOT fixed here): the amountPaid guard below rejects
+// amountPaid===0 even for paidVia='card', breaking /pay/[token]'s MPGS
+// result page that posts {paidVia:'card', amountPaid:0} for card-settle-all.
+// BAE /complete calls settleRentalLinkByToken directly and bypasses this
+// guard, so the BAE card flow works; the MPGS card flow on this route
+// remains broken. Tracked as a follow-up.
 // ---------------------------------------------------------------------------
 router.post('/public/:token/record-payment', async (req, res) => {
   try {
@@ -427,45 +441,24 @@ router.post('/public/:token/record-payment', async (req, res) => {
     if (!paidVia) return res.status(400).json({ error: 'paidVia is required (cash | cliq)' });
     if (!amountPaid || Number(amountPaid) <= 0) return res.status(400).json({ error: 'amountPaid must be positive' });
 
-    const { rows } = await db.query(
-      `SELECT l.*, l.amount_requested, l.amount_paid AS prev_paid
-       FROM rental_payment_links l
-       WHERE l.token = $1 AND l.status IN ('pending','partial')`,
-      [token]
-    );
+    // PR-6a: settlement logic extracted to utils/rentalPaymentLinkSettlement.js
+    // so BAE /complete can call the same code path. Behavior here is
+    // byte-identical to the pre-extraction route — same SELECT, same
+    // non-transactional UPDATE, same status threshold, same error mapping.
+    let result;
+    try {
+      result = await settleRentalLinkByToken({ token, paidVia, amountPaid, paymentRef, notes });
+    } catch (e) {
+      if (e instanceof SettlementError) {
+        return res.status(e.httpStatus).json({ error: e.message });
+      }
+      throw e;
+    }
 
-    if (!rows.length) return res.status(404).json({ error: 'Active payment link not found' });
-
-    const link      = rows[0];
-    const newPaid   = Number(link.prev_paid) + Number(amountPaid);
-    const remaining = Number(link.amount_requested) - newPaid;
-    const newStatus = remaining <= 0.001 ? 'paid' : 'partial';
-
-    const r = await db.query(
-      `UPDATE rental_payment_links
-         SET amount_paid    = $1,
-             status         = $2,
-             paid_via       = $3,
-             payment_ref    = $4,
-             payment_notes  = $5,
-             paid_at        = $6
-       WHERE token = $7
-       RETURNING *`,
-      [
-        newPaid.toFixed(3),
-        newStatus,
-        paidVia,
-        paymentRef || null,
-        notes || null,
-        newStatus === 'paid' ? new Date().toISOString() : null,
-        token,
-      ]
-    );
-
-    logger.info({ token, paidVia, amountPaid, newStatus }, 'Payment recorded on rental link');
+    logger.info({ token, paidVia, amountPaid, newStatus: result.status }, 'Payment recorded on rental link');
 
     // ── WhatsApp payment received notification (non-fatal) ─────────────────
-    if (newStatus === 'paid') {
+    if (result.fullyPaid) {
       setImmediate(async () => {
         try {
           const { sendPaymentReceived, isWhatsAppConfigured } = require('../utils/whatsapp');
@@ -504,7 +497,7 @@ router.post('/public/:token/record-payment', async (req, res) => {
     }
     // ── End WhatsApp ──────────────────────────────────────────────────────────
 
-    return res.json({ ok: true, status: newStatus, remaining: Math.max(0, remaining), link: r.rows[0] });
+    return res.json({ ok: true, status: result.status, remaining: result.remaining, link: result.link });
   } catch (err) {
     logger.error({ err }, 'POST /rental-payment-links/public/:token/record-payment error');
     return res.status(500).json({ error: 'Failed to record payment' });
