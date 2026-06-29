@@ -57,6 +57,11 @@ try {
   ({ isTenantMpgsEnabled, createCheckoutSession } = require('../utils/network'));
 } catch { /* payment gateway optional */ }
 
+// PR-6a: settlement util — extracted from record-payment so BAE /complete
+// can settle a contract_invoice_payment_link through the same code path.
+const { settleContractInvoiceLinkByToken } = require('../utils/contractInvoiceLinkSettlement');
+const { SettlementError }                  = require('../utils/settlementError');
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -484,148 +489,47 @@ router.post('/public/:token/pay', async (req, res) => {
 // Body: { paidVia: 'cliq' | 'cash', amountPaid, paymentRef?, notes? }
 // ---------------------------------------------------------------------------
 router.post('/public/:token/record-payment', async (req, res) => {
-  const client = await db.pool.connect();
   try {
     const token = String(req.params.token || '').trim();
-    let { paidVia, amountPaid, paymentRef, notes } = req.body || {};
+    const { paidVia, amountPaid, paymentRef, notes } = req.body || {};
 
-    // G2-PL-3: card path uses this same endpoint after MPGS hosted checkout
-    // returns the customer to /pay-invoice/<token>/result. The orderId is
-    // the paymentRef. amountPaid=0 (or omitted) is interpreted as "settle
-    // the full outstanding balance" — same convention as rentalPaymentLinks.
-    const ALLOWED_METHODS = ['cliq', 'cash', 'card'];
-    if (!ALLOWED_METHODS.includes(paidVia)) {
-      return res.status(400).json({ error: "paidVia must be 'cliq', 'cash', or 'card'" });
-    }
-
-    let amount = Number(amountPaid);
-    const isCardSettleAll = paidVia === 'card' && (!amountPaid || amount === 0);
-    if (!isCardSettleAll) {
-      if (!Number.isFinite(amount) || amount <= 0) {
-        return res.status(400).json({ error: 'amountPaid must be a positive number' });
+    // PR-6a: settlement logic extracted to utils/contractInvoiceLinkSettlement.js.
+    // Transaction semantics preserved byte-identically — same BEGIN, same
+    // SELECT FOR UPDATE on both rows, same conditional UPDATEs, same COMMIT
+    // / ROLLBACK / release. BAE /complete calls the same util so the card
+    // path lands here regardless of which provider authorized it.
+    let result;
+    try {
+      result = await settleContractInvoiceLinkByToken({ token, paidVia, amountPaid, paymentRef, notes });
+    } catch (e) {
+      if (e instanceof SettlementError) {
+        return res.status(e.httpStatus).json({ error: e.message });
       }
+      throw e;
     }
-    // For card with paymentRef but no amount, we'll resolve outstanding inside
-    // the transaction below.
-
-    await client.query('BEGIN');
-
-    // Lock the link row + look up the invoice. SELECT FOR UPDATE prevents
-    // two concurrent record-payment calls from double-counting.
-    const linkRes = await client.query(
-      `SELECT cipl.id            AS link_id,
-              cipl.token,
-              cipl.status        AS link_status,
-              cipl.contract_invoice_id,
-              cipl.tenant_id,
-              ci.amount          AS invoice_amount,
-              ci.amount_paid     AS invoice_amount_paid,
-              ci.status          AS invoice_status,
-              ci.currency_code
-         FROM contract_invoice_payment_links cipl
-         JOIN contract_invoices ci ON ci.id = cipl.contract_invoice_id
-        WHERE cipl.token = $1
-          FOR UPDATE OF cipl, ci`,
-      [token]
-    );
-    if (!linkRes.rows.length) {
-      await client.query('ROLLBACK');
-      return res.status(404).json({ error: 'Payment link not found' });
-    }
-    const r = linkRes.rows[0];
-
-    if (r.link_status !== 'pending') {
-      await client.query('ROLLBACK');
-      return res.status(409).json({ error: `Link is in '${r.link_status}' state, cannot record payment` });
-    }
-    if (r.invoice_status === 'paid') {
-      await client.query('ROLLBACK');
-      return res.status(409).json({ error: 'Invoice already fully paid' });
-    }
-    if (['void', 'cancelled'].includes(r.invoice_status)) {
-      await client.query('ROLLBACK');
-      return res.status(409).json({ error: `Invoice is ${r.invoice_status}` });
-    }
-
-    // G2-PL-3: resolve "card settle all" path — amount = outstanding.
-    if (isCardSettleAll) {
-      amount = Number(r.invoice_amount) - Number(r.invoice_amount_paid);
-      if (amount <= 0) {
-        await client.query('ROLLBACK');
-        return res.status(409).json({ error: 'Nothing left to pay on this invoice' });
-      }
-    }
-
-    const newPaid    = Number(r.invoice_amount_paid) + amount;
-    const remaining  = Number(r.invoice_amount) - newPaid;
-    // Tolerance for floating-point — JOD has 3 decimals (fils), so 0.001 is one fils.
-    const fullyPaid  = remaining <= 0.001;
-    const newInvoiceStatus = fullyPaid ? 'paid' : 'partial';
-
-    // 1. Update the invoice (the source of truth for payment metadata).
-    await client.query(
-      `UPDATE contract_invoices
-          SET amount_paid    = $1,
-              status         = $2,
-              payment_method = $3,
-              payment_ref    = COALESCE($4, payment_ref),
-              payment_notes  = COALESCE($5, payment_notes),
-              paid_at        = CASE WHEN $2 = 'paid' THEN NOW() ELSE paid_at END
-        WHERE id = $6`,
-      [
-        newPaid.toFixed(3),
-        newInvoiceStatus,
-        paidVia,
-        paymentRef || null,
-        notes || null,
-        r.contract_invoice_id,
-      ]
-    );
-
-    // 2. Update the LINK only when fully paid. Partial payments keep the
-    //    link 'pending' so the customer can come back and finish paying.
-    if (fullyPaid) {
-      await client.query(
-        `UPDATE contract_invoice_payment_links
-            SET status = 'paid', paid_at = NOW()
-          WHERE id = $1`,
-        [r.link_id]
-      );
-    }
-
-    await client.query('COMMIT');
 
     logger.info(
       {
         token,
-        linkId:            r.link_id,
-        contractInvoiceId: r.contract_invoice_id,
+        linkId:            result.linkId,
+        contractInvoiceId: result.contractInvoiceId,
         paidVia,
-        amountPaid:        amount,
-        newInvoiceStatus,
-        fullyPaid,
+        amountPaid:        result.amountPaidApplied,
+        newInvoiceStatus:  result.invoice.status,
+        fullyPaid:         result.fullyPaid,
       },
       'Contract invoice payment recorded'
     );
 
     return res.json({
-      ok: true,
-      fullyPaid,
-      remaining: Math.max(0, remaining),
-      invoice: {
-        id:           r.contract_invoice_id,
-        amount:       r.invoice_amount,
-        amountPaid:   newPaid.toFixed(3),
-        status:       newInvoiceStatus,
-        currencyCode: r.currency_code,
-      },
+      ok:        true,
+      fullyPaid: result.fullyPaid,
+      remaining: result.remaining,
+      invoice:   result.invoice,
     });
   } catch (err) {
-    try { await client.query('ROLLBACK'); } catch (_) { /* best-effort */ }
     logger.error({ err: err.message }, 'POST /contract-invoice-payment-links/public/:token/record-payment error');
     return res.status(500).json({ error: 'Failed to record payment' });
-  } finally {
-    client.release();
   }
 });
 
