@@ -283,6 +283,14 @@ router.post('/:slug/complete', async (req, res) => {
     // row's current state. On failure we leave the booking alone; the sweep
     // will cancel the expired hold. Non-fatal: a flip error must not turn a
     // successful payment into a 500 to the browser.
+    //
+    // PAY-BAE (3.6): two paths leave a payment AUTHORIZED with no confirmed
+    // booking: flip rowCount===0 (booking already swept) and booking_id===NULL
+    // (orphan — back-edge never set). Mark needs_reconcile so a human can pair
+    // the money to a booking. status stays 'completed' — truthful that the
+    // payment authorized at Cybersource.
+    let needsReconcileReason = null;
+
     if (isSuccess && payment.booking_id) {
       try {
         const flip = await db.query(
@@ -303,6 +311,9 @@ router.post('/:slug/complete', async (req, res) => {
           bookingId: payment.booking_id,
           rowCount: flip.rowCount,
         }, '[bae] booking hold flipped to confirmed');
+        if (flip.rowCount === 0) {
+          needsReconcileReason = 'swept';
+        }
       } catch (flipErr) {
         logger.error({
           err: flipErr,
@@ -311,9 +322,47 @@ router.post('/:slug/complete', async (req, res) => {
           bookingId: payment.booking_id,
         }, '[bae] booking flip failed (non-fatal)');
       }
+    } else if (isSuccess && !payment.booking_id) {
+      needsReconcileReason = 'orphan';
+    }
+
+    if (isSuccess && needsReconcileReason) {
+      try {
+        await db.query(
+          `UPDATE bank_etihad_payments
+              SET needs_reconcile = true,
+                  updated_at      = NOW()
+            WHERE id = $1`,
+          [payment.id]
+        );
+      } catch (markErr) {
+        logger.error({
+          err: markErr,
+          tenantId: tenant.id,
+          orderId,
+          paymentId: payment.id,
+          reason: needsReconcileReason,
+        }, '[bae] needs_reconcile mark failed (non-fatal)');
+      }
+      logger.error({
+        tenantId: tenant.id,
+        orderId,
+        paymentId: payment.id,
+        bookingId: payment.booking_id || null,
+        reason: needsReconcileReason,
+      }, '[bae] payment authorized but booking not confirmed — needs reconcile');
     }
 
     if (isSuccess) {
+      if (needsReconcileReason) {
+        return res.json({
+          ok:             true,
+          status:         rawStatus || 'AUTHORIZED',
+          orderId,
+          needsReconcile: true,
+          reason:         needsReconcileReason,
+        });
+      }
       return res.json({ ok: true, status: rawStatus || 'AUTHORIZED', orderId });
     }
     return res.json({ ok: false, status: rawStatus || 'UNKNOWN', orderId });

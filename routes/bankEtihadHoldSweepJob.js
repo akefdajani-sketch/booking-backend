@@ -42,14 +42,24 @@ const logger      = require('../utils/logger');
 const requireAdmin = require('../middleware/requireAdmin');
 
 router.post('/bae-hold-sweep', requireAdmin, async (req, res) => {
+  const client = await db.connect();
   try {
-    // cross-tenant sweep: admin-only job, intentionally no tenant filter
-    // Single atomic UPDATE across all tenants. All four guards required:
-    //   - payment_hold_expires_at IS NOT NULL  → only BAE-held bookings
-    //   - payment_hold_expires_at < NOW()      → only expired ones
-    //   - status = 'pending'                   → race-safe vs. /complete flip
-    //   - payment_status = 'pending'           → race-safe vs. /complete flip
-    const { rowCount } = await db.query(`
+    // cross-tenant sweep: admin-only job, intentionally no tenant filter.
+    // Two coupled UPDATEs in one tx:
+    //   (1) cancel expired held bookings, RETURNING their ids
+    //   (2) expire the bank_etihad_payments rows linked to those bookings,
+    //       guarded by AND status='pending' so any row that already raced to
+    //       'completed' or 'failed' via /complete is left untouched.
+    // The four booking guards (NOT NULL, < NOW(), status='pending',
+    // payment_status='pending') make (1) race-safe vs. the /complete flip —
+    // only one side can match a given row's current state. Wrapping (1)+(2)
+    // in a tx keeps the booking-cancel and the payment-expire atomic, so we
+    // never leave a cancelled booking paired with a still-'pending' payment
+    // row that no later sweep would re-find (the booking is no longer
+    // 'pending', so it wouldn't reappear in (1)'s set).
+    await client.query('BEGIN');
+
+    const swept = await client.query(`
       UPDATE bookings
          SET status = 'cancelled',
              updated_at = NOW()
@@ -57,18 +67,43 @@ router.post('/bae-hold-sweep', requireAdmin, async (req, res) => {
          AND payment_hold_expires_at < NOW()
          AND status = 'pending'
          AND payment_status = 'pending'
+       RETURNING id
     `);
+    const expired       = swept.rowCount;
+    const cancelledIds  = swept.rows.map((r) => r.id);
 
-    logger.info({ expired: rowCount }, 'BAE hold sweep: cancelled expired holds');
+    let expiredPayments = 0;
+    if (cancelledIds.length > 0) {
+      const expireResult = await client.query(
+        `UPDATE bank_etihad_payments
+            SET status     = 'expired',
+                updated_at = NOW()
+          WHERE booking_id = ANY($1::int[])
+            AND status     = 'pending'`,
+        [cancelledIds]
+      );
+      expiredPayments = expireResult.rowCount;
+    }
+
+    await client.query('COMMIT');
+
+    logger.info(
+      { expired, expiredPayments },
+      'BAE hold sweep: cancelled expired holds'
+    );
 
     return res.json({
       ok: true,
-      expired: rowCount,
+      expired,
+      expiredPayments,
       ranAt: new Date().toISOString(),
     });
   } catch (err) {
+    try { await client.query('ROLLBACK'); } catch (_) { /* swallow rollback noise */ }
     logger.error({ err: err.message }, 'BAE hold sweep failed');
     return res.status(500).json({ error: 'BAE hold sweep failed.' });
+  } finally {
+    client.release();
   }
 });
 
