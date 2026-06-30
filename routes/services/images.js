@@ -2,6 +2,7 @@
 // POST/:id/image, DELETE/:id/image
 // Mounted by routes/services.js
 
+const fsp = require("fs/promises");
 const db = require("../../db");
 const { pool } = require("../../db");
 const requireAdminOrTenantRole = require("../../middleware/requireAdminOrTenantRole");
@@ -11,6 +12,7 @@ const { upload, uploadErrorHandler } = require("../../middleware/upload");
 const { uploadFileToR2, deleteFromR2, safeName } = require("../../utils/r2");
 const {
   resolveTenantFromServiceId,
+  getServicesColumns,
 } = require("../../utils/servicesHelpers");
 
 
