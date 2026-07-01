@@ -523,7 +523,8 @@ async function resolveTenantAppearanceSnapshot(tenantId) {
             t.banner_memberships_url,
             pt.key   AS platform_theme_key,
             pt.layout_key,
-            pt.tokens_json
+            pt.tokens_json,
+            pt.landing_tokens_json
      FROM tenants t
      LEFT JOIN platform_themes pt
             ON pt.key = t.theme_key AND pt.is_published = TRUE
@@ -553,6 +554,7 @@ async function resolveTenantAppearanceSnapshot(tenantId) {
   const brandOverrides = { ..._legacyOverrides, ..._brandingOverrides };
   const publishedThemeSchema = toObj(row.theme_schema_published_json);
   const platformTokens = toObj(row.tokens_json);
+  const landingTokens = toObj(row.landing_tokens_json);
   const premiumFamily = isPremiumFamily(themeKey, layoutKey);
   const isLightTheme = String(layoutKey).toLowerCase() === "premium_light";
 
@@ -617,6 +619,7 @@ async function resolveTenantAppearanceSnapshot(tenantId) {
     branding,
     brandOverrides,
     themeStudioTokens,
+    ...(Object.keys(landingTokens).length > 0 ? { landingTokens } : {}),
     resolvedCssVars,
     resolvedContractCssVars,
     landing: {
