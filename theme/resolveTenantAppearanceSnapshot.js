@@ -4,6 +4,7 @@ const { buildResolvedContractCssVars } = require("./buildResolvedContractCssVars
 // Phase 3.2-RETRY-2 (2026-05-10): import contract registry so we can map
 // Phase 3+ hyphenated theme keys to their canonical legacy layout family.
 const { REGISTRY: CONTRACT_REGISTRY } = require("./contractThemeRegistry");
+const { buildLandingData } = require("./snapshotLandingData");
 
 function toObj(v) {
   if (!v) return {};
@@ -608,6 +609,8 @@ async function resolveTenantAppearanceSnapshot(tenantId) {
     },
   };
 
+  const landingData = await buildLandingData(row.id);
+
   return {
     themeKey,
     layoutKey,
@@ -620,6 +623,7 @@ async function resolveTenantAppearanceSnapshot(tenantId) {
     brandOverrides,
     themeStudioTokens,
     ...(Object.keys(landingTokens).length > 0 ? { landingTokens } : {}),
+    landingData,
     resolvedCssVars,
     resolvedContractCssVars,
     landing: {
